@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 ADMIN_FIDUCIARY_ID = "00000000-0000-0000-0000-000000000000"
 
 

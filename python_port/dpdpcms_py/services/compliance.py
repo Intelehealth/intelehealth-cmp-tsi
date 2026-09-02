@@ -17,7 +17,12 @@ class ComplianceService(Service):
             where.append("status = %s")
             params.append(ctx.payload["status"])
         params.extend([limit, (page - 1) * limit])
-        return db.to_jsonable(db.all(f"SELECT * FROM purge_requests WHERE {' AND '.join(where)} ORDER BY initiated_at DESC LIMIT %s OFFSET %s", params))
+        return db.to_jsonable(
+            db.all(
+                f"SELECT * FROM purge_requests WHERE {' AND '.join(where)} ORDER BY initiated_at DESC LIMIT %s OFFSET %s",
+                params,
+            )
+        )
 
     def get_purge_request(self, ctx: RequestContext) -> dict:
         row = db.one("SELECT * FROM purge_requests WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
@@ -26,11 +31,21 @@ class ComplianceService(Service):
         return db.to_jsonable(row)
 
     def update_purge_status(self, ctx: RequestContext) -> dict:
-        db.execute("UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW() WHERE id = %s", (require(ctx.payload.get("status"), "status"), ctx.payload.get("details"), require(ctx.payload.get("id"), "id")))
+        db.execute(
+            "UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW() WHERE id = %s",
+            (
+                require(ctx.payload.get("status"), "status"),
+                ctx.payload.get("details"),
+                require(ctx.payload.get("id"), "id"),
+            ),
+        )
         return {"success": True}
 
     def assign_purge_request(self, ctx: RequestContext) -> dict:
-        db.execute("UPDATE purge_requests SET assigned_operator_id = %s, last_updated_at = NOW() WHERE id = %s", (require(ctx.payload.get("operator_id"), "operator_id"), require(ctx.payload.get("id"), "id")))
+        db.execute(
+            "UPDATE purge_requests SET assigned_operator_id = %s, last_updated_at = NOW() WHERE id = %s",
+            (require(ctx.payload.get("operator_id"), "operator_id"), require(ctx.payload.get("id"), "id")),
+        )
         return {"success": True}
 
 
@@ -72,18 +87,42 @@ class GrievanceService(Service):
             where.append("status = %s")
             params.append(ctx.payload["status"])
         params.extend([limit, (page - 1) * limit])
-        return db.to_jsonable(db.all(f"SELECT * FROM grievances WHERE {' AND '.join(where)} ORDER BY submission_timestamp DESC LIMIT %s OFFSET %s", params))
+        return db.to_jsonable(
+            db.all(
+                f"SELECT * FROM grievances WHERE {' AND '.join(where)} ORDER BY submission_timestamp DESC LIMIT %s OFFSET %s",
+                params,
+            )
+        )
 
     def list_user_grievances(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(db.all("SELECT * FROM grievances WHERE fiduciary_id = %s AND user_id = %s ORDER BY submission_timestamp DESC", (require(resolve_fiduciary(ctx), "fiduciary_id"), require(ctx.payload.get("user_id"), "user_id"))))
+        return db.to_jsonable(
+            db.all(
+                "SELECT * FROM grievances WHERE fiduciary_id = %s AND user_id = %s ORDER BY submission_timestamp DESC",
+                (require(resolve_fiduciary(ctx), "fiduciary_id"), require(ctx.payload.get("user_id"), "user_id")),
+            )
+        )
 
     def update_grievance_status(self, ctx: RequestContext) -> dict:
         gid = ctx.payload.get("grievance_id") or ctx.payload.get("id")
-        db.execute("UPDATE grievances SET status = %s, resolution_details = COALESCE(%s, resolution_details), resolution_timestamp = CASE WHEN %s IN ('RESOLVED','CLOSED') THEN NOW() ELSE resolution_timestamp END, last_updated_at = NOW() WHERE id = %s", (require(ctx.payload.get("status"), "status"), ctx.payload.get("resolution_details"), ctx.payload.get("status"), require(gid, "grievance_id")))
+        db.execute(
+            "UPDATE grievances SET status = %s, resolution_details = COALESCE(%s, resolution_details), resolution_timestamp = CASE WHEN %s IN ('RESOLVED','CLOSED') THEN NOW() ELSE resolution_timestamp END, last_updated_at = NOW() WHERE id = %s",
+            (
+                require(ctx.payload.get("status"), "status"),
+                ctx.payload.get("resolution_details"),
+                ctx.payload.get("status"),
+                require(gid, "grievance_id"),
+            ),
+        )
         return {"success": True}
 
     def assign_grievance(self, ctx: RequestContext) -> dict:
-        db.execute("UPDATE grievances SET assigned_dpo_user_id = %s, status = 'IN_PROGRESS', last_updated_at = NOW() WHERE id = %s", (require(ctx.payload.get("operator_id"), "operator_id"), require(ctx.payload.get("grievance_id"), "grievance_id")))
+        db.execute(
+            "UPDATE grievances SET assigned_dpo_user_id = %s, status = 'IN_PROGRESS', last_updated_at = NOW() WHERE id = %s",
+            (
+                require(ctx.payload.get("operator_id"), "operator_id"),
+                require(ctx.payload.get("grievance_id"), "grievance_id"),
+            ),
+        )
         return {"success": True}
 
     def add_grievance_communication(self, ctx: RequestContext) -> dict:
@@ -119,7 +158,12 @@ class BreachService(Service):
         return {"success": True, "breach_id": str(row["id"])}
 
     def list_breaches(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(db.all("SELECT * FROM breach_incidents WHERE fiduciary_id = %s ORDER BY reported_at DESC LIMIT %s", (require(resolve_fiduciary(ctx), "fiduciary_id"), int(ctx.payload.get("limit") or 50))))
+        return db.to_jsonable(
+            db.all(
+                "SELECT * FROM breach_incidents WHERE fiduciary_id = %s ORDER BY reported_at DESC LIMIT %s",
+                (require(resolve_fiduciary(ctx), "fiduciary_id"), int(ctx.payload.get("limit") or 50)),
+            )
+        )
 
     def get_breach(self, ctx: RequestContext) -> dict:
         row = db.one("SELECT * FROM breach_incidents WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
@@ -128,7 +172,14 @@ class BreachService(Service):
         return db.to_jsonable(row)
 
     def update_breach_status(self, ctx: RequestContext) -> dict:
-        db.execute("UPDATE breach_incidents SET status = %s, resolution_notes = COALESCE(%s, resolution_notes), last_updated_at = NOW() WHERE id = %s", (require(ctx.payload.get("status"), "status"), ctx.payload.get("resolution_notes"), require(ctx.payload.get("id"), "id")))
+        db.execute(
+            "UPDATE breach_incidents SET status = %s, resolution_notes = COALESCE(%s, resolution_notes), last_updated_at = NOW() WHERE id = %s",
+            (
+                require(ctx.payload.get("status"), "status"),
+                ctx.payload.get("resolution_notes"),
+                require(ctx.payload.get("id"), "id"),
+            ),
+        )
         return {"success": True}
 
     def download_breach_report(self, ctx: RequestContext) -> dict:

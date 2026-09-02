@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .. import db
@@ -37,7 +37,7 @@ def _point_granted(point: dict) -> bool:
     expiry = point.get("consent_expiry")
     if expiry:
         try:
-            if datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+            if datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) <= datetime.now(UTC):
                 return False
         except ValueError:
             pass
@@ -106,7 +106,13 @@ class ConsentService(Service):
                 ON CONFLICT (user_id, fiduciary_id) DO UPDATE SET
                     last_consent_mechanism = EXCLUDED.last_consent_mechanism
                 """,
-                (user_id, fid, payload.get("consent_mechanism", "CONSENT_GIVEN"), payload.get("age_category", "ADULT"), payload.get("verification_status", "NOT_VERIFIED")),
+                (
+                    user_id,
+                    fid,
+                    payload.get("consent_mechanism", "CONSENT_GIVEN"),
+                    payload.get("age_category", "ADULT"),
+                    payload.get("verification_status", "NOT_VERIFIED"),
+                ),
             )
         _notify_principal(user_id, fid, NOTIF_CONSENT_GIVEN)
         log_event(user_id, fid, "APP", None, "CONSENT_GIVEN", {"policy_id": policy_id, "record_id": cid})
@@ -140,13 +146,17 @@ class ConsentService(Service):
         if ctx.payload.get("policy_id"):
             where.append("policy_id = %s")
             params.append(ctx.payload["policy_id"])
-        row = db.one(f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT 1", params)
+        row = db.one(
+            f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT 1", params
+        )
         if not row:
             raise ApiError(404, "Not Found", "No active consent found.")
         return _consent_row(row)
 
     def get_consent_record_details(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM consent_records WHERE id = %s", (require(ctx.payload.get("record_id"), "record_id"),))
+        row = db.one(
+            "SELECT * FROM consent_records WHERE id = %s", (require(ctx.payload.get("record_id"), "record_id"),)
+        )
         if not row:
             raise ApiError(404, "Not Found", "Consent record not found.")
         return _consent_row(row)
@@ -207,13 +217,21 @@ class ConsentService(Service):
         return {"success": True, "data": out, "page": page, "limit": limit, "total": total["count"] if total else 0}
 
     def list_principals(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(db.all("SELECT * FROM data_principal WHERE fiduciary_id = %s ORDER BY created_at DESC LIMIT %s", (_fid(ctx), int(ctx.payload.get("limit") or 20))))
+        return db.to_jsonable(
+            db.all(
+                "SELECT * FROM data_principal WHERE fiduciary_id = %s ORDER BY created_at DESC LIMIT %s",
+                (_fid(ctx), int(ctx.payload.get("limit") or 20)),
+            )
+        )
 
     def link_user(self, ctx: RequestContext) -> dict:
         anon = require(ctx.payload.get("anonymous_user_id"), "anonymous_user_id")
         auth = require(ctx.payload.get("authenticated_user_id"), "authenticated_user_id")
         fid = _fid(ctx)
-        db.execute("UPDATE consent_records SET user_id = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s", (auth, anon, fid))
+        db.execute(
+            "UPDATE consent_records SET user_id = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s",
+            (auth, anon, fid),
+        )
         db.execute(
             """
             INSERT INTO data_principal (user_id, fiduciary_id, age_category, guardian_id, verification_status)
@@ -223,19 +241,31 @@ class ConsentService(Service):
                 guardian_id = EXCLUDED.guardian_id,
                 verification_status = EXCLUDED.verification_status
             """,
-            (auth, fid, ctx.payload.get("age_category", "ADULT"), ctx.payload.get("guardian_id"), ctx.payload.get("verification_status", "NOT_VERIFIED")),
+            (
+                auth,
+                fid,
+                ctx.payload.get("age_category", "ADULT"),
+                ctx.payload.get("guardian_id"),
+                ctx.payload.get("verification_status", "NOT_VERIFIED"),
+            ),
         )
         return {"success": True, "message": "User consent records linked successfully."}
 
     def validate_consent(self, ctx: RequestContext) -> dict:
         user_id = require(ctx.payload.get("user_id"), "user_id")
         purpose = require(ctx.payload.get("required_purpose_id"), "required_purpose_id")
-        row = db.one("SELECT id, data_point_consents FROM consent_records WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE ORDER BY timestamp DESC LIMIT 1", (user_id, _fid(ctx)))
+        row = db.one(
+            "SELECT id, data_point_consents FROM consent_records WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE ORDER BY timestamp DESC LIMIT 1",
+            (user_id, _fid(ctx)),
+        )
         valid = False
         if row:
             points = row.get("data_point_consents") or []
             valid = any(_point_grants(p, purpose) for p in points if isinstance(p, dict))
-        db.execute("INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)", (_fid(ctx), user_id, purpose, "VALID" if valid else "INVALID"))
+        db.execute(
+            "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
+            (_fid(ctx), user_id, purpose, "VALID" if valid else "INVALID"),
+        )
         return {"valid": valid, "status": "VALID" if valid else "INVALID", "required_purpose_id": purpose}
 
     def withdraw_consent(self, ctx: RequestContext) -> dict:
@@ -247,17 +277,37 @@ class ConsentService(Service):
     def _withdraw(self, ctx: RequestContext, erasure: bool) -> dict:
         fid = _fid(ctx)
         user_id = require(ctx.payload.get("user_id"), "user_id")
-        db.execute("UPDATE consent_records SET is_active_consent = FALSE, consent_status_general = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE", ("ERASURE_REQUESTED" if erasure else "WITHDRAWN", user_id, fid))
+        db.execute(
+            "UPDATE consent_records SET is_active_consent = FALSE, consent_status_general = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE",
+            ("ERASURE_REQUESTED" if erasure else "WITHDRAWN", user_id, fid),
+        )
         if erasure:
-            db.execute("INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details) VALUES (%s, %s, %s, 'ErasureRequest', %s)", (user_id, fid, ctx.payload.get("purpose_id", "ALL"), ctx.payload.get("reason")))
+            db.execute(
+                "INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details) VALUES (%s, %s, %s, 'ErasureRequest', %s)",
+                (user_id, fid, ctx.payload.get("purpose_id", "ALL"), ctx.payload.get("reason")),
+            )
         _notify_principal(user_id, fid, NOTIF_ERASURE_REQUESTED if erasure else NOTIF_WITHDRAWAL_ACK)
-        log_event(user_id, fid, "APP", None, "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN", {"reason": ctx.payload.get("reason")})
-        return {"success": True, "message": "Erasure request submitted." if erasure else "Consent withdrawn successfully."}
+        log_event(
+            user_id,
+            fid,
+            "APP",
+            None,
+            "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
+            {"reason": ctx.payload.get("reason")},
+        )
+        return {
+            "success": True,
+            "message": "Erasure request submitted." if erasure else "Consent withdrawn successfully.",
+        }
 
 
 class PrincipalService(Service):
     def list_active_fiduciaries(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(db.all("SELECT id AS fiduciary_id, name, primary_domain FROM fiduciaries WHERE status = 'ACTIVE' ORDER BY name"))
+        return db.to_jsonable(
+            db.all(
+                "SELECT id AS fiduciary_id, name, primary_domain FROM fiduciaries WHERE status = 'ACTIVE' ORDER BY name"
+            )
+        )
 
     def list_fiduciary_personas(self, ctx: RequestContext) -> list[dict]:
         """Personas a principal can declare pre-login (Customer, Employee, Vendor...).
@@ -267,8 +317,9 @@ class PrincipalService(Service):
         data_principal rows or any other personal data.
         """
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
-        return db.to_jsonable(db.all(
-            """
+        return db.to_jsonable(
+            db.all(
+                """
             SELECT DISTINCT
                    lower(replace(trim(cat), ' ', '_')) AS id,
                    trim(cat)                           AS label
@@ -280,8 +331,9 @@ class PrincipalService(Service):
             ORDER BY label
             LIMIT 100
             """,
-            (fid,),
-        ))
+                (fid,),
+            )
+        )
 
     def request_principal_otp(self, ctx: RequestContext) -> dict:
         otp = f"{random.randint(100000, 999999)}"
@@ -307,5 +359,6 @@ class WalletService(Service):
             return ConsentService().record_consent(ctx)
         if action == "GET_POLICY_PURPOSES":
             from .catalog import PolicyService
+
             return PolicyService().get_active_policy(ctx)
         return {"success": True}
