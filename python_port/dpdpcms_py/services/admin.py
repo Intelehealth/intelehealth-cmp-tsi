@@ -7,7 +7,7 @@ from ..audit import log_event
 from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..errors import ApiError
 from ..security import hash_password, passphrase, token, verify_password
-from .base import Service, page_limit, require
+from .base import Service, require
 
 
 def authenticated_user_id(ctx: RequestContext) -> str | None:
@@ -57,7 +57,11 @@ class AdminSetupService(Service):
             """,
             (name, email, *db.bind_encrypt(email), *db.bind_hmac(email), hash_password(password)),
         )
-        return {"success": True, "message": "Super Administrator created successfully.", "data": {"user_id": str(row["id"]), "role": "ADMIN"}}
+        return {
+            "success": True,
+            "message": "Super Administrator created successfully.",
+            "data": {"user_id": str(row["id"]), "role": "ADMIN"},
+        }
 
 
 class OperatorService(Service):
@@ -66,7 +70,7 @@ class OperatorService(Service):
         password = require(ctx.payload.get("password"), "password")
         row = db.one(
             f"""
-            SELECT o.id, o.name, {db.decrypt_col('o.email_enc')} AS email, o.password_hash,
+            SELECT o.id, o.name, {db.decrypt_col("o.email_enc")} AS email, o.password_hash,
                    o.status, o.role, o.fiduciary_id, f.name AS fiduciary_name
             FROM operators o LEFT JOIN fiduciaries f ON o.fiduciary_id = f.id
             WHERE o.name = %s OR o.email_hmac = {db.hmac_expr()}
@@ -74,11 +78,25 @@ class OperatorService(Service):
             (*db.bind_key(), identifier, *db.bind_hmac(identifier)),
         )
         if not row or row["status"] != "ACTIVE" or not verify_password(password, row["password_hash"]):
-            log_event(identifier, ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", None, "LOGIN_FAILURE", "Invalid credentials or account inactive.")
+            log_event(
+                identifier,
+                ADMIN_FIDUCIARY_ID,
+                "ADMIN_CONSOLE",
+                None,
+                "LOGIN_FAILURE",
+                "Invalid credentials or account inactive.",
+            )
             raise ApiError(401, "Unauthorized", "Invalid credentials or account inactive.")
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ADMIN_FIDUCIARY_ID
         jwt_token = token(row["email"], row["name"], row["role"])
-        log_event(identifier, fid, "DPO_CONSOLE" if row["role"] == "DPO" else "ADMIN_CONSOLE", str(row["id"]), "LOGIN_SUCCESS", "Operator Access Granted")
+        log_event(
+            identifier,
+            fid,
+            "DPO_CONSOLE" if row["role"] == "DPO" else "ADMIN_CONSOLE",
+            str(row["id"]),
+            "LOGIN_SUCCESS",
+            "Operator Access Granted",
+        )
         out = {"success": True, "token": jwt_token, "role": row["role"], "username": row["name"], "fiduciary_id": fid}
         if row.get("fiduciary_name"):
             out["fiduciary_name"] = row["fiduciary_name"]
@@ -100,16 +118,18 @@ class OperatorService(Service):
             where.append("(u.name ILIKE %s OR u.email_plaintext ILIKE %s)")
             params.extend([f"%{search}%", f"%{search}%"])
         sql_where = "WHERE " + " AND ".join(where) if where else ""
-        return db.to_jsonable(db.all(
-            f"""
-            SELECT u.id AS user_id, u.name AS username, {db.decrypt_col('u.email_enc')} AS email,
+        return db.to_jsonable(
+            db.all(
+                f"""
+            SELECT u.id AS user_id, u.name AS username, {db.decrypt_col("u.email_enc")} AS email,
                    u.status, u.role, u.fiduciary_id, f.name AS fiduciary_name
             FROM operators u LEFT JOIN fiduciaries f ON u.fiduciary_id = f.id
             {sql_where}
             ORDER BY u.created_at DESC
             """,
-            params,
-        ))
+                params,
+            )
+        )
 
     def get_user(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
@@ -145,7 +165,9 @@ class OperatorService(Service):
             """,
             (username, email, *db.bind_encrypt(email), *db.bind_hmac(email), hash_password(password), role, fid),
         )
-        log_event(email, fid or ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", login_uid, "USER_CREATED", f"Role assigned: {role}")
+        log_event(
+            email, fid or ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", login_uid, "USER_CREATED", f"Role assigned: {role}"
+        )
         return {"success": True, "user_id": str(row["id"])}
 
     def update_user(self, ctx: RequestContext) -> dict:
@@ -164,19 +186,28 @@ class OperatorService(Service):
 
     def deactivate_user(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
-        db.execute("UPDATE operators SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s AND role != 'ADMIN'", (uid,))
+        db.execute(
+            "UPDATE operators SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s AND role != 'ADMIN'",
+            (uid,),
+        )
         return {"success": True}
 
     def generate_recovery_key(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
         phrase = passphrase()
-        db.execute("UPDATE operators SET recovery_key_hash = %s, last_updated_at = NOW() WHERE id = %s", (hash_password(phrase), uid))
+        db.execute(
+            "UPDATE operators SET recovery_key_hash = %s, last_updated_at = NOW() WHERE id = %s",
+            (hash_password(phrase), uid),
+        )
         return {"success": True, "passphrase": phrase}
 
     def verify_recovery_key(self, ctx: RequestContext) -> dict:
         email = require(ctx.payload.get("email"), "email")
         phrase = require(ctx.payload.get("passphrase"), "passphrase")
-        row = db.one(f"SELECT recovery_key_hash FROM operators WHERE email_hmac = {db.hmac_expr()} AND status = 'ACTIVE'", db.bind_hmac(email))
+        row = db.one(
+            f"SELECT recovery_key_hash FROM operators WHERE email_hmac = {db.hmac_expr()} AND status = 'ACTIVE'",
+            db.bind_hmac(email),
+        )
         if not row or not verify_password(phrase, row["recovery_key_hash"]):
             raise ApiError(401, "Unauthorized", "Invalid verification key.")
         return {"success": True}
@@ -202,7 +233,9 @@ class AdminDashService(Service):
         return {
             "success": True,
             "metrics": {
-                "active_fiduciaries": _count("SELECT COUNT(*) AS count FROM fiduciaries WHERE status IN ('ACTIVE', 'PENDING')"),
+                "active_fiduciaries": _count(
+                    "SELECT COUNT(*) AS count FROM fiduciaries WHERE status IN ('ACTIVE', 'PENDING')"
+                ),
                 "active_processors": _count("SELECT COUNT(*) AS count FROM apps WHERE status = 'ACTIVE'"),
                 "failed_purges": _count("SELECT COUNT(*) AS count FROM purge_requests WHERE status = 'FAILED'"),
             },
@@ -216,21 +249,53 @@ class AdminDashService(Service):
         return {
             "success": True,
             "metrics": {
-                "active_policies": _count("SELECT COUNT(*) AS count FROM consent_policies WHERE fiduciary_id = %s AND status = 'ACTIVE' AND created_at BETWEEN %s::timestamp AND %s::timestamp", window),
-                "total_consents": _count("SELECT COUNT(*) AS count FROM consent_records WHERE fiduciary_id = %s AND timestamp BETWEEN %s::timestamp AND %s::timestamp", window),
-                "data_principals": _count("SELECT COUNT(*) AS count FROM data_principal WHERE fiduciary_id = %s AND created_at BETWEEN %s::timestamp AND %s::timestamp", window),
-                "purge_total": _count("SELECT COUNT(*) AS count FROM purge_requests WHERE fiduciary_id = %s AND initiated_at BETWEEN %s::timestamp AND %s::timestamp", window),
-                "purge_pending": _count("SELECT COUNT(*) AS count FROM purge_requests WHERE fiduciary_id = %s AND status NOT IN ('PURGE_COMPLETED','LEGAL_HOLD_APPLIED') AND initiated_at BETWEEN %s::timestamp AND %s::timestamp", window),
-                "grievances_total": _count("SELECT COUNT(*) AS count FROM grievances WHERE fiduciary_id = %s AND submission_timestamp BETWEEN %s::timestamp AND %s::timestamp", window),
-                "grievances_pending": _count("SELECT COUNT(*) AS count FROM grievances WHERE fiduciary_id = %s AND status NOT IN ('RESOLVED') AND submission_timestamp BETWEEN %s::timestamp AND %s::timestamp", window),
-                "ropa_active": _count("SELECT COUNT(*) AS count FROM ropa_entries WHERE fiduciary_id = %s AND status = 'active' AND created_at BETWEEN %s::timestamp AND %s::timestamp", window),
-                "ropa_draft": _count("SELECT COUNT(*) AS count FROM ropa_entries WHERE fiduciary_id = %s AND status = 'draft' AND created_at BETWEEN %s::timestamp AND %s::timestamp", window),
+                "active_policies": _count(
+                    "SELECT COUNT(*) AS count FROM consent_policies WHERE fiduciary_id = %s AND status = 'ACTIVE' AND created_at BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "total_consents": _count(
+                    "SELECT COUNT(*) AS count FROM consent_records WHERE fiduciary_id = %s AND timestamp BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "data_principals": _count(
+                    "SELECT COUNT(*) AS count FROM data_principal WHERE fiduciary_id = %s AND created_at BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "purge_total": _count(
+                    "SELECT COUNT(*) AS count FROM purge_requests WHERE fiduciary_id = %s AND initiated_at BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "purge_pending": _count(
+                    "SELECT COUNT(*) AS count FROM purge_requests WHERE fiduciary_id = %s AND status NOT IN ('PURGE_COMPLETED','LEGAL_HOLD_APPLIED') AND initiated_at BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "grievances_total": _count(
+                    "SELECT COUNT(*) AS count FROM grievances WHERE fiduciary_id = %s AND submission_timestamp BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "grievances_pending": _count(
+                    "SELECT COUNT(*) AS count FROM grievances WHERE fiduciary_id = %s AND status NOT IN ('RESOLVED') AND submission_timestamp BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "ropa_active": _count(
+                    "SELECT COUNT(*) AS count FROM ropa_entries WHERE fiduciary_id = %s AND status = 'active' AND created_at BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
+                "ropa_draft": _count(
+                    "SELECT COUNT(*) AS count FROM ropa_entries WHERE fiduciary_id = %s AND status = 'draft' AND created_at BETWEEN %s::timestamp AND %s::timestamp",
+                    window,
+                ),
             },
         }
 
     def list_pending_grievances(self, ctx: RequestContext) -> list[dict]:
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
-        return db.to_jsonable(db.all("SELECT * FROM grievances WHERE fiduciary_id = %s AND status IN ('NEW','IN_PROGRESS','ESCALATED') ORDER BY due_date ASC NULLS LAST LIMIT %s", (fid, int(ctx.payload.get("limit") or 10))))
+        return db.to_jsonable(
+            db.all(
+                "SELECT * FROM grievances WHERE fiduciary_id = %s AND status IN ('NEW','IN_PROGRESS','ESCALATED') ORDER BY due_date ASC NULLS LAST LIMIT %s",
+                (fid, int(ctx.payload.get("limit") or 10)),
+            )
+        )
 
     def list_access_logs(self, ctx: RequestContext) -> list[dict]:
         limit = int(ctx.payload.get("limit") or 10)

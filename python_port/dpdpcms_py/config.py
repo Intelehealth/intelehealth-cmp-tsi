@@ -64,16 +64,12 @@ class Settings:
         return f"postgresql://{user}:{password}@{host}:{port}/{db}?sslmode={sslmode}"
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls) -> Settings:
         brand = os.getenv("BRAND_NAME", "TSI DPDP CMS").strip() or "TSI DPDP CMS"
         if len(brand) > 12:
             raise RuntimeError("BRAND_NAME must be 12 characters or fewer.")
 
-        allowed = tuple(
-            origin.strip()
-            for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
-            if origin.strip()
-        )
+        allowed = tuple(origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip())
         return cls(
             db_dsn=cls._dsn_from_env(),
             db_encryption_key=_secret("DB_ENCRYPTION_KEY"),

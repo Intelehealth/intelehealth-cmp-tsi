@@ -4,17 +4,15 @@ import base64
 import hashlib
 import hmac
 import secrets
-import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
 import jwt
 
-from .config import settings
 from . import db
-
+from .config import settings
 
 # The Java port verifies these hashes with jBCrypt 0.4, which accepts only the
 # $2$ and $2a$ revisions -- bcrypt's default $2b$ makes it throw "Invalid salt
@@ -48,7 +46,7 @@ def passphrase() -> str:
 
 
 def token(email: str, name: str, role: str, subject: str | None = None, extra: dict[str, Any] | None = None) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": subject or email,
         "email": email,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 class ApiError(Exception):
@@ -13,7 +13,7 @@ class ApiError(Exception):
 
 def error_body(status: int, error: str, message: str, path: str) -> dict:
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "status": status,
         "error": error,
         "message": message,
