@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSI DPDP CMS - Reports</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --tsi-primary: #006A67;
+            --tsi-accent: #008D8A;
+            --background: #f4fbf9;
+            --card-bg: #FFFFFF;
+            --radius: 0.5rem;
+        }
+
+        body {
+            background-color: var(--background);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        .primary-bg { background-color: var(--tsi-primary); }
+        .primary-text { color: var(--tsi-primary); }
+
+        .sidebar {
+            width: 250px; background-color: #f8fafc; box-shadow: 2px 0 5px rgba(0, 0, 0, 0.05);
+            padding-top: 20px; position: fixed; height: 100vh; z-index: 50;
+        }
+
+        .nav-link {
+            display: flex; align-items: center; padding: 10px 20px; margin: 5px 0;
+            border-radius: 6px; color: #4a5568; transition: all 0.2s ease;
+        }
+
+        .nav-link:hover, .nav-link.active { background-color: #e5f5f4; color: var(--tsi-primary); font-weight: 600; }
+
+        .card {
+            background-color: var(--card-bg); border-radius: var(--radius);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1); padding: 24px; border: 1px solid #e2e8f0;
+        }
+
+        .status-pill {
+            font-size: 0.65rem; font-weight: 800; padding: 2px 8px; border-radius: 9999px; text-transform: uppercase;
+        }
+    </style>
+</head>
+
+<body class="flex lg:p-0">
+
+<!-- Sidebar Navigation -->
+<div id="sidebar" class="sidebar lg:relative flex flex-col justify-between">
+    <div>
+        <div class="px-5 pb-6 border-b border-gray-200">
+            <span class="text-xl font-bold primary-text">TSI DPDP CMS</span>
+        </div>
+        <nav class="flex flex-col space-y-1 mt-4 px-3">
+            <a href="dashboard.html" class="nav-link">Dashboard</a>
+            <a href="policies.html" class="nav-link">Policies</a>
+            <a href="ropa.html" class="nav-link">ROPA</a>
+            <a href="principals.html" class="nav-link">Principals</a>
+            <a href="consents.html" class="nav-link">Consents</a>
+            <a href="compliance.html" class="nav-link">Compliance</a>
+            <a href="grievances.html" class="nav-link">Grievances</a>
+            <a href="breach.html" class="nav-link">Breach</a>
+            <a href="audit.html" class="nav-link">Audit</a>
+            <a href="legal.html" class="nav-link">Legal</a>
+            <a href="reports.html" class="nav-link active">Reports</a>
+            <a href="team.html" class="nav-link">Team</a>
+            <a href="settings.html" class="nav-link">Settings</a>
+        </nav>
+    </div>
+    <div class="p-3 border-t border-gray-200">
+        <div class="mt-2 text-sm text-gray-500 p-2 rounded-md hover:bg-gray-100 cursor-pointer flex justify-between items-center">
+            <span id="username" class="font-bold text-slate-700">DPO User</span>
+            <a href="#" onclick="handleLogout()"><span class="text-xs font-semibold text-red-500">Logout</span></a>
+        </div>
+    </div>
+</div>
+
+<!-- Backdrop for mobile menu -->
+<div id="sidebar-backdrop" class="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden hidden"></div>
+
+<!-- Main Content -->
+<main class="flex-1 p-8">
+    <header class="mb-8">
+        <h1 class="text-2xl font-black text-slate-800 tracking-tight">Reporting & Bulk Exports</h1>
+        <p class="text-sm text-slate-500">Submit background jobs for regulatory evidence and data portability dumps.</p>
+    </header>
+
+    <!-- Initiation Card -->
+    <div class="card mb-8">
+        <h2 class="text-lg font-bold primary-text mb-4">Submit New Export Job</h2>
+        <form id="job-form" class="space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div class="md:col-span-1">
+                    <label class="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Export Category</label>
+                    <select id="export-subtype" required class="w-full p-2.5 border border-slate-200 rounded-lg text-sm bg-slate-50">
+                        <option value="CONSENT">Consent Records</option>
+                        <option value="PRINCIPAL">Data Principals</option>
+                        <option value="COMPLIANCE">Compliance Log</option>
+                        <option value="GRIEVANCE">Grievance Log</option>
+                        <option value="AUDIT">Audit Log</option>
+                        <option value="PARENT_CONSENT">Parent Consent Log</option>
+                        <option value="ROPA_REPORT">ROPA Report</option>
+                    </select>
+                </div>
+                <div class="md:col-span-1">
+                    <label class="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Start Date</label>
+                    <input type="date" id="start-date" required class="w-full p-2 border border-slate-200 rounded-lg text-sm">
+                </div>
+                <div class="md:col-span-1">
+                    <label class="block text-xs font-black text-slate-400 uppercase tracking-widest mb-2">End Date</label>
+                    <input type="date" id="end-date" required class="w-full p-2 border border-slate-200 rounded-lg text-sm">
+                </div>
+                <div class="flex items-end">
+                    <button type="submit" id="submit-job-btn" class="w-full py-2.5 primary-bg text-white rounded-lg font-bold text-sm shadow-lg hover:bg-opacity-90 transition-all flex items-center justify-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        Initiate Export
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <!-- Background Job Monitor -->
+    <div class="card">
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-lg font-bold text-slate-800">Background Task Queue</h2>
+            <button onclick="loadJobs()" class="text-[10px] font-black text-teal-600 uppercase tracking-widest hover:underline">Refresh Status</button>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-left">
+                <thead>
+                <tr class="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                    <th class="pb-4 px-2">Job Reference</th>
+                    <th class="pb-4 px-2">Subtype</th>
+                    <th class="pb-4 px-2">Requested On</th>
+                    <th class="pb-4 px-2">Status</th>
+                    <th class="pb-4 px-2 text-right">Action</th>
+                </tr>
+                </thead>
+                <tbody id="job-table-body" class="text-sm divide-y divide-slate-50">
+                <!-- Rows dynamically populated -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+</main>
+
+<script>
+        function esc(s) {
+            if (s == null) return '';
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+        }
+
+        const API_URL_JOBS = '/api/v1/admin/job';
+        const FIDUCIARY_ID = localStorage.getItem('fiduciary_id') || 'fiduciary_hub_abc';
+        const AUTH_TOKEN = localStorage.getItem('authToken');
+        if (localStorage.getItem('role') === 'OPERATOR') {
+            document.querySelectorAll('a[href="policies.html"], a[href="settings.html"], a[href="team.html"]').forEach(el => el.remove());
+        }
+        const USER_NAME = localStorage.getItem('username');
+        document.getElementById('username').textContent = USER_NAME || 'DPO User';
+        // --- Core Functions ---
+
+        async function loadJobs() {
+            const tbody = document.getElementById('job-table-body');
+            try {
+                const response = await fetch(API_URL_JOBS, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                    body: JSON.stringify({ "_func": "list_jobs", "fiduciary_id": FIDUCIARY_ID, "job_type": "EXPORT"})
+                });
+
+                if (response.ok) {
+                    const jobs = await response.json();
+
+                    if (jobs.status === 401) {
+                        alert("Session Expired: " + (jobs.message || "Authentication required."));
+                        handleLogout();
+                        return;
+                    }
+
+                    renderJobTable(jobs.data || jobs);
+                }
+            } catch (e) { console.error("Failed to load background jobs", e); }
+        }
+
+        function renderJobTable(jobs) {
+            const tbody = document.getElementById('job-table-body');
+            if (!jobs || jobs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="py-10 text-center text-slate-400 italic">No background tasks found.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = jobs.map(job => {
+                const statusColor = getStatusColor(job.status);
+                const isComplete = job.status === 'COMPLETED';
+
+                return `
+                    <tr class="hover:bg-slate-50/50 transition-colors">
+                        <td class="py-4 px-2 font-mono text-[11px] text-slate-500">...${esc(job.id.slice(-12))}</td>
+                        <td class="py-4 px-2 font-bold text-slate-700">${esc(job.subtype)}</td>
+                        <td class="py-4 px-2 text-slate-500">${esc(new Date(job.created_at).toLocaleString())}</td>
+                        <td class="py-4 px-2">
+                            <span class="status-pill ${statusColor}">${esc(job.status)}</span>
+                        </td>
+                        <td class="py-4 px-2 text-right">
+                            ${isComplete
+                                ? `<button data-jid="${esc(job.id)}" class="dl-btn text-teal-600 font-bold hover:underline flex items-center justify-end gap-1 ml-auto">
+                                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                                     Download CSV
+                                   </button>`
+                                : `<span class="text-slate-300 italic text-[11px]">Preparing...</span>`}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+            tbody.querySelectorAll('.dl-btn').forEach(btn => {
+                btn.addEventListener('click', () => downloadFile(btn.dataset.jid));
+            });
+        }
+
+        function getStatusColor(status) {
+            switch (status) {
+                case 'PENDING': return 'bg-slate-100 text-slate-600';
+                case 'RUNNING': return 'bg-amber-100 text-amber-700 animate-pulse';
+                case 'COMPLETED': return 'bg-green-100 text-green-700';
+                case 'FAILED': return 'bg-red-100 text-red-700';
+                default: return 'bg-gray-100 text-gray-500';
+            }
+        }
+
+        // --- Action Handlers ---
+
+        document.getElementById('job-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submit-job-btn');
+            btn.disabled = true;
+            btn.innerHTML = `<svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Scheduling...`;
+
+            const payload = {
+                "_func": "create_job",
+                "job_type": "EXPORT",
+                "subtype": document.getElementById('export-subtype').value,
+                "start_date": document.getElementById('start-date').value,
+                "end_date": document.getElementById('end-date').value,
+                "fiduciary_id": FIDUCIARY_ID
+            };
+
+            try {
+                const response = await fetch(API_URL_JOBS, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    alert("Export Job successfully added to the queue. Artifact will be ready for review once completed.");
+                    loadJobs();
+                } else {
+                    alert("Failed to initiate export. Check system logs.");
+                }
+            } catch (err) {
+                alert("Network error: Backend registry not responding.");
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = `Initiate Export`;
+            }
+        };
+
+        async function downloadFile(jobId) {
+            window.location.href = `${API_URL_JOBS}?_func=download_file&job_id=${jobId}&auth=${AUTH_TOKEN}`;
+        }
+
+        function handleLogout() {
+          localStorage.removeItem('authToken');
+          localStorage.removeItem('username');
+          window.location.href = "../index.html";
+        }
+
+        // --- Init ---
+        window.onload = () => {
+            loadJobs();
+            // Poll for status updates every 30 seconds
+            setInterval(loadJobs, 30000);
+        };
+    </script>
+</body>
+
+</html>

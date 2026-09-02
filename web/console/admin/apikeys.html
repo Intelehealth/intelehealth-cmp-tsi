@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TSI DPDP CMS - API Keys Management</title>
+  <!-- Load Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --tsi-primary: #006A67; /* Primary Dark Teal Color */
+      --tsi-accent: #008D8A; /* Slightly lighter for accents */
+      --background: #f4fbf9; /* Light, clean background */
+      --card-bg: #FFFFFF;
+      --border: 20 5.9% 90%;
+      --radius: 0.5rem;
+    }
+
+    body {
+      background-color: var(--background);
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+    }
+
+    .primary-bg { background-color: var(--tsi-primary); }
+    .primary-text { color: var(--tsi-primary); }
+    .accent-text { color: var(--tsi-accent); }
+    .border-primary { border-color: var(--tsi-primary); }
+
+    /* --- Sidebar Styling --- */
+    .sidebar {
+      width: 250px;
+      background-color: #f8fafc;
+      box-shadow: 2px 0 5px rgba(0, 0, 0, 0.05);
+      padding-top: 20px;
+      position: fixed;
+      height: 100vh;
+      overflow-y: auto;
+      z-index: 50;
+      transition: transform 0.3s ease-in-out;
+      transform: translateX(-250px);
+    }
+
+    .sidebar.open {
+      transform: translateX(0);
+    }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      padding: 10px 20px;
+      margin: 5px 0;
+      border-radius: 6px;
+      color: #4a5568;
+      transition: background-color 0.2s ease, color 0.2s ease;
+    }
+
+    .nav-link:hover, .nav-link.active {
+      background-color: #e5f5f4;
+      color: var(--tsi-primary);
+      font-weight: 600;
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border-radius: var(--radius);
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+      padding: 20px;
+      border: 1px solid #e2e8f0;
+    }
+
+    .table-header {
+      background-color: #f1f5f9;
+      font-weight: 600;
+      color: #4a5568;
+      text-align: left;
+    }
+
+    /* --- Mobile Toggle Button --- */
+    .mobile-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 20px;
+      background-color: #ffffff;
+      border-bottom: 1px solid #e2e8f0;
+      position: sticky;
+      top: 0;
+      z-index: 40;
+    }
+
+    @media (min-width: 1024px) {
+      .sidebar {
+        transform: translateX(0);
+      }
+      .mobile-header {
+        display: none;
+      }
+      body {
+        padding-left: 250px;
+      }
+    }
+
+    /* Modal Styles */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.6);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+
+    .modal-content {
+      background: white;
+      padding: 30px;
+      border-radius: var(--radius);
+      max-width: 700px;
+      width: 95%;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+      position: relative;
+    }
+
+    .modal-footer {
+      margin-top: 20px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+  </style>
+</head>
+
+<body class="flex lg:p-0">
+
+<!-- Mobile Header/Toggle -->
+<div class="mobile-header lg:hidden">
+  <button id="menu-toggle" class="p-2 rounded-md hover:bg-gray-100 primary-text">
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-6 w-6"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+  </button>
+  <span class="text-xl font-bold primary-text">API Keys</span>
+  <div class="text-sm text-gray-500">Admin User</div>
+</div>
+
+<!-- Sidebar Navigation -->
+<div id="sidebar" class="sidebar lg:relative flex flex-col justify-between">
+  <div>
+    <div class="px-5 pb-6 border-b border-gray-200 lg:block hidden">
+      <span class="text-xl font-bold primary-text">TSI DPDP CMS</span>
+    </div>
+    <nav class="flex flex-col space-y-1 mt-4 px-3">
+      <a href="dashboard.html" class="nav-link">
+        Dashboard
+      </a>
+      <a href="fiduciaries.html" class="nav-link">
+        Fiduciaries
+      </a>
+      <a href="apps.html" class="nav-link">
+        Apps
+      </a>
+      <a href="users.html" class="nav-link">
+        CMS Users
+      </a>
+      <!--<a href="lifecycle.html" class="nav-link">
+        Lifecycle
+      </a>-->
+      <a href="apikeys.html" class="nav-link active">
+        API Keys
+      </a>
+    </nav>
+  </div>
+  <div class="p-3 border-t border-gray-200">
+    <!--<a href="config.html" class="nav-link">
+      System Config
+    </a>-->
+    <div class="mt-2 text-sm text-gray-500 p-2 rounded-md hover:bg-gray-100 cursor-pointer flex justify-between items-center">
+      <span id="username" class="font-bold text-slate-700">Admin User</span>
+      <a href="#" onclick="handleLogout()"><span class="text-xs font-semibold text-red-500">Logout</span></a>
+    </div>
+  </div>
+</div>
+
+<!-- Backdrop for mobile menu -->
+<div id="sidebar-backdrop" class="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden hidden"></div>
+
+<!-- Main Content Area -->
+<main class="flex-1 p-4 lg:p-8 overflow-y-auto">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-black text-slate-800 tracking-tight">API Keys Management</h1>
+    <button id="add-key-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90 transition duration-150">
+      + Generate New Key
+    </button>
+  </div>
+
+  <!-- API Key List Card -->
+  <div class="card">
+    <div class="flex justify-between items-center mb-4">
+      <input type="text" id="search-input" placeholder="Search by Owner or Description..." class="p-2 border border-gray-300 rounded-md text-sm w-full max-w-sm">
+     <!-- <span id="key-count" class="text-sm text-gray-500">Loading...</span> -->
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead>
+        <tr class="table-header">
+          <th class="px-4 py-3 text-sm">Key ID (Last 4)</th>
+          <th class="px-4 py-3 text-sm">Fiduciary</th>
+          <th class="px-4 py-3 text-sm">App</th>
+          <th class="px-4 py-3 text-sm">Permissions Scope</th>
+          <th class="px-4 py-3 text-sm">Status</th>
+          <th class="px-4 py-3 text-sm">Last Used</th>
+          <th class="px-4 py-3 text-sm">Actions</th>
+        </tr>
+        </thead>
+        <tbody id="key-table-body" class="bg-white divide-y divide-gray-200">
+        <!-- Data will be dynamically inserted here -->
+        <tr>
+          <td colspan="7" class="p-4 text-center text-gray-500">
+            Loading API Key data...
+          </td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p id="key-error-message" class="mt-4 text-sm text-red-600 hidden">
+      Failed to load data. Please check the API connection and token.
+    </p>
+  </div>
+</main>
+
+<!-- Modal for Generating API Key -->
+<div id="key-modal-overlay" class="modal-overlay">
+  <div class="modal-content">
+    <h2 id="modal-title" class="text-lg font-bold text-slate-700 mb-4 tracking-tight">Generate New API Key</h2>
+    <form id="key-form" class="space-y-4">
+
+      <!-- Hidden Field for Key ID during display (not input) -->
+      <input type="hidden" id="key-id-hidden" name="keyId" value="">
+
+      <!-- Section 1: Owner Association -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="fiduciary-select" class="block text-sm font-medium text-gray-700">Select Fiduciary</label>
+          <select id="fiduciary-select" name="fiduciary_id" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            <option value="">-- Select Fiduciary --</option>
+          </select>
+        </div>
+        <div>
+          <label for="app-select" class="block text-sm font-medium text-gray-700">Select App</label>
+          <select id="app-select" name="app_id" disabled required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 bg-gray-50">
+            <option value="">-- Select Fiduciary First --</option>
+          </select>
+          <p class="text-xs text-red-500 mt-1 hidden" id="app-required-msg">An App must be selected to generate a key.</p>
+        </div>
+      </div>
+
+      <!-- Section 2: Description & Permissions -->
+      <div>
+        <label for="key-description" class="block text-sm font-medium text-gray-700">Description</label>
+        <input type="text" id="key-description" name="description" required placeholder="e.g., Key for AnalyticsPro Purge Confirmations" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+      </div>
+
+      <div class="space-y-2 border border-dashed border-gray-300 p-3 rounded-md">
+        <label class="block text-sm font-medium text-gray-700">Permissions Scope (RBAC)</label>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <label class="flex items-center"><input type="checkbox" name="permissions" value="read" class="mr-2"> Read</label>
+          <label class="flex items-center"><input type="checkbox" name="permissions" value="write" class="mr-2"> Write</label>
+          <label class="flex items-center"><input type="checkbox" name="permissions" value="purge" class="mr-2"> Purge</label>
+        </div>
+      </div>
+
+      <!-- Section 3: Key Output Display (Hidden unless a key is generated) -->
+      <div id="key-output-section" class="bg-gray-100 p-3 rounded-md hidden">
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+          <code id="generated-key-id" class="block bg-gray-200 p-2 break-all font-mono text-sm font-bold"></code>
+        </div>
+        <div class="mb-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">API Secret</label>
+          <code id="generated-key-value" class="block bg-gray-200 p-2 break-all font-mono text-sm font-bold"></code>
+        </div>
+        <div class="mt-3 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+          <strong>Important:</strong> Both the <strong>API Key</strong> (for identification) and the <strong>API Secret</strong> (for authentication/signing) are required for secure client interactions with the CMS API. This API Key & Secret will not be shown again. Store it safely.
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="close-modal-btn-inner" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Close</button>
+        <button type="submit" id="save-key-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Generate Key</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+    // --- Configuration ---
+    const API_URL_KEYS = '/api/v1/admin/apikey';
+    const API_URL_FIDUCIARIES_LIST = '/api/v1/admin/fiduciary';
+    const API_URL_APPS_LIST = '/api/v1/admin/app';
+    const AUTH_TOKEN = localStorage.getItem('authToken');
+    const USER_NAME = localStorage.getItem('username');
+    document.getElementById('username').textContent = USER_NAME || 'Admin User';
+
+
+    // --- Global DOM Element Variables ---
+    let sidebar, menuToggle, backdrop, keyModalOverlay, addKeyBtn, closeModalBtnInner, keyForm, tableBody, countSpan, errorMessageP, searchInput;
+    let fiduciarySelect, appSelect, keyDescriptionInput, appRequiredMsg;
+    let keyOutputSection, generatedKeyValue, generatedKeyId;
+    let FiduciaryList = [];
+
+
+    // --- Helper Functions ---
+
+    function toggleMenu() {
+      sidebar.classList.toggle('open');
+      backdrop.classList.toggle('hidden');
+    }
+
+    function showModal(title) {
+      document.getElementById('modal-title').textContent = title;
+      keyForm.reset();
+      keyOutputSection.classList.add('hidden'); // Hide output on open
+      document.getElementById('save-key-btn').textContent = 'Generate Key';
+      document.getElementById('save-key-btn').disabled = false;
+
+      // Hide warning
+      appRequiredMsg.classList.add('hidden');
+
+      // Clear previous permissions check
+      document.querySelectorAll('input[name="permissions"]').forEach(checkbox => {
+        checkbox.checked = false;
+      });
+
+      // Reset app dropdown
+      appSelect.innerHTML = '<option value="">-- Select Fiduciary First --</option>';
+      appSelect.disabled = true;
+
+      keyModalOverlay.style.display = 'flex';
+    }
+
+    function closeModal() {
+      keyModalOverlay.style.display = 'none';
+      loadKeys(); // Reload key list after closing modal
+    }
+
+    function createStatusBadge(status) {
+      let colorClass = '';
+      switch (status) {
+        case 'ACTIVE':
+          colorClass = 'bg-green-100 text-green-800';
+          break;
+        case 'REVOKED':
+          colorClass = 'bg-red-100 text-red-800';
+          break;
+        default:
+          colorClass = 'bg-gray-100 text-gray-800';
+      }
+      return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+    }
+
+    function getFiduciaryName(id) {
+      const fiduciary = FiduciaryList.find(f => f.fiduciary_id === id);
+      return fiduciary ? fiduciary.name : 'Unknown/System Entity';
+    }
+
+    function createKeyRow(key) {
+        const row = document.createElement('tr');
+
+        const keyHashSuffix = (key.key_id || 'XXXXXXXX').slice(-4);
+        const showRevoke = key.status === 'ACTIVE' || key.status === 'PENDING';
+
+        // If app_id is present, display ID (or ideally map name if available).
+        // If no app (which shouldn't happen with new logic, but legacy keys might exist), display "Direct".
+        const targetEntity = key.app_name;
+        
+        const actionsHtml = `
+            ${showRevoke ?
+                `<button class="text-red-600 hover:text-red-900 font-medium text-sm" onclick="revokeKey('${key.key_id}')">Revoke</button>`
+                : `<span class="text-gray-500 text-xs">Revoked</span>`}
+        `;
+
+        row.innerHTML = `
+            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">...${keyHashSuffix}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${getFiduciaryName(key.fiduciary_id)}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${targetEntity}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">
+                ${key.permissions ? key.permissions.join(', ') : 'None'}
+            </td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(key.status)}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm">
+                ${actionsHtml}
+            </td>
+        `;
+        return row;
+    }
+
+
+    // --- Core Logic ---
+
+    // 1. Load Fiduciaries for Dropdown Population
+    async function fetchFiduciariesForDropdown() {
+      try {
+        const payload = {
+          "_func": "list_fiduciaries",
+          "status": "ACTIVE",
+          "search": "",
+          "page": 1,
+          "limit": 50
+        };
+        const response = await fetch(API_URL_FIDUCIARIES_LIST, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${AUTH_TOKEN}`
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          console.error("Failed to fetch Fiduciaries list for dropdown. Status:", response.status);
+          return;
+        }
+
+        const responseData = await response.json();
+
+        if (responseData.status === 401) {
+          alert("Session Expired " + (responseData.message || "Authentication required."));
+          handleLogout();
+          return;
+        }
+
+        FiduciaryList = responseData.data || responseData; // Adjust based on likely backend response
+
+        fiduciarySelect.innerHTML = '<option value="">-- Select Fiduciary --</option>';
+        FiduciaryList.forEach(f => {
+          const option = document.createElement('option');
+          option.value = f.fiduciary_id;
+          option.textContent = f.name;
+          fiduciarySelect.appendChild(option);
+        });
+      } catch (error) {
+        console.error("Error fetching Fiduciaries for dropdown:", error);
+      }
+    }
+
+    // 2. Fetch Apps dynamically based on selected Fiduciary
+    async function fetchAppsForFiduciary(fiduciaryId) {
+        appSelect.innerHTML = '<option value="">Loading...</option>';
+        appSelect.disabled = true;
+
+        try {
+            const payload = {
+                "_func": "list_apps",
+                "fiduciary_id": fiduciaryId,
+                "status": "ACTIVE"
+            };
+
+            const response = await fetch(API_URL_APPS_LIST, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                const responseData = await response.json();
+                const apps = responseData.data || responseData;
+
+                // Default: No app selected is NOT an option anymore if we enforce strict app keys
+                // But user could be creating a key for the Fiduciary's own app, which technically acts as an app of its own data.
+                // However, based on requirements, we force selection.
+                appSelect.innerHTML = '<option value="">-- Select App --</option>';
+
+                apps.forEach(p => {
+                    const option = document.createElement('option');
+                    option.value = p.app_id;
+                    option.textContent = p.name + " (" + (p.processing_purpose || 'General') + ")";
+                    appSelect.appendChild(option);
+                });
+
+                if (apps.length === 0) {
+                     appSelect.innerHTML = '<option value="">No Active Apps Found</option>';
+                }
+
+                appSelect.disabled = false;
+            } else {
+                console.error("Failed to load apps");
+                appSelect.innerHTML = '<option value="">Failed to load apps</option>';
+            }
+        } catch (error) {
+            console.error("Error fetching apps:", error);
+            appSelect.innerHTML = '<option value="">Error loading apps</option>';
+        }
+    }
+
+
+    // 3. Load Keys List
+    async function loadKeys(searchTerm = "") {
+      tableBody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-gray-500">Loading API Key data...</td></tr>`;
+      errorMessageP.classList.add('hidden');
+
+      // Ensure Fiduciary list is loaded first for display names
+      if (FiduciaryList.length === 0) await fetchFiduciariesForDropdown();
+
+      try {
+        const listPayload = {
+          "_func": "list_api_keys",
+          "search": searchTerm,
+          "status": "",
+          "fiduciary_id": "",
+          "page": 1,
+          "limit": 50
+        };
+
+        const response = await fetch(API_URL_KEYS, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${AUTH_TOKEN}`
+          },
+          body: JSON.stringify(listPayload)
+        });
+
+        if (!response.ok) throw new Error(`API returned status ${response.status}`);
+
+        const responseData = await response.json();
+        const keys = responseData.data || responseData;
+
+        if (Array.isArray(keys)) {
+          tableBody.innerHTML = '';
+
+          if (keys.length === 0) {
+            tableBody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-gray-500">No API Keys found matching criteria.</td></tr>`;
+          } else {
+            keys.forEach(key => {
+              tableBody.appendChild(createKeyRow(key));
+            });
+          }
+        } else {
+          throw new Error(responseData.message || 'API returned unexpected structure.');
+        }
+
+      } catch (error) {
+        console.error("Error loading API Keys:", error);
+        tableBody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-red-600">
+                Error connecting to the CMS API. Ensure the service is running and the token is valid.
+            </td></tr>`;
+        errorMessageP.classList.remove('hidden');
+      }
+    }
+
+    // 4. Handle Key Revocation
+    async function revokeKey(keyId) {
+      if (confirm(`WARNING: Are you sure you want to REVOKE Key ID ${keyId}? This will immediately terminate access for the associated service.`)) {
+        try {
+          const payload = {
+            "_func": "revoke_api_key",
+            "key_id": keyId
+          };
+
+          const response = await fetch(API_URL_KEYS, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${AUTH_TOKEN}`
+            },
+            body: JSON.stringify(payload)
+          });
+
+          if (response.ok) {
+            alert(`API Key ${keyId} successfully revoked.`);
+            loadKeys();
+          } else {
+            const responseData = await response.json();
+            const errorMsg = responseData.message || responseData.error.message || `Status: ${response.status}`;
+            alert(`Failed to revoke Key ID ${keyId}: ${errorMsg}`);
+          }
+
+        } catch (error) {
+          console.error("Error during revocation API call:", error);
+          alert("Network error: Could not communicate with the API during revocation.");
+        }
+      }
+    }
+
+    function handleLogout() {
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('username');
+      window.location.href = "../index.html";
+    }
+
+    // --- Event Listeners and Initialization ---
+
+    // --- Variable Assignments ---
+    sidebar = document.getElementById('sidebar');
+    menuToggle = document.getElementById('menu-toggle');
+    backdrop = document.getElementById('sidebar-backdrop');
+    keyModalOverlay = document.getElementById('key-modal-overlay');
+    addKeyBtn = document.getElementById('add-key-btn');
+    keyForm = document.getElementById('key-form');
+    tableBody = document.getElementById('key-table-body');
+    countSpan = document.getElementById('key-count');
+    errorMessageP = document.getElementById('key-error-message');
+    searchInput = document.getElementById('search-input');
+    fiduciarySelect = document.getElementById('fiduciary-select');
+    appSelect = document.getElementById('app-select');
+    keyDescriptionInput = document.getElementById('key-description');
+    keyOutputSection = document.getElementById('key-output-section');
+    generatedKeyValue = document.getElementById('generated-key-value');
+    generatedKeyId = document.getElementById('generated-key-id');
+    closeModalBtnInner = document.getElementById('close-modal-btn-inner');
+    appRequiredMsg = document.getElementById('app-required-msg');
+
+    // --- Event Listener Attachments ---
+    menuToggle.addEventListener('click', toggleMenu);
+    backdrop.addEventListener('click', toggleMenu);
+    addKeyBtn.addEventListener('click', () => showModal('Generate New API Key'));
+    closeModalBtnInner.addEventListener('click', closeModal);
+
+    // Dynamic App Loading
+    fiduciarySelect.addEventListener('change', (e) => {
+        const selectedFiduciaryId = e.target.value;
+        if (selectedFiduciaryId) {
+            fetchAppsForFiduciary(selectedFiduciaryId);
+        } else {
+            appSelect.innerHTML = '<option value="">-- Select Fiduciary First --</option>';
+            appSelect.disabled = true;
+        }
+    });
+
+    // --- Search Functionality ---
+    searchInput.addEventListener('keypress', function(event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const searchTerm = searchInput.value.trim();
+        loadKeys(searchTerm);
+      }
+    });
+
+    // --- Initialization Call ---
+    loadKeys();
+
+      // Handle Key Generation Form Submission
+    keyForm.addEventListener('submit', async function(event) {
+      event.preventDefault();
+
+      const formData = new FormData(keyForm);
+      const permissions = [];
+
+      // Collect checked permissions into an array
+      document.querySelectorAll('input[name="permissions"]:checked').forEach(checkbox => {
+        permissions.push(checkbox.value);
+      });
+
+      if (permissions.length === 0) {
+        alert("Please select at least one permission scope for the key.");
+        return;
+      }
+
+      const selectedAppId = formData.get('app_id');
+
+      // [FIX] Validation: Ensure an app is selected
+      if (!selectedAppId || selectedAppId === "") {
+          appRequiredMsg.classList.remove('hidden');
+          alert("Error: You must select a valid App to generate a key.");
+          return;
+      } else {
+          appRequiredMsg.classList.add('hidden');
+      }
+
+      const payload = {
+        "_func": "generate_api_key",
+        "fiduciary_id": formData.get('fiduciary_id'),
+        "app_id": selectedAppId,
+        "description": formData.get('description'),
+        "permissions": permissions
+      };
+
+      try {
+        document.getElementById('save-key-btn').textContent = 'Generating...';
+        document.getElementById('save-key-btn').disabled = true;
+
+        const response = await fetch(API_URL_KEYS, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${AUTH_TOKEN}`
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const responseData = await response.json();
+
+        if (response.ok && responseData.success && responseData.data && responseData.data.raw_api_key) {
+          // Show the generated key once
+          generatedKeyValue.textContent = responseData.data.raw_api_key;
+          generatedKeyId.textContent = responseData.data.key_id;
+          keyOutputSection.classList.remove('hidden');
+
+          document.getElementById('save-key-btn').textContent = 'Key Generated';
+          document.getElementById('save-key-btn').disabled = true; // Lock button after success
+          document.getElementById('close-modal-btn-inner').textContent = 'Finish & Close';
+
+          // Alert the user to copy the key
+          alert("SUCCESS! Please copy the generated key now. It will not be shown again.");
+
+        } else {
+          const errorMsg = responseData.message || responseData.error.message || `Status: ${response.status}`;
+          alert(`Failed to generate key: ${errorMsg}`);
+        }
+
+      } catch (error) {
+        console.error(`Error generating key:`, error);
+        alert("Network error: Could not connect to API.");
+      } finally {
+        // If key generation failed, allow retrying
+        if (keyOutputSection.classList.contains('hidden')) {
+          document.getElementById('save-key-btn').textContent = 'Generate Key';
+          document.getElementById('save-key-btn').disabled = false;
+        }
+      }
+    });
+
+
+
+    // Expose functions globally so they can be called by inline onclick attributes
+    window.revokeKey = revokeKey;
+    window.toggleMenu = toggleMenu;
+    window.handleLogout = handleLogout;
+
+  </script>
+</body>
+
+</html>

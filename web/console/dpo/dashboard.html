@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSI DPDP CMS - DPO Dashboard</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --tsi-primary: #006A67;
+            --background: #f4fbf9;
+            --card-bg: #FFFFFF;
+            --radius: 0.5rem;
+        }
+
+        body {
+            background-color: var(--background);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        .primary-bg { background-color: var(--tsi-primary); }
+        .primary-text { color: var(--tsi-primary); }
+
+        /* --- Sidebar Styling Fix --- */
+        .sidebar {
+            width: 250px;
+            background-color: #f8fafc;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.05);
+            padding-top: 20px;
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100vh;
+            z-index: 50;
+            border-right: 1px solid #e2e8f0;
+            transition: transform 0.3s ease-in-out;
+        }
+
+        /* Responsive Sidebar behavior */
+        @media (max-width: 1023px) {
+            .sidebar {
+                transform: translateX(-100%);
+            }
+            .sidebar.open {
+                transform: translateX(0);
+            }
+        }
+
+        @media (min-width: 1024px) {
+            body {
+                padding-left: 250px;
+            }
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px; margin: 5px 0;
+            border-radius: 6px; color: #4a5568;
+            transition: all 0.2s ease;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            background-color: #e5f5f4;
+            color: var(--tsi-primary);
+            font-weight: 600;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: var(--radius);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+        }
+
+        /* Backdrop for mobile */
+        .sidebar-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 40;
+            display: none;
+        }
+        .sidebar-backdrop.active {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+
+<!-- Mobile Header -->
+<div class="lg:hidden flex items-center justify-between p-4 bg-white border-b border-gray-200 sticky top-0 z-30">
+    <button onclick="toggleSidebar()" class="p-2 text-gray-600 focus:outline-none">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+    </button>
+    <span class="font-bold primary-text">TSI DPDP CMS</span>
+    <div class="w-6"></div> <!-- Spacer -->
+</div>
+
+<div id="backdrop" class="sidebar-backdrop lg:hidden" onclick="toggleSidebar()"></div>
+
+<!-- Sidebar Navigation -->
+<div id="sidebar" class="sidebar flex flex-col justify-between">
+    <div>
+        <div class="px-5 pb-6 border-b border-gray-200 hidden lg:block">
+            <span class="text-xl font-bold primary-text">TSI DPDP CMS</span>
+        </div>
+        <nav class="flex flex-col space-y-1 mt-4 px-3">
+            <a href="dashboard.html" class="nav-link active">Dashboard</a>
+            <a href="policies.html" class="nav-link">Policies</a>
+            <a href="ropa.html" class="nav-link">ROPA</a>
+            <a href="principals.html" class="nav-link">Principals</a>
+            <a href="consents.html" class="nav-link">Consents</a>
+            <a href="compliance.html" class="nav-link">Compliance</a>
+            <a href="grievances.html" class="nav-link">Grievances</a>
+            <a href="breach.html" class="nav-link">Breach</a>
+            <a href="audit.html" class="nav-link">Audit</a>
+            <a href="legal.html" class="nav-link">Legal</a>
+            <a href="reports.html" class="nav-link">Reports</a>
+            <a href="team.html" class="nav-link">Team</a>
+            <a href="settings.html" class="nav-link">Settings</a>
+        </nav>
+    </div>
+    <div class="p-3 border-t border-gray-200">
+        <div class="mt-2 text-sm text-gray-500 p-2 rounded-md flex justify-between items-center">
+            <span id="username" class="font-bold text-slate-700">DPO User</span>
+            <button onclick="handleLogout()" class="text-xs font-semibold text-red-500 hover:underline">Logout</button>
+        </div>
+    </div>
+</div>
+
+<!-- Main Content Area -->
+<main class="p-4 lg:p-8 overflow-y-auto">
+    <div class="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+        <div>
+            <h1 class="text-2xl font-black text-slate-800 tracking-tight">DPO Compliance Dashboard</h1>
+            <p class="text-xs font-semibold text-slate-400 mt-1">Fiduciary ID: <span id="fiduciary-id-display" class="font-mono text-slate-500">--</span></p>
+        </div>
+
+        <!-- Period Filter Dropdown -->
+        <div class="flex items-center gap-3 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
+            <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-2">Filter Period:</span>
+            <select id="time-filter" onchange="loadDpoMetrics()" class="text-sm font-bold text-teal-700 bg-transparent outline-none cursor-pointer pr-2">
+                <!-- Populated via setupFilter script -->
+            </select>
+        </div>
+    </div>
+
+    <!-- Consolidated Metric Widgets Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
+
+        <!-- Widget 1: Active Policy -->
+        <div class="card p-4 border-t-4 border-teal-600 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest"># Active Policy</p>
+            <p class="text-3xl font-black text-slate-800 mt-2" id="metric-active-policies">--</p>
+        </div>
+
+        <!-- Widget 2: Consents -->
+        <div class="card p-4 border-t-4 border-blue-600 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest"># Consents</p>
+            <p class="text-3xl font-black text-slate-800 mt-2" id="metric-consents">--</p>
+        </div>
+
+        <!-- Widget 3: Data Principals -->
+        <div class="card p-4 border-t-4 border-indigo-600 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest"># Data Principals</p>
+            <p class="text-3xl font-black text-slate-800 mt-2" id="metric-principals">--</p>
+        </div>
+
+        <!-- Widget 4: Purge Requests (Clubbed) -->
+        <div class="card p-4 border-t-4 border-amber-600 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest"># Purge Requests</p>
+            <div class="flex items-baseline gap-2 mt-2">
+                <span class="text-3xl font-black text-slate-800" id="metric-purge-total">--</span>
+                <span class="text-[11px] font-bold text-amber-600" id="metric-purge-pending">(-- Pending)</span>
+            </div>
+        </div>
+
+        <!-- Widget 5: Grievances (Clubbed) -->
+        <div class="card p-4 border-t-4 border-orange-600 shadow-sm">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest"># Grievances</p>
+            <div class="flex items-baseline gap-2 mt-2">
+                <span class="text-3xl font-black text-slate-800" id="metric-grievances-total">--</span>
+                <span class="text-[11px] font-bold text-orange-600" id="metric-grievances-pending">(-- Pending)</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section: Urgent Requests Table -->
+    <div class="card">
+        <h2 class="text-lg font-bold text-slate-700 mb-4 tracking-tight">Urgent: Pending DPO Action</h2>
+        <div class="overflow-x-auto">
+            <table class="w-full text-left">
+                <thead>
+                <tr class="bg-slate-50 text-[10px] uppercase font-black text-slate-400 tracking-widest border-b border-slate-100">
+                    <th class="px-4 py-3">Request ID</th>
+                    <th class="px-4 py-3">Type</th>
+                    <th class="px-4 py-3">Submitted</th>
+                    <th class="px-4 py-3">Deadline</th>
+                    <th class="px-4 py-3">Status</th>
+                </tr>
+                </thead>
+                <tbody id="grievance-table-body" class="bg-white divide-y divide-slate-50 text-sm text-slate-600">
+                <tr><td colspan="5" class="p-8 text-center text-slate-400 italic">Syncing with compliance registry...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</main>
+
+<script>
+    const API_URL_DASHBOARD = '/api/v1/admin/admindash';
+    const AUTH_TOKEN = localStorage.getItem('authToken');
+    const FIDUCIARY_ID = localStorage.getItem('fiduciary_id');
+    // Operators are restricted from policy authoring and system settings.
+    if (localStorage.getItem('role') === 'OPERATOR') {
+        document.querySelectorAll('a[href="policies.html"], a[href="settings.html"], a[href="team.html"]').forEach(el => el.remove());
+    }
+
+    function toggleSidebar() {
+        document.getElementById('sidebar').classList.toggle('open');
+        document.getElementById('backdrop').classList.toggle('active');
+    }
+
+    /**
+     * Initializes the Month Filter dropdown for current + 3 previous months.
+     */
+    function setupFilter() {
+        const filter = document.getElementById('time-filter');
+        const options = [];
+        const now = new Date();
+
+        for (let i = 0; i < 4; i++) {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const label = i === 0 ? "Current Month" : d.toLocaleString('default', { month: 'long', year: 'numeric' });
+
+            // Format first and last day strings (YYYY-MM-DD)
+            const firstDay = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
+            const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
+
+            options.push(`<option value="${firstDay}|${lastDay}">${label}</option>`);
+        }
+        filter.innerHTML = options.join('');
+    }
+
+    /**
+     * Fetches and renders the simplified metrics based on the selected time period.
+     */
+    async function loadDpoMetrics() {
+        const filterEl = document.getElementById('time-filter');
+        if (!filterEl.value) return;
+
+        const [start, end] = filterEl.value.split('|');
+
+        try {
+            const response = await fetch(API_URL_DASHBOARD, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({
+                    "_func": "get_dpo_metrics",
+                    "fiduciary_id": FIDUCIARY_ID,
+                    "start_date": start,
+                    "end_date": end
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.status === 401) {
+                alert("Session Expired: " + (data.message || "Authentication required."));
+                handleLogout();
+                return;
+            }
+
+            if (data.success && data.metrics) {
+                const m = data.metrics;
+                document.getElementById('metric-active-policies').textContent = m.active_policies || 0;
+                document.getElementById('metric-consents').textContent = m.total_consents || 0;
+                document.getElementById('metric-principals').textContent = m.data_principals || 0;
+
+                // Consolidated Purge Card
+                document.getElementById('metric-purge-total').textContent = m.purge_total || 0;
+                document.getElementById('metric-purge-pending').textContent = `(${m.purge_pending || 0} Pending)`;
+
+                // Consolidated Grievance Card
+                document.getElementById('metric-grievances-total').textContent = m.grievances_total || 0;
+                document.getElementById('metric-grievances-pending').textContent = `(${m.grievances_pending || 0} Pending)`;
+            }
+        } catch (error) {
+            console.error("Metric load failure:", error);
+            document.querySelectorAll('[id^="metric-"]').forEach(el => el.textContent = 'Err');
+        }
+    }
+
+    /**
+     * Fetches the urgent pending grievances for the table view.
+     */
+    async function loadPendingGrievances() {
+        const tbody = document.getElementById('grievance-table-body');
+        try {
+            const response = await fetch(API_URL_DASHBOARD, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "list_pending_grievances", "fiduciary_id": FIDUCIARY_ID, "limit": 10 })
+            });
+
+            const grievances = await response.json();
+            if (Array.isArray(grievances)) {
+                if (grievances.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">No urgent tasks requiring action.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = grievances.map(g => {
+                    const isOverdue = g.days_left < 0;
+                    return `
+                        <tr class="hover:bg-slate-50 transition-colors">
+                            <td class="px-4 py-3 font-mono text-xs text-slate-500">...${g.grievance_id.slice(-8)}</td>
+                            <td class="px-4 py-3 font-bold text-slate-700">${g.type.replace(/_/g, ' ')}</td>
+                            <td class="px-4 py-3 text-slate-500">${new Date(g.submission_timestamp).toLocaleDateString()}</td>
+                            <td class="px-4 py-3 font-semibold ${isOverdue ? 'text-red-600' : 'text-slate-600'}">
+                                ${isOverdue ? Math.abs(g.days_left) + ' days OVERDUE' : g.days_left + ' days left'}
+                            </td>
+                            <td class="px-4 py-3">
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-blue-100 text-blue-700">${g.status}</span>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+        } catch (error) {
+            tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-red-500">Failed to sync with registry.</td></tr>';
+        }
+    }
+
+    function handleLogout() {
+        localStorage.clear();
+        window.location.href = "../index.html";
+    }
+
+    window.onload = () => {
+        setupFilter();
+        loadDpoMetrics();
+        loadPendingGrievances();
+
+        if (FIDUCIARY_ID) document.getElementById('fiduciary-id-display').textContent = FIDUCIARY_ID;
+
+        const storedUser = localStorage.getItem('username');
+        if (storedUser) document.getElementById('username').textContent = storedUser;
+    };
+</script>
+</body>
+</html>

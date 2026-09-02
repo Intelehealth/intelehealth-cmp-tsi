@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TSI DPDP CMS - Data Fiduciaries Management</title>
+  <!-- Load Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+        :root {
+            --tsi-primary: #006A67; /* Primary Dark Teal Color */
+            --tsi-accent: #008D8A; /* Slightly lighter for accents */
+            --background: #f4fbf9; /* Light, clean background */
+            --card-bg: #FFFFFF;
+            --border: 20 5.9% 90%;
+            --radius: 0.5rem;
+        }
+
+        body {
+            background-color: var(--background);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        .primary-bg { background-color: var(--tsi-primary); }
+        .primary-text { color: var(--tsi-primary); }
+        .accent-text { color: var(--tsi-accent); }
+        .border-primary { border-color: var(--tsi-primary); }
+
+        /* --- Sidebar Styling --- */
+        .sidebar {
+            width: 250px;
+            background-color: #f8fafc;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.05);
+            padding-top: 20px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            z-index: 50;
+            transition: transform 0.3s ease-in-out;
+            transform: translateX(-250px);
+        }
+
+        .sidebar.open {
+            transform: translateX(0);
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px;
+            margin: 5px 0;
+            border-radius: 6px;
+            color: #4a5568;
+            transition: background-color 0.2s ease, color 0.2s ease;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            background-color: #e5f5f4;
+            color: var(--tsi-primary);
+            font-weight: 600;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: var(--radius);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .table-header {
+            background-color: #f1f5f9;
+            font-weight: 600;
+            color: #4a5568;
+            text-align: left;
+        }
+
+        /* --- Mobile Toggle Button --- */
+        .mobile-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 20px;
+            background-color: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            position: sticky;
+            top: 0;
+            z-index: 40;
+        }
+
+        @media (min-width: 1024px) {
+            .sidebar {
+                transform: translateX(0);
+            }
+            .mobile-header {
+                display: none;
+            }
+            body {
+                padding-left: 250px;
+            }
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: var(--radius);
+            max-width: 600px;
+            width: 95%;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            position: relative;
+        }
+
+        .modal-footer {
+            margin-top: 20px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+    </style>
+</head>
+
+<body class="flex lg:p-0">
+
+<!-- Mobile Header/Toggle -->
+<div class="mobile-header lg:hidden">
+  <button id="menu-toggle" class="p-2 rounded-md hover:bg-gray-100 primary-text">
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-6 w-6"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+  </button>
+  <span class="text-xl font-bold primary-text">CMS Fiduciaries</span>
+  <div class="text-sm text-gray-500">Admin User</div>
+</div>
+
+<!-- Sidebar Navigation -->
+<div id="sidebar" class="sidebar lg:relative flex flex-col justify-between">
+  <div>
+    <div class="px-5 pb-6 border-b border-gray-200 lg:block hidden">
+      <span class="text-xl font-bold primary-text">TSI DPDP CMS</span>
+    </div>
+    <nav class="flex flex-col space-y-1 mt-4 px-3">
+      <a href="dashboard.html" class="nav-link">
+        Dashboard
+      </a>
+      <a href="#" class="nav-link active">
+        Fiduciaries
+      </a>
+      <a href="apps.html" class="nav-link">
+        Apps
+      </a>
+      <a href="users.html" class="nav-link">
+        CMS Users
+      </a>
+      <!--<a href="lifecycle.html" class="nav-link">
+        Lifecycle
+      </a> -->
+      <a href="apikeys.html" class="nav-link">
+        API Keys
+      </a>
+    </nav>
+  </div>
+  <div class="p-3 border-t border-gray-200">
+    <!--<a href="config.html" class="nav-link">
+      System Config
+    </a>-->
+    <div class="mt-2 text-sm text-gray-500 p-2 rounded-md hover:bg-gray-100 cursor-pointer flex justify-between items-center">
+      <span id="username" class="font-bold text-slate-700">Admin User</span>
+      <a href="#" onclick="handleLogout()"><span class="text-xs font-semibold text-red-500">Logout</span></a>
+    </div>
+  </div>
+</div>
+
+<!-- Backdrop for mobile menu -->
+<div id="sidebar-backdrop" class="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden hidden"></div>
+
+<!-- Main Content Area -->
+<!-- Main Content Area -->
+<main class="flex-1 p-4 lg:p-8 overflow-y-auto">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-black text-slate-800 tracking-tight">Data Fiduciaries Management</h1>
+    <button id="add-fiduciary-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90 transition duration-150">
+      + Add New Fiduciary
+    </button>
+  </div>
+
+  <!-- Fiduciaries List Card -->
+  <div class="card">
+    <!-- <h3 class="text-xl font-semibold text-gray-700 mb-4">Search</h3> -->
+    <div class="flex justify-between items-center mb-4">
+      <input type="text" id="search-input" placeholder="Search by Name or Domain..." class="p-2 border border-gray-300 rounded-md text-sm w-full max-w-sm">
+      <span id="fiduciary-count" class="text-sm text-gray-500">Loading...</span>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead>
+        <tr class="table-header">
+          <th class="px-4 py-3 text-sm">Fiduciary Name</th>
+          <th class="px-4 py-3 text-sm">Primary Domain</th>
+          <th class="px-4 py-3 text-sm">CMS CNAME</th>
+          <th class="px-4 py-3 text-sm">Status</th>
+          <!-- <th class="px-4 py-3 text-sm">Validation</th> -->
+          <th class="px-4 py-3 text-sm">Actions</th>
+        </tr>
+        </thead>
+        <tbody id="fiduciary-table-body" class="bg-white divide-y divide-gray-200">
+        <!-- Data will be dynamically inserted here -->
+        <tr>
+          <td colspan="6" class="p-4 text-center text-gray-500">
+            Loading Fiduciary data...
+          </td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p id="fiduciary-error-message" class="mt-4 text-sm text-red-600 hidden">
+      Failed to load data. Please check the API connection and token.
+    </p>
+  </div>
+</main>
+
+<!-- Modal for Adding/Editing Fiduciary -->
+<div id="fiduciary-modal-overlay" class="modal-overlay">
+  <div class="modal-content">
+    <h2 id="modal-title" class="text-lg font-bold text-slate-700 mb-4 tracking-tight">Add New Data Fiduciary</h2>
+    <form id="fiduciary-form" class="space-y-4">
+
+      <!-- Hidden Field to store Fiduciary ID during edit -->
+      <input type="hidden" id="fiduciary-id-hidden" name="fiduciaryId" value="">
+
+      <!-- Section: General Details -->
+      <div>
+        <label for="fiduciary-name" class="block text-sm font-medium text-gray-700">Fiduciary Legal Name</label>
+        <input type="text" id="fiduciary-name" name="name" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+      </div>
+
+      <!-- Section: Contact Details -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="fiduciary-email" class="block text-sm font-medium text-gray-700">Contact Email</label>
+          <input type="email" id="fiduciary-email" name="email" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+        <div>
+          <label for="fiduciary-phone" class="block text-sm font-medium text-gray-700">Contact Phone</label>
+          <input type="text" id="fiduciary-phone" name="phone" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+      </div>
+
+      <!-- Section: Domain Details (Crucial for Validation) -->
+      <div>
+        <label for="fiduciary-domain" class="block text-sm font-medium text-gray-700">Primary Domain (e.g., example.com)</label>
+        <input type="text" id="fiduciary-domain" name="primary_domain" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        <!--<p class="mt-1 text-xs text-gray-500">Used for CNAME generation and ownership validation.</p> -->
+      </div>
+
+      <div>
+        <label for="fiduciary-cname" class="block text-sm font-medium text-gray-700">CMS Deployment CNAME (e.g., consent.example.com)</label>
+        <input type="text" id="fiduciary-cname" name="cms_cname" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        <p class="mt-1 text-xs text-red-500 hidden" id="cname-warning">Warning: This CNAME must be correctly configured in the Fiduciary's DNS pointing back to the CMS.</p>
+      </div>
+
+      <!-- Section: Admin Association -->
+      <!--<div>
+        <label for="fiduciary-dpo" class="block text-sm font-medium text-gray-700">Associated DPO/Admin User ID (CMS User)</label>
+        <input type="text" id="fiduciary-dpo" name="dpoUserId" placeholder="UUID of assigned CMS user" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        <p class="mt-1 text-xs text-gray-500">Links a CMS user for managing this Fiduciary.</p>
+      </div> -->
+
+      <div id="validation-section" class="border border-yellow-300 bg-yellow-50 p-3 rounded-md hidden">
+        <h4 class="font-semibold text-orange-600 mb-2">DNS Verification Required</h4>
+        <p class="text-sm text-gray-700 mb-2">Please ask the Data Fiduciary's IT team to add the following TXT record to their primary domain:</p>
+        <code id="txt-record-output" class="block bg-gray-100 p-2 break-all text-xs font-mono text-gray-900 border rounded"></code>
+        <button type="button" id="verify-dns-btn" class="mt-3 primary-bg text-white px-3 py-1 rounded-md text-sm hover:bg-opacity-90">Run Verification Check</button>
+        <span id="validation-status" class="ml-4 text-sm font-medium text-gray-600"></span>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="close-modal-btn" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Cancel</button>
+        <button type="submit" id="save-fiduciary-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Save Fiduciary</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+const API_URL = '/api/v1/admin/fiduciary';
+const AUTH_TOKEN = localStorage.getItem('authToken');
+const USER_NAME = localStorage.getItem('username');
+// set user name
+document.getElementById('username').textContent = USER_NAME;
+//console.log(AUTH_TOKEN);
+
+// --- DOM Elements ---
+let sidebar;
+let menuToggle;
+let backdrop;
+let fiduciaryModalOverlay;
+let addFiduciaryBtn;
+let closeModalBtn;
+let fiduciaryForm;
+let tableBody;
+let countSpan;
+let errorMessageP;
+
+// --- Form Fields for Edit/Add ---
+let fiduciaryIdHidden;
+let fiduciaryNameInput;
+let primaryDomainInput;
+let cmsCnameInput;
+let contactEmailInput;
+let contactPhoneInput;
+
+function toggleMenu() {
+    sidebar.classList.toggle('open');
+    backdrop.classList.toggle('hidden');
+}
+
+function showModal(title, isEdit = false) {
+    document.getElementById('modal-title').textContent = title;
+    fiduciaryForm.reset();
+    fiduciaryIdHidden.value = ''; // Clear hidden ID by default
+    if(primaryDomainInput.disabled){
+      primaryDomainInput.disabled = false;
+      cmsCnameInput.disabled = false;
+    }
+
+    if (isEdit) {
+         document.getElementById('save-fiduciary-btn').textContent = 'Update Fiduciary';
+    } else {
+         document.getElementById('save-fiduciary-btn').textContent = 'Save Fiduciary';
+    }
+
+    fiduciaryModalOverlay.style.display = 'flex';
+}
+
+function closeModal() {
+    fiduciaryModalOverlay.style.display = 'none';
+}
+
+function createStatusBadge(status) {
+    let colorClass = '';
+    switch (status) {
+        case 'ACTIVE':
+            colorClass = 'bg-green-100 text-green-800';
+            break;
+        case 'PENDING':
+            colorClass = 'bg-yellow-100 text-yellow-800';
+            break;
+        case 'INACTIVE':
+        case 'REVOKED':
+            colorClass = 'bg-red-100 text-red-800';
+            break;
+        case 'VALIDATED':
+            colorClass = 'bg-blue-100 text-blue-800';
+            break;
+        default:
+            colorClass = 'bg-gray-100 text-gray-800';
+    }
+    return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+}
+
+function createFiduciaryRow(fiduciary) {
+    const row = document.createElement('tr');
+
+    // Determine if the Deactivate button should be shown
+    const showDeactivate = fiduciary.status === 'ACTIVE' || fiduciary.status === 'PENDING';
+
+    const actionsHtml = `
+        <button class="text-indigo-600 hover:text-indigo-900 font-medium text-sm mr-2" onclick="editFiduciary('${fiduciary.fiduciary_id}')">Edit</button>
+        ${showDeactivate ?
+            `<button class="text-red-600 hover:text-red-900 font-medium text-sm" onclick="deactivateFiduciary('${fiduciary.fiduciary_id}')">Deactivate</button>`
+            : `<span class="text-gray-500 text-xs">Access Suspended</span>`}
+    `;
+
+    row.innerHTML = `
+        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${fiduciary.name || 'N/A'}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${fiduciary.primary_domain || 'N/A'}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${fiduciary.cms_cname || 'N/A'}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(fiduciary.status)}</td>
+       <!-- <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(fiduciary.domain_validation_status || 'PENDING')}</td> -->
+        <td class="px-4 py-3 whitespace-nowrap text-sm">
+            ${actionsHtml}
+        </td>
+    `;
+    return row;
+}
+
+
+// --- Core Logic ---
+
+async function loadFiduciaries(searchTerm = "") {
+    tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">Loading Fiduciary data...</td></tr>`;
+    errorMessageP.classList.add('hidden');
+
+    try {
+        // The provided cURL uses POST with a JSON body for listing.
+        const listPayload = {
+            "_func": "list_fiduciaries",
+            "status": "",
+            "search": searchTerm,
+            "page": 1,
+            "limit": 50
+        };
+
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${AUTH_TOKEN}`
+            },
+            body: JSON.stringify(listPayload)
+        });
+
+        if (!response.ok) {
+            throw new Error(`API returned status ${response.status}`);
+        }
+
+        const responseData = await response.json();
+
+        if (responseData.status === 401) {
+            alert("Session Expired: " + (responseData.message || "Authentication required."));
+            handleLogout();
+            return;
+         }
+
+        // Assuming responseData structure is: { success: true, data: [{...}, {...}] }
+        if (Array.isArray(responseData)) {
+            const fiduciaries = responseData;
+            tableBody.innerHTML = ''; // Clear loading message
+
+            if (fiduciaries.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">No Fiduciaries registered yet.</td></tr>`;
+            } else {
+                fiduciaries.forEach(fiduciary => {
+                    tableBody.appendChild(createFiduciaryRow(fiduciary));
+                });
+                countSpan.textContent = `Showing 1 - ${fiduciaries.length} of ${fiduciaries.length} Total`;
+            }
+        } else {
+            // Handle API-level error (e.g., success: false)
+            throw new Error(responseData.message || 'API returned success: false.');
+        }
+
+    } catch (error) {
+        console.error("Error loading Fiduciaries:", error);
+        tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-red-600">
+            Error connecting to the CMS API. Ensure the service is running and the token is valid.
+        </td></tr>`;
+        errorMessageP.classList.remove('hidden');
+        countSpan.textContent = '0 Total';
+    }
+}
+
+
+// Function to fetch a single Fiduciary record
+async function fetchFiduciaryDetails(fiduciaryId) {
+    try {
+        const payload = {
+            "_func": "get_fiduciary",
+            "fiduciary_id": fiduciaryId
+        };
+
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${AUTH_TOKEN}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch details for ${fiduciaryId}. Status: ${response.status}`);
+        }
+
+        const responseData = await response.json();
+
+        if (responseData.name) {
+            return responseData;
+        } else {
+            throw new Error(responseData.message || 'Fiduciary details not found.');
+        }
+    } catch (error) {
+        console.error("Error fetching Fiduciary details:", error);
+        alert(`Failed to load details for editing: ${error.message}`);
+        return null;
+    }
+}
+
+// Placeholder functions (for demo only)
+async function editFiduciary(id) {
+     // 1. Show modal in loading state
+     showModal('Edit Data Fiduciary', true);
+
+    // 2. Fetch specific fiduciary data
+    const fiduciary = await fetchFiduciaryDetails(id);
+
+    if (fiduciary) {
+        // 3. Populate form fields
+        fiduciaryIdHidden.value = fiduciary.fiduciary_id;
+        fiduciaryNameInput.value = fiduciary.name || '';
+        primaryDomainInput.value = fiduciary.primary_domain || '';
+        cmsCnameInput.value = fiduciary.cms_cname || '';
+        contactEmailInput.value = fiduciary.email || '';
+        contactPhoneInput.value = fiduciary.phone || '';
+        //statusSelect.value = fiduciary.status || 'ACTIVE'; // Fallback to ACTIVE
+
+        // Keep domain fields disabled during edit
+        primaryDomainInput.disabled = true;
+        cmsCnameInput.disabled = true;
+
+    } else {
+        // If fetch failed, close the modal
+        closeModal();
+    }
+}
+
+async function deactivateFiduciary(id) {
+    if (confirm(`Are you sure you want to DEACTIVATE Fiduciary ID ${id}? This will suspend all consent operations.`)) {
+        try {
+            const payload = {
+                "_func": "delete_fiduciary",
+                "fiduciary_id": id
+            };
+
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${AUTH_TOKEN}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                alert(`Fiduciary ID ${id} successfully deactivated.`);
+                loadFiduciaries(); // Reload list to reflect status change
+            } else {
+                const responseData = await response.json();
+                const errorMsg = responseData.message || responseData.error.message || `Status: ${response.status}`;
+                alert(`Failed to deactivate Fiduciary ID ${id}: ${errorMsg}`);
+            }
+
+        } catch (error) {
+            console.error("Error during deactivation API call:", error);
+            alert("Network error: Could not communicate with the API during deactivation.");
+        }
+    }
+}
+
+function handleLogout() {
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('username');
+    window.location.href = "../index.html";
+}
+
+// --- Event Listeners and Initialization ---
+
+ // --- Variable Assignments ---
+sidebar = document.getElementById('sidebar');
+menuToggle = document.getElementById('menu-toggle');
+backdrop = document.getElementById('sidebar-backdrop');
+fiduciaryModalOverlay = document.getElementById('fiduciary-modal-overlay');
+addFiduciaryBtn = document.getElementById('add-fiduciary-btn');
+closeModalBtn = document.getElementById('close-modal-btn');
+closeModalBtn = document.getElementById('close-modal-btn');
+fiduciaryForm = document.getElementById('fiduciary-form');
+tableBody = document.getElementById('fiduciary-table-body');
+countSpan = document.getElementById('fiduciary-count');
+errorMessageP = document.getElementById('fiduciary-error-message');
+searchInput = document.getElementById('search-input');
+
+// Form Fields for Edit/Add
+fiduciaryIdHidden = document.getElementById('fiduciary-id-hidden');
+fiduciaryNameInput = document.getElementById('fiduciary-name');
+primaryDomainInput = document.getElementById('fiduciary-domain');
+cmsCnameInput = document.getElementById('fiduciary-cname');
+contactEmailInput = document.getElementById('fiduciary-email');
+contactPhoneInput = document.getElementById('fiduciary-phone');
+
+
+// --- Event Listener Attachments (Moved inside DOMContentLoaded) ---
+menuToggle.addEventListener('click', toggleMenu);
+backdrop.addEventListener('click', toggleMenu);
+addFiduciaryBtn.addEventListener('click', () => showModal('Add New Data Fiduciary'));
+closeModalBtn.addEventListener('click', closeModal);
+
+// --- Search Functionality ---
+searchInput.addEventListener('keypress', function(event) {
+    // Key code 13 is the Enter key
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        const searchTerm = searchInput.value.trim();
+        loadFiduciaries(searchTerm);
+    }
+});
+
+// --- Initialization Call ---
+loadFiduciaries();
+
+ // Handles the Add/Edit Fiduciary form submission
+fiduciaryForm.addEventListener('submit', async function(event) {
+    event.preventDefault();
+
+    const formData = new FormData(fiduciaryForm);
+    const data = Object.fromEntries(formData.entries());
+
+    const isEditing = !!data.fiduciaryId;
+    const func = isEditing ? "update_fiduciary" : "create_fiduciary";
+
+    const payload = {
+        "_func": func,
+        "fiduciary_id": data.fiduciaryId,
+        "name": data.name,
+        "email": data.email,
+        "phone": data.phone,
+        "primary_domain": data.primary_domain,
+        "cms_cname": data.cms_cname
+    };
+
+    // Clean up payload if creating (remove ID)
+    if (!isEditing) {
+        delete payload.fiduciary_id;
+    }
+
+    try {
+        document.getElementById('save-fiduciary-btn').textContent = isEditing ? 'Updating...' : 'Saving...';
+        document.getElementById('save-fiduciary-btn').disabled = true;
+
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${AUTH_TOKEN}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+            alert(`Fiduciary ${isEditing ? 'updated' : 'added'} successfully!`);
+            closeModal();
+            loadFiduciaries(); // Reload list
+        } else {
+            const responseData = await response.json();
+            const errorMsg = responseData.message || responseData.error.message || `Status: ${response.status}`;
+            alert(`Failed to ${isEditing ? 'update' : 'add'} Fiduciary: ${errorMsg}`);
+        }
+
+    } catch (error) {
+        console.error(`Error ${isEditing ? 'updating' : 'creating'} Fiduciary:`, error);
+        alert("Network error: Could not connect to API.");
+    } finally {
+        document.getElementById('save-fiduciary-btn').textContent = isEditing ? 'Update Fiduciary' : 'Save Fiduciary';
+        document.getElementById('save-fiduciary-btn').disabled = false;
+    }
+});
+
+// Expose functions globally so they can be called by inline onclick attributes
+window.editFiduciary = editFiduciary;
+window.deactivateFiduciary = deactivateFiduciary;
+
+</script>
+</body>
+
+</html>

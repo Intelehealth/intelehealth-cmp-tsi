@@ -1,0 +1,21 @@
+# Service definitions
+/api/v1/setup=org.tsicoop.dpdpcms.service.v1.AdminSetup
+/api/v1/operator=org.tsicoop.dpdpcms.service.v1.Operator
+/api/v1/fiduciary=org.tsicoop.dpdpcms.service.v1.Fiduciary
+/api/v1/app=org.tsicoop.dpdpcms.service.v1.App
+/api/v1/apikey=org.tsicoop.dpdpcms.service.v1.ApiKey
+/api/v1/policy=org.tsicoop.dpdpcms.service.v1.Policy
+/api/v1/consent=org.tsicoop.dpdpcms.service.v1.Consent
+/api/v1/compliance=org.tsicoop.dpdpcms.service.v1.Compliance
+/api/v1/legal=org.tsicoop.dpdpcms.service.v1.Legal
+/api/v1/grievance=org.tsicoop.dpdpcms.service.v1.Grievance
+/api/v1/notification=org.tsicoop.dpdpcms.service.v1.Notification
+/api/v1/audit=org.tsicoop.dpdpcms.service.v1.Audit
+/api/v1/admindash=org.tsicoop.dpdpcms.service.v1.AdminDash
+/api/v1/job=org.tsicoop.dpdpcms.service.v1.Job
+/api/v1/ropa=org.tsicoop.dpdpcms.service.v1.Ropa
+/api/v1/principal=org.tsicoop.dpdpcms.service.v1.Principal
+/api/v1/breach=org.tsicoop.dpdpcms.service.v1.Breach
+
+
+

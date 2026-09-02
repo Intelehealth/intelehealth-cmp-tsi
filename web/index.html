@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TSI DPDP CMS - Console Login</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --tsi-primary: #006A67; /* Primary Dark Teal Color */
+            --background: #f4fbf9; /* Light, clean background */
+            --border: 20 5.9% 90%;
+            --radius: 0.5rem;
+        }
+
+        body {
+            background-color: var(--background);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .animated-button {
+            position: relative;
+            overflow: hidden;
+            z-index: 0;
+            background-color: var(--tsi-primary);
+            color: #FFFFFF;
+            transition: background-color 0.3s ease;
+        }
+
+        .animated-button::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -75%;
+            width: 50%;
+            height: 100%;
+            background: linear-gradient(120deg,
+                    rgba(255, 255, 255, 0.2) 0%,
+                    rgba(255, 255, 255, 0.6) 50%,
+                    rgba(255, 255, 255, 0.2) 100%);
+            transform: skewX(-20deg);
+            z-index: 1;
+        }
+
+        .animated-button:hover::before {
+            animation: shine 1.2s ease-in-out forwards;
+        }
+
+        @keyframes shine {
+            0% {
+                left: -75%;
+            }
+
+            100% {
+                left: 125%;
+            }
+        }
+
+        .input-style {
+            height: 40px;
+            border-color: hsl(var(--border));
+        }
+
+        .login-card {
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .primary-text {
+            color: var(--tsi-primary);
+        }
+    </style>
+</head>
+
+<body>
+<div class="w-full max-w-lg p-8 bg-white rounded-lg border border-gray-200 login-card">
+
+    <!-- Header / Logo Area -->
+    <div class="text-center mb-8">
+        <span class="text-3xl font-black primary-text tracking-tight uppercase">TSI DPDP CMS</span>
+        <p class="text-[10px] text-slate-400 mt-1 font-bold uppercase tracking-[0.2em]">Consent Management System</p>
+        <h1 class="text-lg font-bold mt-4 text-gray-700">Administrator / DPO Login</h1>
+    </div>
+
+    <!-- Login Form -->
+    <form onsubmit="handleLogin(event)">
+        <div class="space-y-5">
+            <!-- Email/Username Input -->
+            <div>
+                <label for="email" class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Email (Login ID)</label>
+                <input type="email" id="email" name="email" required
+                       class="input-style w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-2 focus:ring-primary-text focus:border-primary-text outline-none transition-all text-sm"
+                       placeholder="your.email@fiduciary.com">
+            </div>
+
+            <!-- Password Input with Recovery Link -->
+            <div>
+                <div class="flex justify-between items-center mb-1">
+                    <label for="password" class="block text-[10px] font-black text-slate-400 uppercase tracking-widest">Password</label>
+                    <a href="password-reset.html" class="text-[10px] font-black primary-text hover:underline transition-all uppercase tracking-tighter">Forgot Password?</a>
+                </div>
+                <input type="password" id="password" name="password" required
+                       class="input-style w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-2 focus:ring-primary-text focus:border-primary-text outline-none transition-all text-sm"
+                       placeholder="••••••••••••">
+            </div>
+
+            <!-- Submit Button -->
+            <button type="submit"
+                    class="animated-button w-full h-11 inline-flex items-center justify-center rounded-md font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-opacity-90 transition-all">
+                Secure Login
+            </button>
+        </div>
+    </form>
+
+    <!-- Message/Error Area -->
+    <div id="login-message" class="mt-6 text-center text-xs font-bold hidden">
+        <!-- Dynamic messages -->
+    </div>
+
+</div>
+
+<script>
+/**
+ * Function to handle the admin login process via API authentication using the Fetch API.
+ */
+async function handleLogin(event) {
+    const API_LOGIN_URL = 'api/v1/admin/operator';
+    const ADMIN_DASHBOARD_URL = 'console/admin/dashboard.html';
+    const DPO_DASHBOARD_URL = 'console/dpo/dashboard.html';
+
+    event.preventDefault();
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    const messageArea = document.getElementById('login-message');
+
+    // Reset UI
+    messageArea.textContent = '';
+    messageArea.classList.add('hidden');
+    messageArea.classList.remove('text-red-500', 'text-teal-600', 'text-blue-500');
+
+    // Complexity Validation
+    if (password.length < 12) {
+        messageArea.textContent = "Error: Password must be at least 12 characters long.";
+        messageArea.classList.remove('hidden');
+        messageArea.classList.add('text-red-500');
+        return;
+    }
+
+    messageArea.textContent = "Verifying session with Consent Management System...";
+    messageArea.classList.remove('hidden');
+    messageArea.classList.add('text-blue-500');
+
+    try {
+        const payload = { _func: "login", identifier: email, password: password };
+
+        const response = await fetch(API_LOGIN_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        const responseData = await response.json();
+
+        if (response.ok && responseData.success === true) {
+            // Persist context for management console
+            localStorage.setItem('authToken', responseData.token);
+            localStorage.setItem('username', responseData.username);
+            localStorage.setItem('role', responseData.role);
+            localStorage.setItem('fiduciary_id', responseData.fiduciary_id);
+            localStorage.setItem('fiduciary_name', responseData.fiduciary_name);
+
+            messageArea.textContent = "Login successful. Redirecting to vault...";
+            messageArea.classList.replace('text-blue-500', 'text-teal-600');
+
+            setTimeout(() => {
+                if(responseData.role === 'ADMIN'){
+                    window.location.href = ADMIN_DASHBOARD_URL;
+                } else {
+                    window.location.href = DPO_DASHBOARD_URL;
+                }
+            }, 800);
+
+        } else {
+            const errorText = responseData.message || "Invalid credentials. Please verify your login ID and password.";
+            messageArea.textContent = errorText;
+            messageArea.classList.replace('text-blue-500', 'text-red-500');
+        }
+
+    } catch (error) {
+        messageArea.textContent = 'Network Error: Cannot reach the Consent Management System.';
+        messageArea.classList.replace('text-blue-500', 'text-red-500');
+        console.error('Connection error:', error);
+    }
+}
+</script>
+</body>
+</html>

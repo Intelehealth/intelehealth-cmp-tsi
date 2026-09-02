@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TSI DPDP CMS - Apps Management</title>
+  <!-- Load Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+        :root {
+            --tsi-primary: #006A67; /* Primary Dark Teal Color */
+            --tsi-accent: #008D8A; /* Slightly lighter for accents */
+            --background: #f4fbf9; /* Light, clean background */
+            --card-bg: #FFFFFF;
+            --border: 20 5.9% 90%;
+            --radius: 0.5rem;
+        }
+
+        body {
+            background-color: var(--background);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        .primary-bg { background-color: var(--tsi-primary); }
+        .primary-text { color: var(--tsi-primary); }
+        .accent-text { color: var(--tsi-accent); }
+        .border-primary { border-color: var(--tsi-primary); }
+
+        /* --- Sidebar Styling --- */
+        .sidebar {
+            width: 250px;
+            background-color: #f8fafc;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.05);
+            padding-top: 20px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            z-index: 50;
+            transition: transform 0.3s ease-in-out;
+            transform: translateX(-250px);
+        }
+
+        .sidebar.open {
+            transform: translateX(0);
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px;
+            margin: 5px 0;
+            border-radius: 6px;
+            color: #4a5568;
+            transition: background-color 0.2s ease, color 0.2s ease;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            background-color: #e5f5f4;
+            color: var(--tsi-primary);
+            font-weight: 600;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: var(--radius);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .table-header {
+            background-color: #f1f5f9;
+            font-weight: 600;
+            color: #4a5568;
+            text-align: left;
+        }
+
+        /* --- Mobile Toggle Button --- */
+        .mobile-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 20px;
+            background-color: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            position: sticky;
+            top: 0;
+            z-index: 40;
+        }
+
+        @media (min-width: 1024px) {
+            .sidebar {
+                transform: translateX(0);
+            }
+            .mobile-header {
+                display: none;
+            }
+            body {
+                padding-left: 250px;
+            }
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: var(--radius);
+            max-width: 700px;
+            width: 95%;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            position: relative;
+        }
+
+        .modal-footer {
+            margin-top: 20px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+    </style>
+</head>
+
+<body class="flex lg:p-0">
+
+<!-- Mobile Header/Toggle -->
+<div class="mobile-header lg:hidden">
+  <button id="menu-toggle" class="p-2 rounded-md hover:bg-gray-100 primary-text">
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-6 w-6"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+  </button>
+  <span class="text-xl font-bold primary-text">Apps</span>
+  <div class="text-sm text-gray-500">Admin User</div>
+</div>
+
+<!-- Sidebar Navigation -->
+<div id="sidebar" class="sidebar lg:relative flex flex-col justify-between">
+  <div>
+    <div class="px-5 pb-6 border-b border-gray-200 lg:block hidden">
+      <span class="text-xl font-bold primary-text">TSI DPDP CMS</span>
+    </div>
+    <nav class="flex flex-col space-y-1 mt-4 px-3">
+      <a href="dashboard.html" class="nav-link">
+        Dashboard
+      </a>
+      <a href="fiduciaries.html" class="nav-link">
+        Fiduciaries
+      </a>
+      <a href="#" class="nav-link active">
+        Apps
+      </a>
+      <a href="users.html" class="nav-link">
+        CMS Users
+      </a>
+      <!--<a href="lifecycle.html" class="nav-link">
+        Lifecycle
+      </a>-->
+      <a href="apikeys.html" class="nav-link">
+        API Keys
+      </a>
+    </nav>
+  </div>
+  <div class="p-3 border-t border-gray-200">
+    <!--<a href="config.html" class="nav-link">
+      System Config
+    </a>-->
+    <div class="mt-2 text-sm text-gray-500 p-2 rounded-md hover:bg-gray-100 cursor-pointer flex justify-between items-center">
+      <span id="username" class="font-bold text-slate-700">Admin User</span>
+      <a href="#" onclick="handleLogout()"><span class="text-xs font-semibold text-red-500">Logout</span></a>
+    </div>
+  </div>
+</div>
+
+<!-- Backdrop for mobile menu -->
+<div id="sidebar-backdrop" class="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden hidden"></div>
+
+<!-- Main Content Area -->
+<main class="flex-1 p-4 lg:p-8 overflow-y-auto">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-black text-slate-800 tracking-tight">Apps Management</h1>
+    <button id="add-app-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90 transition duration-150">
+      + Add New App
+    </button>
+  </div>
+
+  <!-- Apps List Card -->
+  <div class="card">
+     <div class="flex justify-between items-center mb-4">
+      <input type="text" id="search-input" placeholder="Search by Name or DPA Ref..." class="p-2 border border-gray-300 rounded-md text-sm w-full max-w-sm">
+      <span id="app-count" class="text-sm text-gray-500">Loading...</span>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead>
+        <tr class="table-header">
+          <th class="px-4 py-3 text-sm">App Name</th>
+          <th class="px-4 py-3 text-sm">Associated Fiduciary</th>
+          <th class="px-4 py-3 text-sm">Processing Purpose</th>
+          <th class="px-4 py-3 text-sm">DPA Reference</th>
+          <th class="px-4 py-3 text-sm">Status</th>
+          <th class="px-4 py-3 text-sm">Actions</th>
+        </tr>
+        </thead>
+        <tbody id="app-table-body" class="bg-white divide-y divide-gray-200">
+        <!-- Data will be dynamically inserted here -->
+        <tr>
+          <td colspan="6" class="p-4 text-center text-gray-500">
+            Loading Apps data...
+          </td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p id="app-error-message" class="mt-4 text-sm text-red-600 hidden">
+      Failed to load data. Please check the API connection and token.
+    </p>
+  </div>
+</main>
+
+<!-- Modal for Adding/Editing App-->
+<div id="app-modal-overlay" class="modal-overlay">
+  <div class="modal-content">
+    <h2 id="modal-title" class="text-lg font-bold text-slate-700 mb-4 tracking-tight">Add New App</h2>
+    <form id="app-form" class="space-y-4">
+
+      <!-- Hidden Field to store App ID during edit -->
+      <input type="hidden" id="app-id-hidden" name="appId" value="">
+
+      <!-- Section 1: Association & Name -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="fiduciary-select" class="block text-sm font-medium text-gray-700">Associated Data Fiduciary</label>
+          <select id="fiduciary-select" name="fiduciary_id" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+            <!-- Options populated dynamically -->
+            <option value="">-- Select Fiduciary --</option>
+          </select>
+        </div>
+        <div>
+          <label for="app-name" class="block text-sm font-medium text-gray-700">App Name</label>
+          <input type="text" id="app-name" name="name" required placeholder="e.g., AnalyticsPro" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+        </div>
+      </div>
+
+      <!-- Section: Contact Details -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="app-email" class="block text-sm font-medium text-gray-700">Contact Email</label>
+          <input type="email" id="app-email" name="email" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+        <div>
+          <label for="app-phone" class="block text-sm font-medium text-gray-700">Contact Phone</label>
+          <input type="text" id="app-phone" name="phone" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+      </div>
+
+      <!-- Section 3: Processing Scope -->
+      <div>
+        <label for="processing-purpose" class="block text-sm font-medium text-gray-700">Purpose</label>
+        <input type="text" id="processing-purpose" name="processing_purpose" required placeholder="e.g., user behaviour analytics" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+        <p class="mt-1 text-xs text-gray-500">Describing how the App will use the consent manager</p>
+      </div>
+
+      <!-- Section 4: DPA Details -->
+      <div>
+        <div>
+          <label for="dpa-reference" class="block text-sm font-medium text-gray-700">DPA Reference / Contract ID</label>
+          <input type="text" id="dpa-reference" name="dpa_reference" required placeholder="e.g., DPA-SC-001-2025" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="close-modal-btn" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Cancel</button>
+        <button type="submit" id="save-app-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Save App</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+    // --- Configuration ---
+    // Assuming API structure based on FiduciaryService and convention
+    const API_URL_APPS = '/api/v1/admin/app';
+    const API_URL_FIDUCIARIES_LIST = '/api/v1/admin/fiduciary'; // To populate dropdown
+    const AUTH_TOKEN = localStorage.getItem('authToken');
+    const USER_NAME = localStorage.getItem('username');
+    // set user name
+    document.getElementById('username').textContent = USER_NAME;
+
+    // --- Global DOM Element Variables ---
+    let sidebar, menuToggle, backdrop, appModalOverlay, addAppBtn, closeModalBtn, appForm, tableBody, countSpan, errorMessageP, searchInput;
+    let appIdHidden, appNameInput, fiduciarySelect, appEmailInput, appPhoneInput, processingPurposeInput, dpaReferenceInput;
+
+    let FiduciaryList = []; // Cache Fiduciary names for display
+
+    // --- Helper Functions ---
+
+    function toggleMenu() {
+        sidebar.classList.toggle('open');
+        backdrop.classList.toggle('hidden');
+    }
+
+    function showModal(title, isEdit = false) {
+        document.getElementById('modal-title').textContent = title;
+        appForm.reset();
+        appIdHidden.value = '';
+
+        document.getElementById('save-app-btn').textContent = isEdit ? 'Update App' : 'Save App';
+
+        // Ensure inputs are enabled for creation, or potentially disabled/locked for editing sensitive fields
+        appNameInput.disabled = false;
+        fiduciarySelect.disabled = false;
+        appModalOverlay.style.display = 'flex';
+    }
+
+    function closeModal() {
+        appModalOverlay.style.display = 'none';
+    }
+
+    function createStatusBadge(status) {
+        let colorClass = '';
+        switch (status) {
+            case 'ACTIVE': colorClass = 'bg-green-100 text-green-800'; break;
+            case 'PENDING': colorClass = 'bg-yellow-100 text-yellow-800'; break;
+            case 'INACTIVE':
+            case 'REVOKED': colorClass = 'bg-red-100 text-red-800'; break;
+            default: colorClass = 'bg-gray-100 text-gray-800';
+        }
+        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+    }
+
+    // Function to get Fiduciary Name from ID (for display purposes)
+    function getFiduciaryName(id) {
+        const fiduciary = FiduciaryList.find(f => f.fiduciary_id === id);
+        return fiduciary ? fiduciary.name : 'Unknown Fiduciary';
+    }
+
+    function createAppRow(app) {
+        const row = document.createElement('tr');
+        const showDeactivate = app.status === 'ACTIVE' || app.status === 'PENDING';
+
+        const actionsHtml = `
+            ${showDeactivate ?
+                `<button class="text-indigo-600 hover:text-indigo-900 font-medium text-sm mr-2" onclick="editApp('${app.app_id}', '${app.fiduciary_id}')">Edit</button><button class="text-red-600 hover:text-red-900 font-medium text-sm" onclick="deactivateApp('${app.app_id}', '${app.fiduciary_id}')">Deactivate</button>`
+                : `<span class="text-gray-500 text-xs">Access Suspended</span>`}
+        `;
+
+        row.innerHTML = `
+            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${app.name || 'N/A'}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${getFiduciaryName(app.fiduciary_id)}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${app.processing_purpose || 'N/A'}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${app.dpa_reference || 'N/A'}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(app.status)}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm">
+                ${actionsHtml}
+            </td>
+        `;
+        return row;
+    }
+
+    // --- Core Logic ---
+
+    // 1. Fetch Fiduciaries for Dropdown Population and Name Lookup
+    async function fetchFiduciariesForDropdown() {
+        try {
+            const payload = {
+            "_func": "list_fiduciaries",
+            "status": "ACTIVE",
+            "search": "",
+            "page": 1,
+            "limit": 50
+            };
+            const response = await fetch(API_URL_FIDUCIARIES_LIST, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                 // Even if list fails, we want to try loading apps later
+                 console.error("Failed to fetch Fiduciaries list for dropdown. Status:", response.status);
+                 return [];
+            }
+
+
+            const responseData = await response.json();
+
+            if (responseData.status === 401) {
+              alert("Session Expired: " + (responseData.message || "Authentication required."));
+              handleLogout();
+              return;
+            }
+
+            FiduciaryList = responseData; // Assuming backend returns array of Fiduciaries
+
+            fiduciarySelect.innerHTML = '<option value="">-- Select Fiduciary --</option>';
+            FiduciaryList.forEach(f => {
+                const option = document.createElement('option');
+                option.value = f.fiduciary_id;
+                option.textContent = f.name;
+                fiduciarySelect.appendChild(option);
+            });
+            return responseData;
+        } catch (error) {
+            console.error("Error fetching Fiduciaries for dropdown:", error);
+            return [];
+        }
+    }
+
+
+    // 2. Load Apps List
+    async function loadApps(searchTerm = "") {
+        tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">Loading Apps...</td></tr>`;
+        errorMessageP.classList.add('hidden');
+
+        // Ensure Fiduciary list is loaded first for display names
+        if (FiduciaryList.length === 0) {
+            const fids = await fetchFiduciariesForDropdown();
+            if (fids.length === 0) {
+                 tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">
+                    No Data Fiduciaries found.
+                 </td></tr>`;
+                 countSpan.textContent = '0 Total';
+                 return;
+            }
+        }
+
+        try {
+            const listPayload = {
+                "_func": "list_apps",
+                "fiduciary_id": "",
+                "search": searchTerm,
+                "status": "",
+                "page": 1,
+                "limit": 50
+            };
+
+            const response = await fetch(API_URL_APPS, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${AUTH_TOKEN}`
+                },
+                body: JSON.stringify(listPayload)
+            });
+
+            if (!response.ok) throw new Error(`API returned status ${response.status}`);
+
+            const responseData = await response.json();
+
+            // Assuming responseData structure is: [{...}, {...}]
+            if (Array.isArray(responseData)) {
+                const apps = responseData;
+                tableBody.innerHTML = '';
+
+                if (apps.length === 0) {
+                    tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">No Apps found matching criteria.</td></tr>`;
+                } else {
+                    apps.forEach(app => {
+                        tableBody.appendChild(createAppRow(app));
+                    });
+                    countSpan.textContent = `Showing 1 - ${apps.length} of ${apps.length} Total`;
+                }
+            } else {
+                throw new Error(responseData.message || 'API returned unexpected structure.');
+            }
+
+        } catch (error) {
+            console.error("Error loading apps:", error);
+            tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-red-600">
+                Error connecting to the CMS API. Ensure the service is running and the token is valid.
+            </td></tr>`;
+            errorMessageP.classList.remove('hidden');
+            countSpan.textContent = '0 Total';
+        }
+    }
+
+    // 3. Fetch Single App Details
+    async function fetchAppDetails(appId, fiduciaryId) {
+        try {
+            const payload = {
+                "_func": "get_app",
+                "app_id": appId,
+                "fiduciary_id": fiduciaryId // Include Fiduciary ID in the payload
+            };
+
+            const response = await fetch(API_URL_APPS, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) throw new Error(`Failed to fetch details for ${appId}. Status: ${response.status}`);
+
+            const responseData = await response.json();
+
+            if (responseData.name) {
+                return responseData;
+            } else {
+                throw new Error(responseData.message || 'App details not found.');
+            }
+        } catch (error) {
+            console.error("Error fetching App details:", error);
+            alert(`Failed to load details for editing: ${error.message}`);
+            return null;
+        }
+    }
+
+    // 4. Handle Edit
+    async function editApp(appId, fiduciaryId) {
+        showModal('Edit App', true);
+        const app = await fetchAppDetails(appId, fiduciaryId);
+        console.log(app);
+        if (app) {
+            appIdHidden.value = app.app_id;
+            appNameInput.value = app.name || '';
+            fiduciarySelect.value = app.fiduciary_id || '';
+            appEmailInput.value = app.email || '';
+            appPhoneInput.value = app.phone || '';
+            processingPurposeInput.value = app.processing_purposes || '';
+            dpaReferenceInput.value = app.dpa_reference || '';
+            appStatusSelect.value = app.status || 'ACTIVE';
+
+            // Lock fields that should not be changed easily
+            appNameInput.disabled = true;
+            fiduciarySelect.disabled = true;
+        } else {
+            closeModal();
+        }
+    }
+
+    // 5. Handle Deactivate
+    async function deactivateApp(appId, fiduciaryId) {
+        if (confirm(`Are you sure you want to DEACTIVATE App ID ${appId}? This will suspend all data processing for this entity.`)) {
+            try {
+                const payload = { "_func": "delete_app", "app_id": appId, "fiduciary_id": fiduciaryId};
+
+                const response = await fetch(API_URL_APPS, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    alert(`App ID ${appId} successfully deactivated.`);
+                    loadApps();
+                } else {
+                    const responseData = await response.json();
+                    const errorMsg = responseData.message || responseData.error.message || `Status: ${response.status}`;
+                    alert(`Failed to deactivate App ID ${id}: ${errorMsg}`);
+                }
+
+            } catch (error) {
+                console.error("Error during deactivation API call:", error);
+                alert("Network error: Could not communicate with the API during deactivation.");
+            }
+        }
+    }
+
+     function handleLogout() {
+        localStorage.removeItem('authToken');
+        localStorage.removeItem('username');
+        window.location.href = "../index.html";
+    }
+
+    // --- Event Listeners and Initialization ---
+
+    // --- Variable Assignments ---
+    sidebar = document.getElementById('sidebar');
+    menuToggle = document.getElementById('menu-toggle');
+    backdrop = document.getElementById('sidebar-backdrop');
+    appModalOverlay = document.getElementById('app-modal-overlay');
+    addAppBtn = document.getElementById('add-app-btn');
+    closeModalBtn = document.getElementById('close-modal-btn');
+    appForm = document.getElementById('app-form');
+    tableBody = document.getElementById('app-table-body');
+    countSpan = document.getElementById('app-count');
+    errorMessageP = document.getElementById('app-error-message');
+    searchInput = document.getElementById('search-input');
+
+    // Form Fields for Edit/Add
+    appIdHidden = document.getElementById('app-id-hidden');
+    appNameInput = document.getElementById('app-name');
+    fiduciarySelect = document.getElementById('fiduciary-select');
+    appEmailInput = document.getElementById('app-email');
+    appPhoneInput = document.getElementById('app-phone');
+    processingPurposeInput = document.getElementById('processing-purpose');
+    dpaReferenceInput = document.getElementById('dpa-reference');
+
+    // --- Event Listener Attachments ---
+    menuToggle.addEventListener('click', toggleMenu);
+    backdrop.addEventListener('click', toggleMenu);
+    addAppBtn.addEventListener('click', () => showModal('Add New App'));
+    closeModalBtn.addEventListener('click', closeModal);
+
+    // --- Search Functionality ---
+    searchInput.addEventListener('keypress', function(event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            const searchTerm = searchInput.value.trim();
+            loadApps(searchTerm);
+        }
+    });
+
+    // --- Initialization Call ---
+    loadApps();
+
+     // 5. Handle Form Submission
+    appForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+
+        const formData = new FormData(appForm);
+        const data = Object.fromEntries(formData.entries());
+
+        const isEditing = !!data.appId;
+        const func = isEditing ? "update_app" : "create_app";
+
+        const payload = {
+            "_func": func,
+            "app_id": data.appId,
+            "fiduciary_id": data.fiduciary_id,
+            "name": data.name,
+            "email": data.email,
+            "phone": data.phone,
+            "processing_purposes": data.processing_purpose,
+            "dpa_reference": data.dpa_reference
+        };
+
+        // Clean up payload if creating (remove ID)
+        if (!isEditing) {
+            delete payload.app_id;
+            if (!payload.fiduciary_id) {
+                alert("Please select an Associated Data Fiduciary.");
+                return;
+            }
+        }
+
+        try {
+            document.getElementById('save-app-btn').textContent = isEditing ? 'Updating...' : 'Saving...';
+            document.getElementById('save-app-btn').disabled = true;
+
+            const response = await fetch(API_URL_APPS, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${AUTH_TOKEN}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                alert(`App ${isEditing ? 'updated' : 'added'} successfully!`);
+                closeModal();
+                loadApps();
+            } else {
+                const responseData = await response.json();
+                const errorMsg = responseData.message || responseData.error.message || `Status: ${response.status}`;
+                alert(`Failed to ${isEditing ? 'update' : 'add'} App: ${errorMsg}`);
+            }
+
+        } catch (error) {
+            console.error(`Error ${isEditing ? 'updating' : 'creating'} App:`, error);
+            alert("Network error: Could not connect to API.");
+        } finally {
+            document.getElementById('save-app-btn').textContent = isEditing ? 'Update App' : 'Save App';
+            document.getElementById('save-app-btn').disabled = false;
+        }
+    });
+
+    // Expose functions globally so they can be called by inline onclick attributes
+    window.editApp = editApp;
+    window.deactivateApp = deactivateApp;
+    window.toggleMenu = toggleMenu; // Mobile menu
+
+</script>
+</body>
+
+</html>

@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Generated schema for Root",
+  "type": "object",
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "policy_id": {
+      "type": "string"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "jurisdiction": {
+      "type": "string"
+    },
+    "language_selected": {
+      "type": "string"
+    },
+    "consent_status_general": {
+      "type": "string"
+    },
+    "consent_mechanism": {
+      "type": "string"
+    },
+    "ip_address": {
+      "type": "string"
+    },
+    "user_agent": {
+      "type": "string"
+    },
+    "data_point_consents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "data_point_id": {
+            "type": "string"
+          },
+          "consent_granted": {
+            "type": "boolean"
+          },
+          "purpose_agreed_to": {
+            "type": "string"
+          },
+          "timestamp_updated": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_point_id",
+          "consent_granted",
+          "purpose_agreed_to",
+          "timestamp_updated"
+        ]
+      }
+    }
+  },
+  "required": [
+    "_func",
+    "user_id",
+    "policy_id",
+    "data_point_consents"
+  ]
+}

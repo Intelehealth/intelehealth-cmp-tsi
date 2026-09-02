@@ -1,0 +1,66 @@
+# TSI DPDP CMS - Python FastAPI port
+# Compose defaults are local-dev only. Do not use them on a public host.
+# For anything beyond a laptop, copy .env.example to .env and set unique secrets.
+
+x-db-credentials: &db-credentials
+  POSTGRES_DB: "${POSTGRES_DB:-tsi_cms}"
+  POSTGRES_USER: "${POSTGRES_USER:-tsi_admin}"
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWD:-secure_dev_password}"
+  DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:-local-dev-enc-key-do-not-use-in-production}"
+
+services:
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: tsi_dpdp_cms_py_db
+    restart: unless-stopped
+    environment:
+      <<: *db-credentials
+    ports:
+      - "${PY_DB_PORT_MAP:-127.0.0.1:5434:5432}"
+    volumes:
+      - postgres_py_data:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tsi_internal
+
+  python_app:
+    build:
+      context: .
+      dockerfile: python_port/Dockerfile
+    image: tsi-dpdp-cms-python:local
+    container_name: tsi_dpdp_cms_py_server
+    restart: unless-stopped
+    ports:
+      - "${PY_APP_PORT_MAP:-8091:8080}"
+    environment:
+      POSTGRES_HOST: "postgresql://postgres_db:5432"
+      POSTGRES_DB: "${POSTGRES_DB:-tsi_cms}"
+      POSTGRES_USER: "${POSTGRES_USER:-tsi_admin}"
+      POSTGRES_PASSWD: "${POSTGRES_PASSWD:-secure_dev_password}"
+      TSI_DPDP_CMS_ENV: "${TSI_DPDP_CMS_ENV:-local}"
+      TSI_EXPORT_PATH: "${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}"
+      JWT_SECRET: "${JWT_SECRET:-tsi-dpdp-cms-local-dev-secret-do-not-use-in-production}"
+      DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:-local-dev-enc-key-do-not-use-in-production}"
+      TSI_LOOKUP_SALT: "${TSI_LOOKUP_SALT:-local-dev-lookup-salt-do-not-use-in-production}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:8091}"
+      BRAND_NAME: "${BRAND_NAME:-TSI DPDP CMS}"
+    volumes:
+      - tsi_py_reports_data:${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}:rw
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    networks:
+      - tsi_internal
+
+networks:
+  tsi_internal:
+    driver: bridge
+
+volumes:
+  postgres_py_data:
+  tsi_py_reports_data:
