@@ -1,13 +1,13 @@
-﻿# tsi-fork-python-port
+# Intelehealth CMP (TSI) — DPDP Consent Management System
 
 Standalone FastAPI port of the TSI DPDP Consent Management System. It serves the existing static consoles and talks to PostgreSQL with `pgcrypto` for encrypted PII.
 
-This tree is meant to be published as its own GitHub repository. It does **not** include the original Java servlet sources.
+This repository does **not** include the original Java servlet sources.
 
 ## Layout
 
 | Path | Purpose |
-|------|---------|
+| --- | --- |
 | `python_port/` | FastAPI application |
 | `web/` | Static UI and JSON Schema validators |
 | `db/` | PostgreSQL init scripts (applied on first database start) |
@@ -22,7 +22,7 @@ Docker Compose uses **local-only** default passwords and keys if you have no `.e
 docker compose up -d --build
 ```
 
-App: http://localhost:8091  
+App: <http://localhost:8091>
 Postgres (loopback only): `localhost:5434`
 
 Watch first boot:
@@ -44,19 +44,19 @@ cp .env.example .env
 
 cd python_port
 python -m venv .venv
-.venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn dpdpcms_py.main:app --host 127.0.0.1 --port 8080
 ```
 
-On macOS/Linux, activate with `source .venv/bin/activate`.
+On Windows, activate with `.venv\Scripts\activate`.
 
 Point `POSTGRES_HOST` at your Postgres (Compose maps it to host port **5434**). Align `ALLOWED_ORIGINS` with the URL you open in the browser.
 
 ## Environment
 
 | Variable | Role |
-|----------|------|
+| --- | --- |
 | `POSTGRES_HOST` | `postgresql://host:port` (JDBC-style `jdbc:postgresql://...` is still accepted) |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWD` | Database connection |
 | `JWT_SECRET` | HS256 signing key (min 32 characters) |
@@ -79,27 +79,15 @@ Routing matches the original servlet filter:
 - `/api/v1/bootstrap/setup` — first-time admin only (`initial_setup`)
 - `/api/v1/{service}` — legacy admin path
 
-## License
-
-This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. See `LICENSE`. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
-
-## Publishing this repository
-
-1. Confirm you have the right to publish this fork (original TSI DPDP CMS copyright).
-2. Create an empty GitHub repo, then:
-
-```bash
-git add .
-git commit -m "Initial public snapshot of the Python DPDP CMS port."
-git remote add origin git@github.com:<you>/<repo>.git
-git push -u origin main
-```
-
-Do not commit `.env`, `exports/`, or Python virtualenvs. They are gitignored.
-
 ## Security notes
 
 - Compose default secrets are for local development only.
 - Postgres is published on `127.0.0.1:5434` by default, not on all interfaces.
 - Never change `DB_ENCRYPTION_KEY` after the database has encrypted rows.
 - Keep `TSI_DPDP_CMS_ENV` off `local` in any deployed environment so `/docs` is disabled.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). Please do not open public issues for security problems.
+
+## License
+
+This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. See `LICENSE`. If a copy of the MPL was not distributed with this file, You can obtain one at <https://mozilla.org/MPL/2.0/>.
