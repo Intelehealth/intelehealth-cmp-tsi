@@ -1,0 +1,44 @@
+name: Ruff Autofix
+
+# One-time / on-demand helper: applies `ruff check --fix` and `ruff format`
+# to python_port and commits the result back to the branch you run it on.
+# Trigger it from the Actions tab -> "Ruff Autofix" -> "Run workflow".
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Apply lint fixes
+        run: ruff check python_port --fix
+
+      - name: Apply formatting
+        run: ruff format python_port
+
+      - name: Commit and push fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Nothing to fix - working tree clean."
+          else
+            git add -A
+            git commit -m "style: apply ruff autofixes and formatting"
+            git push
+          fi
