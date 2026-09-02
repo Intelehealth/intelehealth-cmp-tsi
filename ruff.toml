@@ -1,0 +1,20 @@
+# Lint configuration for CI and local development.
+# One-time setup: run `ruff check python_port --fix` to clean up existing
+# unused imports and import ordering, then commit. CI stays green after that.
+
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+  "E4", # imports
+  "E7", # statements
+  "E9", # runtime errors
+  "F",  # pyflakes (undefined names, unused imports/vars)
+  "I",  # import sorting
+  "UP", # pyupgrade (modern syntax)
+  "B",  # bugbear (likely bugs)
+]
+ignore = [
+  "B008", # function call in default argument — idiomatic in FastAPI (Depends)
+]
