@@ -42,6 +42,7 @@ class Settings:
     brand_name: str
     environment: str
     export_path: Path
+    bootstrap_token: str
     token_ttl_minutes: int = 480
 
     @staticmethod
@@ -79,6 +80,7 @@ class Settings:
             brand_name=brand,
             environment=os.getenv("TSI_DPDP_CMS_ENV", "local"),
             export_path=Path(os.getenv("TSI_EXPORT_PATH", str(ROOT / "exports"))),
+            bootstrap_token=_secret("BOOTSTRAP_TOKEN"),
         )
 
 

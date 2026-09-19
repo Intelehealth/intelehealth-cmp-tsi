@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from . import db
 from .config import WEB_ROOT, settings
 from .context import RequestContext
 from .errors import ApiError, error_body
@@ -44,6 +46,12 @@ CLIENT_ALLOWED_FUNCS = {
     "mark_notification_read",
     "record_parent_consent",
     "list_active_policies",
+    "sync",
+    "create_nomination",
+    "list_nominations",
+    "revoke_nomination",
+    "submit_correction",
+    "list_corrections",
 }
 CLIENT_FUNC_SCOPES = {
     "record_consent": "WRITE",
@@ -65,6 +73,12 @@ CLIENT_FUNC_SCOPES = {
     "list_active_policies": "READ",
     "list_purge_requests": "PURGE",
     "update_purge_status": "PURGE",
+    "sync": "READ",
+    "create_nomination": "WRITE",
+    "list_nominations": "READ",
+    "revoke_nomination": "WRITE",
+    "submit_correction": "WRITE",
+    "list_corrections": "READ",
 }
 
 
@@ -108,7 +122,31 @@ def _json_response(data: Any, status: int = 200) -> Response:
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok"}
+    tables = (
+        "consent_records",
+        "consent_policies",
+        "data_principal",
+        "fiduciaries",
+        "grievances",
+        "purge_requests",
+        "audit_logs",
+        "ropa_entries",
+        "breach_incidents",
+        "evidence_certificates",
+    )
+    try:
+        with db.connection() as conn, conn.cursor() as cur:
+            for table in tables:
+                cur.execute("SELECT to_regclass(%s) AS table_name", (f"public.{table}",))
+                row = cur.fetchone()
+                if not row or not row.get("table_name"):
+                    return JSONResponse(
+                        {"status": "degraded", "detail": f"database schema is incomplete: missing {table}"},
+                        status_code=503,
+                    )
+        return {"status": "ok"}
+    except Exception as exc:
+        return JSONResponse({"status": "unavailable", "detail": str(exc)}, status_code=503)
 
 
 async def payload_from(request: Request) -> dict:
@@ -122,6 +160,17 @@ async def payload_from(request: Request) -> dict:
         return dict(form)
 
 
+def _bootstrap_authorized(ctx: RequestContext) -> bool:
+    supplied = (
+        ctx.headers.get("x-bootstrap-token")
+        or ctx.headers.get("X-Bootstrap-Token")
+        or ctx.payload.get("bootstrap_token")
+    )
+    if not supplied:
+        return False
+    return hmac.compare_digest(str(supplied), settings.bootstrap_token)
+
+
 def authenticate(ctx: RequestContext) -> None:
     func = ctx.func
     if ctx.category == "public":
@@ -131,6 +180,8 @@ def authenticate(ctx: RequestContext) -> None:
     if ctx.category == "bootstrap":
         if (ctx.service, ctx.func) not in BOOTSTRAP_ALLOWED:
             raise ApiError(403, "Forbidden", "Bootstrap is limited to initial setup.")
+        if not _bootstrap_authorized(ctx):
+            raise ApiError(401, "Unauthorized", "A valid bootstrap token is required.")
         return
     if ctx.category == "admin":
         if func in ADMIN_NOAUTH_FUNCS:
@@ -156,6 +207,9 @@ def authenticate(ctx: RequestContext) -> None:
                 raise ApiError(
                     403, "Forbidden", "User ID mismatch: token does not authorize access to the requested principal."
                 )
+            # A principal token is scoped to its own fiduciary: never trust a
+            # fiduciary_id supplied in the request body.
+            ctx.payload["fiduciary_id"] = ctx.fiduciary_id
             return
         ok, fid, scopes = api_key_valid(
             ctx.headers.get("x-api-key") or ctx.headers.get("X-API-Key"),
@@ -165,14 +219,19 @@ def authenticate(ctx: RequestContext) -> None:
             raise ApiError(401, "Unauthorized", "Invalid or inactive API Key/Secret.")
         ctx.fiduciary_id = fid
         ctx.permissions = scopes
+        # An API key is bound to one fiduciary: override any tenant id supplied in
+        # the body so a key can never read or write another tenant's records.
+        ctx.payload["fiduciary_id"] = ctx.fiduciary_id
 
 
-async def dispatch(request: Request, category: str, service: str) -> Response:
+async def dispatch(request: Request, category: str, service: str, func: str | None = None) -> Response:
     path = request.url.path
     try:
         if request.method not in {"POST", "GET"}:
             raise ApiError(405, "Method Not Allowed", "Only POST method is supported.")
         payload = await payload_from(request)
+        if func and not payload.get("_func"):
+            payload["_func"] = func
         if request.method == "POST":
             errors = validate_payload(payload)
             if errors:
@@ -190,7 +249,7 @@ async def dispatch(request: Request, category: str, service: str) -> Response:
             raise ApiError(404, "Not Found", f"API endpoint not found: {path}")
         authenticate(ctx)
         result = service_cls().handle(ctx)
-        status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_")) else 200
+        status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_", "submit_")) else 200
         return _json_response(result, status=status)
     except ApiError as exc:
         return JSONResponse(error_body(exc.status, exc.error, exc.message, path), status_code=exc.status)
@@ -211,6 +270,13 @@ async def categorized_api(request: Request, category: str, service: str):
     if category not in {"admin", "client", "public", "bootstrap"}:
         return await dispatch(request, "admin", category)
     return await dispatch(request, category, service)
+
+
+@app.api_route("/api/v1/{category}/{service}/{func}", methods=["POST", "GET", "OPTIONS"])
+async def categorized_api_func(request: Request, category: str, service: str, func: str):
+    if category not in {"admin", "client", "public", "bootstrap"}:
+        return await dispatch(request, "admin", category, func)
+    return await dispatch(request, category, service, func)
 
 
 @app.get("/{full_path:path}")

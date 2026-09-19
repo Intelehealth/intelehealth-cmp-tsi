@@ -9,6 +9,11 @@ from . import db
 from .context import ADMIN_FIDUCIARY_ID
 from .security import pseudonym
 
+# Serialises the read-last-hash / insert pair so concurrent writers chain from the
+# same predecessor rather than forking the chain. Held for the length of the
+# transaction (xact lock) and released on commit.
+AUDIT_CHAIN_LOCK = 724521053  # arbitrary constant bigint advisory lock key
+
 
 def log_event(
     user_id: str | None,
@@ -20,32 +25,35 @@ def log_event(
 ) -> None:
     context = details if isinstance(details, str) else json.dumps(details or {}, default=str)
     fid = fiduciary_id if fiduciary_id and fiduciary_id != ADMIN_FIDUCIARY_ID else None
-    previous = db.one("SELECT current_log_hash FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
-    previous_hash = previous["current_log_hash"] if previous else ""
     timestamp = datetime.now(UTC)
-    canonical = "|".join([previous_hash or "", timestamp.isoformat(), user_id or "", service_type, action, context])
-    current_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    db.execute(
-        """
-        INSERT INTO audit_logs
-            (id, fiduciary_id, timestamp, user_id, service_type, service_id,
-             audit_action, context_details, prev_log_hash, current_log_hash, system_metadata)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-        (
-            str(uuid.uuid4()),
-            fid,
-            timestamp,
-            pseudonym(user_id) if user_id else "SYSTEM",
-            service_type,
-            service_id,
-            action,
-            context,
-            previous_hash,
-            current_hash,
-            db.as_jsonb({"python_port": True}),
-        ),
-    )
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (AUDIT_CHAIN_LOCK,))
+        cur.execute("SELECT current_log_hash FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
+        previous = cur.fetchone()
+        previous_hash = previous["current_log_hash"] if previous else ""
+        canonical = "|".join([previous_hash or "", timestamp.isoformat(), user_id or "", service_type, action, context])
+        current_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        cur.execute(
+            """
+            INSERT INTO audit_logs
+                (id, fiduciary_id, timestamp, user_id, service_type, service_id,
+                 audit_action, context_details, prev_log_hash, current_log_hash, system_metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                str(uuid.uuid4()),
+                fid,
+                timestamp,
+                pseudonym(user_id) if user_id else "SYSTEM",
+                service_type,
+                service_id,
+                action,
+                context,
+                previous_hash,
+                current_hash,
+                db.as_jsonb({"python_port": True}),
+            ),
+        )
 
 
 def list_logs(payload: dict) -> list[dict]:
