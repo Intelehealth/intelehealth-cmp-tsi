@@ -55,11 +55,15 @@ ALTER TABLE operators
     ADD COLUMN IF NOT EXISTS email_enc  TEXT,
     ADD COLUMN IF NOT EXISTS email_hmac TEXT;
 
--- Step 2: Populate from existing plaintext data
+-- Step 2: Populate from existing plaintext data.
+-- Guarded so a fresh initialisation (no app.enc_key configured yet, no rows) does
+-- not abort the whole script -- the encryption key is set per-session by the app
+-- and by 03z_enc_key.sh.
 UPDATE operators
 SET
-    email_enc  = encode(pgp_sym_encrypt(email, current_setting('app.enc_key')), 'base64'),
-    email_hmac = encode(hmac(lower(trim(email)), current_setting('app.enc_key'), 'sha256'), 'hex');
+    email_enc  = encode(pgp_sym_encrypt(email, current_setting('app.enc_key', true)), 'base64'),
+    email_hmac = encode(hmac(lower(trim(email)), current_setting('app.enc_key', true), 'sha256'), 'hex')
+WHERE current_setting('app.enc_key', true) IS NOT NULL;
 
 -- Step 3: Enforce NOT NULL on new columns (mirrors original email NOT NULL)
 ALTER TABLE operators
@@ -88,18 +92,19 @@ ALTER TABLE fiduciaries
     ADD COLUMN IF NOT EXISTS email_hmac TEXT,
     ADD COLUMN IF NOT EXISTS phone_enc  TEXT;
 
--- Step 2: Populate from existing plaintext data
+-- Step 2: Populate from existing plaintext data (guarded, see operators above)
 UPDATE fiduciaries
 SET
     email_enc  = CASE WHEN email IS NOT NULL
-                      THEN encode(pgp_sym_encrypt(email, current_setting('app.enc_key')), 'base64')
+                      THEN encode(pgp_sym_encrypt(email, current_setting('app.enc_key', true)), 'base64')
                       ELSE NULL END,
     email_hmac = CASE WHEN email IS NOT NULL
-                      THEN encode(hmac(lower(trim(email)), current_setting('app.enc_key'), 'sha256'), 'hex')
+                      THEN encode(hmac(lower(trim(email)), current_setting('app.enc_key', true), 'sha256'), 'hex')
                       ELSE NULL END,
     phone_enc  = CASE WHEN phone IS NOT NULL
-                      THEN encode(pgp_sym_encrypt(phone, current_setting('app.enc_key')), 'base64')
-                      ELSE NULL END;
+                      THEN encode(pgp_sym_encrypt(phone, current_setting('app.enc_key', true)), 'base64')
+                      ELSE NULL END
+WHERE current_setting('app.enc_key', true) IS NOT NULL;
 
 -- Step 3: Move uniqueness to the HMAC column (partial index — NULLs excluded)
 ALTER TABLE fiduciaries DROP CONSTRAINT IF EXISTS fiduciaries_email_key;
@@ -124,15 +129,16 @@ ALTER TABLE apps
     ADD COLUMN IF NOT EXISTS email_enc TEXT,
     ADD COLUMN IF NOT EXISTS phone_enc TEXT;
 
--- Step 2: Populate from existing plaintext data
+-- Step 2: Populate from existing plaintext data (guarded, see operators above)
 UPDATE apps
 SET
     email_enc = CASE WHEN email IS NOT NULL
-                     THEN encode(pgp_sym_encrypt(email, current_setting('app.enc_key')), 'base64')
+                     THEN encode(pgp_sym_encrypt(email, current_setting('app.enc_key', true)), 'base64')
                      ELSE NULL END,
     phone_enc = CASE WHEN phone IS NOT NULL
-                     THEN encode(pgp_sym_encrypt(phone, current_setting('app.enc_key')), 'base64')
-                     ELSE NULL END;
+                     THEN encode(pgp_sym_encrypt(phone, current_setting('app.enc_key', true)), 'base64')
+                     ELSE NULL END
+WHERE current_setting('app.enc_key', true) IS NOT NULL;
 
 -- Step 3: Rename plaintext columns
 ALTER TABLE apps RENAME COLUMN email TO email_plaintext;
