@@ -5,6 +5,7 @@ from .catalog import AppService, FiduciaryService, PolicyService
 from .compliance import BreachService, ComplianceService, GrievanceService
 from .consent import ConsentService, PrincipalService, WalletService
 from .governance import ApiKeyService, AuditService, JobService, LegalService, NotificationService, RopaService
+from .rights import RightsService
 
 SERVICE_REGISTRY = {
     "setup": AdminSetupService,
@@ -25,4 +26,5 @@ SERVICE_REGISTRY = {
     "ropa": RopaService,
     "legal": LegalService,
     "breach": BreachService,
+    "rights": RightsService,
 }

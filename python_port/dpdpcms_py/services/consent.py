@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import db
@@ -24,6 +24,10 @@ def _consent_row(row: dict | None) -> dict | None:
 NOTIF_CONSENT_GIVEN = "CONSENT_GIVEN_NOTIFICATION"
 NOTIF_WITHDRAWAL_ACK = "WITHDRAWAL_ACKNOWLEDGMENT"
 NOTIF_ERASURE_REQUESTED = "ERASURE_REQUESTED_NOTIFICATION"
+
+# Cessation-based retention window stamped on each purpose at withdrawal (Section
+# 8(7)). Mirrors the Java build, which recorded a 1095-day expiry per purpose.
+RETENTION_CESSATION_DAYS = 1095
 
 
 def _point_granted(point: dict) -> bool:
@@ -52,6 +56,18 @@ def _point_grants(point: dict, purpose_id: str) -> bool:
     return _point_granted(point)
 
 
+def _normalise_purpose_ids(payload: dict) -> list[str]:
+    """Collect the purpose selection from 'purpose_ids' (array/string) and the legacy 'purpose_id' alias."""
+    raw = payload.get("purpose_ids") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    ids = [str(item).strip() for item in raw if item is not None and str(item).strip()]
+    single = payload.get("purpose_id")
+    if single is not None and str(single).strip() and str(single).strip() not in ids:
+        ids.append(str(single).strip())
+    return ids
+
+
 def _notify_principal(user_id: str, fiduciary_id: str, notification_type: str) -> None:
     db.execute(
         "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, %s)",
@@ -65,8 +81,40 @@ class ConsentService(Service):
         fid = _fid(ctx)
         user_id = require(payload.get("user_id"), "user_id")
         policy_id = require(payload.get("policy_id"), "policy_id")
-        version = payload.get("version") or payload.get("policy_version") or ""
         data_consents = require(payload.get("data_point_consents"), "data_point_consents")
+        requested_version = payload.get("version") or payload.get("policy_version") or ""
+        if requested_version:
+            policy = db.one(
+                "SELECT version FROM consent_policies WHERE id = %s AND version = %s", (policy_id, requested_version)
+            )
+            if not policy:
+                raise ApiError(
+                    400, "Bad Request", f"Policy version mismatch: no version '{requested_version}' for {policy_id}."
+                )
+            version = requested_version
+        else:
+            # Notice versioning: when the client does not state which notice the
+            # principal agreed to, stamp the current (preferring ACTIVE) version so
+            # the consent record always identifies the notice it points at.
+            policy = db.one(
+                "SELECT version FROM consent_policies WHERE id = %s ORDER BY (status = 'ACTIVE') DESC, effective_date DESC LIMIT 1",
+                (policy_id,),
+            )
+            if not policy:
+                raise ApiError(400, "Bad Request", f"Policy not found: {policy_id}.")
+            version = policy["version"]
+        age_category = str(payload.get("age_category") or "ADULT").upper()
+        guardian_id = payload.get("guardian_id")
+        if age_category == "MINOR":
+            if guardian_id:
+                pass
+            else:
+                parent_log = db.one(
+                    "SELECT id FROM parental_verification_logs WHERE child_principal_id = %s AND fiduciary_id = %s LIMIT 1",
+                    (user_id, fid),
+                )
+                if not parent_log:
+                    raise ApiError(403, "Forbidden", "Guardian consent is required to record consent for a minor.")
         with db.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE consent_records SET is_active_consent = FALSE, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE",
@@ -101,16 +149,20 @@ class ConsentService(Service):
             cid = str(cur.fetchone()["id"])
             cur.execute(
                 """
-                INSERT INTO data_principal (user_id, fiduciary_id, last_consent_mechanism, age_category, verification_status)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO data_principal (user_id, fiduciary_id, last_consent_mechanism, age_category, guardian_id, verification_status)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id, fiduciary_id) DO UPDATE SET
-                    last_consent_mechanism = EXCLUDED.last_consent_mechanism
+                    last_consent_mechanism = EXCLUDED.last_consent_mechanism,
+                    age_category = EXCLUDED.age_category,
+                    guardian_id = EXCLUDED.guardian_id,
+                    verification_status = EXCLUDED.verification_status
                 """,
                 (
                     user_id,
                     fid,
                     payload.get("consent_mechanism", "CONSENT_GIVEN"),
-                    payload.get("age_category", "ADULT"),
+                    age_category,
+                    guardian_id,
                     payload.get("verification_status", "NOT_VERIFIED"),
                 ),
             )
@@ -154,9 +206,12 @@ class ConsentService(Service):
         return _consent_row(row)
 
     def get_consent_record_details(self, ctx: RequestContext) -> dict:
-        row = db.one(
-            "SELECT * FROM consent_records WHERE id = %s", (require(ctx.payload.get("record_id"), "record_id"),)
-        )
+        where = ["id = %s"]
+        params: list[Any] = [require(ctx.payload.get("record_id"), "record_id")]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
+        row = db.one(f"SELECT * FROM consent_records WHERE {' AND '.join(where)}", params)
         if not row:
             raise ApiError(404, "Not Found", "Consent record not found.")
         return _consent_row(row)
@@ -277,15 +332,47 @@ class ConsentService(Service):
     def _withdraw(self, ctx: RequestContext, erasure: bool) -> dict:
         fid = _fid(ctx)
         user_id = require(ctx.payload.get("user_id"), "user_id")
-        db.execute(
-            "UPDATE consent_records SET is_active_consent = FALSE, consent_status_general = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE",
-            ("ERASURE_REQUESTED" if erasure else "WITHDRAWN", user_id, fid),
-        )
-        if erasure:
-            db.execute(
-                "INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details) VALUES (%s, %s, %s, 'ErasureRequest', %s)",
-                (user_id, fid, ctx.payload.get("purpose_id", "ALL"), ctx.payload.get("reason")),
+        purpose_ids = _normalise_purpose_ids(ctx.payload)
+        status = "ERASURE_REQUESTED" if erasure else "WITHDRAWN"
+        expiry = (datetime.now(UTC) + timedelta(days=RETENTION_CESSATION_DAYS)).isoformat()
+        record_id = None
+        with db.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, data_point_consents FROM consent_records WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE ORDER BY timestamp DESC LIMIT 1",
+                (user_id, fid),
             )
+            row = cur.fetchone()
+            if row:
+                points = row["data_point_consents"] or []
+                full_withdrawal = not purpose_ids
+                updated: list[Any] = []
+                for point in points:
+                    if not isinstance(point, dict):
+                        updated.append(point)
+                        continue
+                    stored_id = str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "")
+                    matches = full_withdrawal or any(stored_id.lower() == wanted.lower() for wanted in purpose_ids)
+                    if matches:
+                        point = dict(point)
+                        point["consent_granted"] = False
+                        point["consent_expiry"] = expiry
+                        point["status"] = "withdrawn"
+                    updated.append(point)
+                remaining = [p for p in updated if isinstance(p, dict) and _point_granted(p)]
+                is_active = bool(remaining)
+                row_status = status if not remaining else "PARTIAL_WITHDRAWAL"
+                cur.execute(
+                    "UPDATE consent_records SET data_point_consents = %s, is_active_consent = %s, consent_status_general = %s, last_updated_at = NOW() WHERE id = %s",
+                    (db.as_jsonb(updated), is_active, row_status, row["id"]),
+                )
+                record_id = str(row["id"])
+            if erasure:
+                targets = purpose_ids or ["ALL"]
+                for target in targets:
+                    cur.execute(
+                        "INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details) VALUES (%s, %s, %s, 'ErasureRequest', %s)",
+                        (user_id, fid, target, ctx.payload.get("reason")),
+                    )
         _notify_principal(user_id, fid, NOTIF_ERASURE_REQUESTED if erasure else NOTIF_WITHDRAWAL_ACK)
         log_event(
             user_id,
@@ -293,7 +380,7 @@ class ConsentService(Service):
             "APP",
             None,
             "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
-            {"reason": ctx.payload.get("reason")},
+            {"reason": ctx.payload.get("reason"), "purpose_ids": purpose_ids, "record_id": record_id},
         )
         return {
             "success": True,

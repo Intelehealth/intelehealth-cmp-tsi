@@ -13,11 +13,83 @@ from .base import Service, page_limit, reject_operator, require
 
 
 def resolve_fiduciary(ctx: RequestContext) -> str | None:
-    if ctx.payload.get("fiduciary_id"):
-        return str(ctx.payload["fiduciary_id"])
+    # An authenticated client/principal is always scoped to its own fiduciary;
+    # never let a body-supplied id override that. Admin (ctx.fiduciary_id unset)
+    # still selects a fiduciary via the payload.
     if ctx.fiduciary_id:
         return str(ctx.fiduciary_id)
+    if ctx.payload.get("fiduciary_id"):
+        return str(ctx.payload["fiduciary_id"])
     return operator_fiduciary_id(authenticated_user_id(ctx))
+
+
+def _purpose_ids_by_language(policy_content: Any) -> dict[str, set[str]]:
+    """Extract the set of declared purpose IDs per language block of a policy."""
+    sets: dict[str, set[str]] = {}
+    if not isinstance(policy_content, dict):
+        return sets
+    for lang, content in policy_content.items():
+        if not isinstance(content, dict):
+            continue
+        purposes = content.get("data_processing_purposes") or []
+        ids = {str(p.get("id")).strip() for p in purposes if isinstance(p, dict) and p.get("id")}
+        sets[str(lang)] = ids
+    return sets
+
+
+def check_language_parity(policy_content: Any) -> None:
+    """Reject a multilingual policy whose languages declare different purpose IDs (Section 5(3))."""
+    sets = _purpose_ids_by_language(policy_content)
+    if len(sets) < 2:
+        return
+    base_lang, base_ids = next(iter(sets.items()))
+    for lang, ids in sets.items():
+        if ids != base_ids:
+            raise ApiError(
+                400, "Bad Request", f"Language Parity Failure: Purpose IDs in '{lang}' do not match '{base_lang}'."
+            )
+
+
+def derive_ropa_entries(fiduciary_id: str, policy_id: str, policy_content: Any) -> None:
+    """Generate one draft ROPA entry per purpose declared in a policy, keyed on source_purpose_id."""
+    if not isinstance(policy_content, dict):
+        return
+    lang_block = next(iter(policy_content.values()), {})
+    if not isinstance(lang_block, dict):
+        return
+    purposes = lang_block.get("data_processing_purposes") or []
+    for purpose in purposes:
+        if not isinstance(purpose, dict):
+            continue
+        purpose_id = purpose.get("id")
+        if not purpose_id:
+            continue
+        existing = db.one(
+            "SELECT id FROM ropa_entries WHERE fiduciary_id = %s AND source_purpose_id = %s",
+            (fiduciary_id, str(purpose_id)),
+        )
+        if existing:
+            continue
+        db.execute(
+            """
+            INSERT INTO ropa_entries
+                (id, fiduciary_id, activity_name, purpose, legal_basis, data_categories,
+                 data_subject_categories, security_measures, linked_policy_ids, source_purpose_id,
+                 status, version, created_at, updated_at)
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', 1, NOW(), NOW())
+            """,
+            (
+                fiduciary_id,
+                purpose.get("name") or str(purpose_id),
+                purpose.get("description") or purpose.get("name") or str(purpose_id),
+                purpose.get("legal_basis") or "consent",
+                db.as_jsonb(purpose.get("data_categories_involved") or []),
+                db.as_jsonb(purpose.get("data_subject_categories") or []),
+                purpose.get("security_measures"),
+                db.as_jsonb([policy_id]),
+                str(purpose_id),
+            ),
+        )
 
 
 class FiduciaryService(Service):
@@ -283,9 +355,14 @@ class PolicyService(Service):
     def get_policy(self, ctx: RequestContext) -> dict:
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
+        where = ["id = %s", "version = %s"]
+        params: list[Any] = [pid, version]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
         row = db.one(
-            "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE id = %s AND version = %s",
-            (pid, version),
+            f"SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE {' AND '.join(where)}",
+            params,
         )
         if not row:
             raise ApiError(404, "Not Found", "Policy not found.")
@@ -307,6 +384,8 @@ class PolicyService(Service):
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        content = require(ctx.payload.get("policy_content"), "policy_content")
+        check_language_parity(content)
         db.execute(
             "INSERT INTO consent_policies (id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at) VALUES (%s, %s, %s, NOW(), 'DRAFT', %s, %s, NOW(), NOW())",
             (
@@ -314,9 +393,10 @@ class PolicyService(Service):
                 version,
                 fid,
                 require(ctx.payload.get("jurisdiction"), "jurisdiction"),
-                db.as_jsonb(require(ctx.payload.get("policy_content"), "policy_content")),
+                db.as_jsonb(content),
             ),
         )
+        derive_ropa_entries(fid, pid, content)
         return {
             "success": True,
             "data": {"policy_id": pid, "version": version, "message": "Policy created successfully."},
@@ -324,14 +404,20 @@ class PolicyService(Service):
 
     def update_policy(self, ctx: RequestContext) -> dict:
         reject_operator(ctx)
-        db.execute(
+        content = require(ctx.payload.get("policy_content"), "policy_content")
+        check_language_parity(content)
+        pid = require(ctx.payload.get("policy_id"), "policy_id")
+        version = ctx.payload.get("version") or ""
+        updated = db.execute(
             "UPDATE consent_policies SET policy_content = %s, last_updated_at = NOW() WHERE id = %s AND version = %s AND status = 'DRAFT'",
             (
-                db.as_jsonb(require(ctx.payload.get("policy_content"), "policy_content")),
-                require(ctx.payload.get("policy_id"), "policy_id"),
-                ctx.payload.get("version") or "",
+                db.as_jsonb(content),
+                pid,
+                version,
             ),
         )
+        if updated == 0:
+            raise ApiError(400, "Bad Request", "Policy not found or not in DRAFT status.")
         return {"success": True, "message": "Policy updated successfully."}
 
     def publish_policy(self, ctx: RequestContext) -> dict:
