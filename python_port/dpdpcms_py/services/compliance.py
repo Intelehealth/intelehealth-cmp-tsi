@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .. import db
+from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
 from .base import Service, page_limit, require
@@ -31,13 +32,14 @@ class ComplianceService(Service):
         return db.to_jsonable(row)
 
     def update_purge_status(self, ctx: RequestContext) -> dict:
+        where = ["id = %s"]
+        params: list = [require(ctx.payload.get("id"), "id")]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
         db.execute(
-            "UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW() WHERE id = %s",
-            (
-                require(ctx.payload.get("status"), "status"),
-                ctx.payload.get("details"),
-                require(ctx.payload.get("id"), "id"),
-            ),
+            f"UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW() WHERE {' AND '.join(where)}",
+            [require(ctx.payload.get("status"), "status"), ctx.payload.get("details"), *params],
         )
         return {"success": True}
 
@@ -51,29 +53,45 @@ class ComplianceService(Service):
 
 class GrievanceService(Service):
     def submit_grievance(self, ctx: RequestContext) -> dict:
+        user_id = require(ctx.payload.get("user_id"), "user_id")
+        fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        grievance_type = require(ctx.payload.get("type"), "type")
+        sla_days = 7 if grievance_type.upper() == "ERASURE_REQUEST" else 30
         row = db.insert_returning(
             """
             INSERT INTO grievances
                 (id, user_id, fiduciary_id, type, subject, description,
                  submission_timestamp, status, communication_log, attachments, due_date)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), 'NEW', %s, %s, NOW() + INTERVAL '30 days')
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), 'NEW', %s, %s, NOW() + make_interval(days => %s))
             RETURNING id
             """,
             (
-                require(ctx.payload.get("user_id"), "user_id"),
-                require(resolve_fiduciary(ctx), "fiduciary_id"),
-                require(ctx.payload.get("type"), "type"),
+                user_id,
+                fid,
+                grievance_type,
                 require(ctx.payload.get("subject"), "subject"),
                 require(ctx.payload.get("description"), "description"),
                 db.as_jsonb([]),
                 db.as_jsonb(ctx.payload.get("attachments") or []),
+                sla_days,
             ),
         )
-        return {"success": True, "grievance_id": str(row["id"])}
+        gid = str(row["id"])
+        db.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED')",
+            (user_id, fid),
+        )
+        log_event(user_id, fid, "APP", None, "GRIEVANCE_SUBMITTED", {"grievance_id": gid, "type": grievance_type})
+        return {"success": True, "grievance_id": gid}
 
     def get_grievance(self, ctx: RequestContext) -> dict:
         gid = ctx.payload.get("grievance_id") or ctx.payload.get("id")
-        row = db.one("SELECT * FROM grievances WHERE id = %s", (require(gid, "grievance_id"),))
+        where = ["id = %s"]
+        params: list = [require(gid, "grievance_id")]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
+        row = db.one(f"SELECT * FROM grievances WHERE {' AND '.join(where)}", params)
         if not row:
             raise ApiError(404, "Not Found", "Grievance not found.")
         return db.to_jsonable(row)
@@ -136,10 +154,12 @@ class BreachService(Service):
             INSERT INTO breach_incidents
                 (id, fiduciary_id, title, description, detected_at, affected_purpose_id,
                  affected_data_categories, actionable_steps, severity, status,
-                 affected_principal_count, created_by_user_id, notification_type)
+                 affected_principal_count, created_by_user_id, notification_type,
+                 board_notification_deadline)
             VALUES (uuid_generate_v4(), %s, %s, %s, COALESCE(%s::timestamptz, NOW()), %s, %s,
-                    %s, COALESCE(%s, 'MEDIUM'), 'OPEN', %s, %s, %s)
-            RETURNING id
+                    %s, COALESCE(%s, 'MEDIUM'), 'OPEN', %s, %s, %s,
+                    COALESCE(%s::timestamptz, NOW()) + INTERVAL '72 hours')
+            RETURNING id, board_notification_deadline
             """,
             (
                 require(resolve_fiduciary(ctx), "fiduciary_id"),
@@ -153,9 +173,14 @@ class BreachService(Service):
                 int(ctx.payload.get("affected_principal_count") or 0),
                 None,
                 ctx.payload.get("notification_type", "BREACH_NOTIFICATION"),
+                ctx.payload.get("detected_at"),
             ),
         )
-        return {"success": True, "breach_id": str(row["id"])}
+        return {
+            "success": True,
+            "breach_id": str(row["id"]),
+            "board_notification_deadline": row["board_notification_deadline"].isoformat(),
+        }
 
     def list_breaches(self, ctx: RequestContext) -> list[dict]:
         return db.to_jsonable(

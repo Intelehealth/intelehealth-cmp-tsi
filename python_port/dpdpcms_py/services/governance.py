@@ -146,10 +146,12 @@ class NotificationService(Service):
         )
 
     def mark_notification_read(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE notifications SET read_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("notification_id"), "notification_id"),),
-        )
+        where = ["id = %s"]
+        params: list = [require(ctx.payload.get("notification_id"), "notification_id")]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
+        db.execute(f"UPDATE notifications SET read_at = NOW() WHERE {' AND '.join(where)}", params)
         return {"success": True}
 
     def set_notification_message(self, ctx: RequestContext) -> dict:
@@ -285,8 +287,8 @@ class RopaService(Service):
                 (id, fiduciary_id, app_id, activity_name, purpose, legal_basis,
                  data_categories, data_subject_categories, retention_period_days,
                  retention_start_event, processors, cross_border_transfers,
-                 security_measures, linked_policy_ids, status, version, created_at, updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', 1, NOW(), NOW())
+                 security_measures, linked_policy_ids, dpo_id, status, version, created_at, updated_at)
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', 1, NOW(), NOW())
             RETURNING id
             """,
             (
@@ -303,6 +305,7 @@ class RopaService(Service):
                 db.as_jsonb(ctx.payload.get("cross_border_transfers") or []),
                 ctx.payload.get("security_measures"),
                 db.as_jsonb(ctx.payload.get("linked_policy_ids") or []),
+                ctx.payload.get("dpo_id"),
             ),
         )
         return {"success": True, "id": str(row["id"])}
@@ -319,6 +322,7 @@ class RopaService(Service):
             "retention_start_event",
             "security_measures",
             "status",
+            "dpo_id",
         ]:
             if key in ctx.payload:
                 fields.append(f"{key} = %s")
@@ -398,12 +402,22 @@ class RopaService(Service):
 
     def validate_completeness(self, ctx: RequestContext) -> dict:
         row = self.get_entry(ctx)
-        missing = [
-            k
-            for k in ["activity_name", "purpose", "legal_basis", "data_categories", "data_subject_categories"]
-            if not row.get(k)
+        required = [
+            "activity_name",
+            "purpose",
+            "legal_basis",
+            "data_categories",
+            "data_subject_categories",
+            "dpo_id",
         ]
-        return {"is_complete": not missing, "missing": missing}
+        missing = [k for k in required if not row.get(k)]
+        complete = not missing
+        return {
+            "is_complete": complete,
+            "complete": complete,
+            "missing": missing,
+            "missing_fields": missing,
+        }
 
     def export_ropa(self, ctx: RequestContext) -> str:
         rows = self.list_entries(ctx)
