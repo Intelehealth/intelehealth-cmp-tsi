@@ -16,7 +16,9 @@ uvicorn dpdpcms_py.main:app --host 127.0.0.1 --port 8080
 
 On macOS/Linux: `source .venv/bin/activate`.
 
-Required environment variables: `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWD`, `JWT_SECRET`, `DB_ENCRYPTION_KEY`, `TSI_LOOKUP_SALT`. Optional: `ALLOWED_ORIGINS`, `BRAND_NAME`, `TSI_EXPORT_PATH`, `TSI_DPDP_CMS_ENV`.
+Required environment variables: `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWD`, `JWT_SECRET`, `DB_ENCRYPTION_KEY`, `TSI_LOOKUP_SALT`, `BOOTSTRAP_TOKEN`. Optional: `ALLOWED_ORIGINS`, `BRAND_NAME`, `TSI_EXPORT_PATH`, `TSI_DPDP_CMS_ENV`.
+
+`BOOTSTRAP_TOKEN` protects the Super-Admin bootstrap endpoint (`/api/v1/bootstrap/setup`). Present it as an `X-Bootstrap-Token` header (or `bootstrap_token` in the request body) to run the initial setup.
 
 ## Notes
 
