@@ -47,6 +47,7 @@ services:
       JWT_SECRET: "${JWT_SECRET:-tsi-dpdp-cms-local-dev-secret-do-not-use-in-production}"
       DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:-local-dev-enc-key-do-not-use-in-production}"
       TSI_LOOKUP_SALT: "${TSI_LOOKUP_SALT:-local-dev-lookup-salt-do-not-use-in-production}"
+      BOOTSTRAP_TOKEN: "${BOOTSTRAP_TOKEN:-local-dev-bootstrap-token-do-not-use-in-production}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:8091}"
       BRAND_NAME: "${BRAND_NAME:-TSI DPDP CMS}"
     volumes:
