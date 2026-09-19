@@ -3,9 +3,9 @@ name: Main
 on:
   workflow_dispatch: {} 
   push:
-    branches: [feature_audit]
+    branches: [main]
   pull_request:
-    branches: [feature_audit]
+    branches: [main]
 
 permissions:
   contents: read
