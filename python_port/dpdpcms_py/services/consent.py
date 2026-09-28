@@ -68,6 +68,61 @@ def _normalise_purpose_ids(payload: dict) -> list[str]:
     return ids
 
 
+def declared_purpose_ids(policy_content: dict | None) -> set[str]:
+    """Purpose IDs declared across every language block of a policy."""
+    if not isinstance(policy_content, dict):
+        return set()
+    ids: set[str] = set()
+    for block in policy_content.values():
+        if not isinstance(block, dict):
+            continue
+        for purpose in block.get("data_processing_purposes") or []:
+            if isinstance(purpose, dict) and purpose.get("id"):
+                ids.add(str(purpose["id"]))
+    return ids
+
+
+def check_consent_alignment(fiduciary_id: str, policy_id: str, version: str, data_consents: list[Any]) -> None:
+    """CU-05: every purpose in a consent submission must be declared by the policy;
+    and no purpose may be CLOSED under the purpose lifecycle (PL-02/03)."""
+    policy = db.one(
+        "SELECT policy_content FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+        (policy_id, version, fiduciary_id),
+    )
+    if not policy:
+        raise ApiError(404, "Not Found", f"Policy {policy_id} version {version} not found.")
+    declared = declared_purpose_ids(policy.get("policy_content"))
+
+    requested: set[str] = set()
+    if isinstance(data_consents, list):
+        for point in data_consents:
+            if not isinstance(point, dict):
+                continue
+            pid = point.get("data_point_id") or point.get("purpose_id") or point.get("id")
+            if pid:
+                requested.add(str(pid).lower())
+    for pid in requested:
+        if pid not in {d.lower() for d in declared}:
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"Purpose '{pid}' is not declared in policy {policy_id} version {version}.",
+            )
+
+    closed = db.all(
+        "SELECT purpose_id FROM purpose_lifecycle WHERE fiduciary_id = %s AND state = 'CLOSED'",
+        (fiduciary_id,),
+    )
+    closed_ids = {str(row["purpose_id"]).lower() for row in closed}
+    overlap = requested & closed_ids
+    if overlap:
+        raise ApiError(
+            403,
+            "Forbidden",
+            f"Purpose(s) {sorted(overlap)} are closed — consent cannot be recorded for a closed purpose.",
+        )
+
+
 def _notify_principal(user_id: str, fiduciary_id: str, notification_type: str) -> None:
     db.execute(
         "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, %s)",
@@ -85,7 +140,8 @@ class ConsentService(Service):
         requested_version = payload.get("version") or payload.get("policy_version") or ""
         if requested_version:
             policy = db.one(
-                "SELECT version FROM consent_policies WHERE id = %s AND version = %s", (policy_id, requested_version)
+                "SELECT version, policy_content FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+                (policy_id, requested_version, fid),
             )
             if not policy:
                 raise ApiError(
@@ -97,12 +153,15 @@ class ConsentService(Service):
             # principal agreed to, stamp the current (preferring ACTIVE) version so
             # the consent record always identifies the notice it points at.
             policy = db.one(
-                "SELECT version FROM consent_policies WHERE id = %s ORDER BY (status = 'ACTIVE') DESC, effective_date DESC LIMIT 1",
-                (policy_id,),
+                "SELECT version, policy_content FROM consent_policies WHERE id = %s AND fiduciary_id = %s ORDER BY (status = 'ACTIVE') DESC, effective_date DESC LIMIT 1",
+                (policy_id, fid),
             )
             if not policy:
                 raise ApiError(400, "Bad Request", f"Policy not found: {policy_id}.")
             version = policy["version"]
+        # CU-05: the submission may only reference purposes the policy declares,
+        # and never a purpose that is CLOSED under the purpose lifecycle.
+        check_consent_alignment(fid, policy_id, version, data_consents)
         age_category = str(payload.get("age_category") or "ADULT").upper()
         guardian_id = payload.get("guardian_id")
         if age_category == "MINOR":
@@ -168,6 +227,16 @@ class ConsentService(Service):
             )
         _notify_principal(user_id, fid, NOTIF_CONSENT_GIVEN)
         log_event(user_id, fid, "APP", None, "CONSENT_GIVEN", {"policy_id": policy_id, "record_id": cid})
+        try:
+            from ..webhooks import queue_webhook
+
+            queue_webhook(
+                fid,
+                "CONSENT_RECORDED",
+                {"user_id": user_id, "policy_id": policy_id, "version": version, "consent_record_id": cid},
+            )
+        except Exception:  # pragma: no cover
+            pass
         return {"success": True, "data": {"consent_record_id": cid, "message": "Consent recorded successfully."}}
 
     def record_parent_consent(self, ctx: RequestContext) -> dict:
@@ -309,17 +378,26 @@ class ConsentService(Service):
     def validate_consent(self, ctx: RequestContext) -> dict:
         user_id = require(ctx.payload.get("user_id"), "user_id")
         purpose = require(ctx.payload.get("required_purpose_id"), "required_purpose_id")
+        fid = _fid(ctx)
         row = db.one(
             "SELECT id, data_point_consents FROM consent_records WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE ORDER BY timestamp DESC LIMIT 1",
-            (user_id, _fid(ctx)),
+            (user_id, fid),
         )
         valid = False
         if row:
             points = row.get("data_point_consents") or []
             valid = any(_point_grants(p, purpose) for p in points if isinstance(p, dict))
+        # PL-02/PL-03: a CLOSED purpose can never validate — closing one must halt
+        # further processing under it even if a consent row still exists.
+        lifecycle = db.one(
+            "SELECT state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
+            (fid, purpose),
+        )
+        if lifecycle and lifecycle["state"] == "CLOSED":
+            valid = False
         db.execute(
             "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
-            (_fid(ctx), user_id, purpose, "VALID" if valid else "INVALID"),
+            (fid, user_id, purpose, "VALID" if valid else "INVALID"),
         )
         return {"valid": valid, "status": "VALID" if valid else "INVALID", "required_purpose_id": purpose}
 
@@ -382,6 +460,18 @@ class ConsentService(Service):
             "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
             {"reason": ctx.payload.get("reason"), "purpose_ids": purpose_ids, "record_id": record_id},
         )
+        # CW-08: push a stop signal to linked systems instead of relying on them
+        # to poll. Delivery happens through the webhook dispatcher worker.
+        try:
+            from ..webhooks import queue_webhook
+
+            queue_webhook(
+                fid,
+                "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
+                {"user_id": user_id, "purpose_ids": purpose_ids, "consent_record_id": record_id, "erasure": erasure},
+            )
+        except Exception:  # pragma: no cover
+            pass
         return {
             "success": True,
             "message": "Erasure request submitted." if erasure else "Consent withdrawn successfully.",
