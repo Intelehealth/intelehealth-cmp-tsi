@@ -44,6 +44,25 @@ class Settings:
     export_path: Path
     bootstrap_token: str
     token_ttl_minutes: int = 480
+    # ── P1 background worker (worker.py) ────────────────────────────────────
+    worker_poll_seconds: int = 30
+    worker_batch_size: int = 50
+    # ── P1 notification delivery adapter (delivery.py) ──────────────────────
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+    sms_gateway_url: str = ""
+    push_gateway_url: str = ""
+    notification_retry_limit: int = 5
+    # ── P1 webhook dispatcher (webhooks.py) ─────────────────────────────────
+    webhook_retry_limit: int = 5
+    # ── P1 worker sweep thresholds ──────────────────────────────────────────
+    alert_escalation_hours: int = 24
+    purge_notice_hours: int = 48          # DPDP Rule 8(2): 48h notice before deletion
+    grievance_escalation_hours: int = 24  # beyond the SLA due_date
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -81,6 +100,21 @@ class Settings:
             environment=os.getenv("TSI_DPDP_CMS_ENV", "local"),
             export_path=Path(os.getenv("TSI_EXPORT_PATH", str(ROOT / "exports"))),
             bootstrap_token=_secret("BOOTSTRAP_TOKEN"),
+            worker_poll_seconds=int(os.getenv("WORKER_POLL_SECONDS", "30")),
+            worker_batch_size=int(os.getenv("WORKER_BATCH_SIZE", "50")),
+            smtp_host=os.getenv("SMTP_HOST", ""),
+            smtp_port=int(os.getenv("SMTP_PORT", "587")),
+            smtp_username=os.getenv("SMTP_USERNAME", ""),
+            smtp_password=os.getenv("SMTP_PASSWORD", ""),
+            smtp_from=os.getenv("SMTP_FROM", ""),
+            smtp_starttls=os.getenv("SMTP_STARTTLS", "true").lower() in {"1", "true", "yes"},
+            sms_gateway_url=os.getenv("SMS_GATEWAY_URL", ""),
+            push_gateway_url=os.getenv("PUSH_GATEWAY_URL", ""),
+            notification_retry_limit=int(os.getenv("NOTIFICATION_RETRY_LIMIT", "5")),
+            webhook_retry_limit=int(os.getenv("WEBHOOK_RETRY_LIMIT", "5")),
+            alert_escalation_hours=int(os.getenv("ALERT_ESCALATION_HOURS", "24")),
+            purge_notice_hours=int(os.getenv("PURGE_NOTICE_HOURS", "48")),
+            grievance_escalation_hours=int(os.getenv("GRIEVANCE_ESCALATION_HOURS", "24")),
         )
 
 
