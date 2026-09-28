@@ -58,6 +58,47 @@ services:
     networks:
       - tsi_internal
 
+  # P1: background worker — notification delivery, webhook dispatch, purpose
+  # lifecycle closures, alert/grievance escalation, retention sweep, job runner.
+  python_worker:
+    build:
+      context: .
+      dockerfile: python_port/Dockerfile
+    image: tsi-dpdp-cms-python:local
+    container_name: tsi_dpdp_cms_py_worker
+    restart: unless-stopped
+    command: ["python", "-m", "dpdpcms_py.worker"]
+    environment:
+      POSTGRES_HOST: "postgresql://postgres_db:5432"
+      POSTGRES_DB: "${POSTGRES_DB:-tsi_cms}"
+      POSTGRES_USER: "${POSTGRES_USER:-tsi_admin}"
+      POSTGRES_PASSWD: "${POSTGRES_PASSWD:-secure_dev_password}"
+      TSI_DPDP_CMS_ENV: "${TSI_DPDP_CMS_ENV:-local}"
+      TSI_EXPORT_PATH: "${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}"
+      JWT_SECRET: "${JWT_SECRET:-tsi-dpdp-cms-local-dev-secret-do-not-use-in-production}"
+      DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:-local-dev-enc-key-do-not-use-in-production}"
+      TSI_LOOKUP_SALT: "${TSI_LOOKUP_SALT:-local-dev-lookup-salt-do-not-use-in-production}"
+      BOOTSTRAP_TOKEN: "${BOOTSTRAP_TOKEN:-local-dev-bootstrap-token-do-not-use-in-production}"
+      WORKER_POLL_SECONDS: "${WORKER_POLL_SECONDS:-30}"
+      WORKER_BATCH_SIZE: "${WORKER_BATCH_SIZE:-50}"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USERNAME: "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      SMS_GATEWAY_URL: "${SMS_GATEWAY_URL:-}"
+      PUSH_GATEWAY_URL: "${PUSH_GATEWAY_URL:-}"
+      ALERT_ESCALATION_HOURS: "${ALERT_ESCALATION_HOURS:-24}"
+      PURGE_NOTICE_HOURS: "${PURGE_NOTICE_HOURS:-48}"
+      GRIEVANCE_ESCALATION_HOURS: "${GRIEVANCE_ESCALATION_HOURS:-24}"
+    volumes:
+      - tsi_py_reports_data:${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}:rw
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    networks:
+      - tsi_internal
+
 networks:
   tsi_internal:
     driver: bridge
