@@ -52,6 +52,12 @@ CLIENT_ALLOWED_FUNCS = {
     "revoke_nomination",
     "submit_correction",
     "list_corrections",
+    # P1: consent-change alerts for fiduciaries/processors (BRD 4.4.2)
+    "notify_alert",
+    "acknowledge_alert",
+    "list_alerts",
+    # P1: fresh affirmative consent on a material policy change (BRD 4.1.3)
+    "request_reconsent",
 }
 CLIENT_FUNC_SCOPES = {
     "record_consent": "WRITE",
@@ -79,6 +85,12 @@ CLIENT_FUNC_SCOPES = {
     "revoke_nomination": "WRITE",
     "submit_correction": "WRITE",
     "list_corrections": "READ",
+    # P1: consent-change alerts for fiduciaries/processors (BRD 4.4.2)
+    "notify_alert": "WRITE",
+    "acknowledge_alert": "WRITE",
+    "list_alerts": "READ",
+    # P1: fresh affirmative consent on a material policy change (BRD 4.1.3)
+    "request_reconsent": "WRITE",
 }
 
 
