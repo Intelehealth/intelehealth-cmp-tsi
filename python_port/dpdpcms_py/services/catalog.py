@@ -10,6 +10,7 @@ from ..defaults import DEFAULT_NOTIFICATION_MESSAGES
 from ..errors import ApiError
 from .admin import authenticated_user_id, operator_fiduciary_id
 from .base import Service, page_limit, reject_operator, require
+from .lifecycle import sync_purpose_lifecycle, validate_duration_flags
 
 
 def resolve_fiduciary(ctx: RequestContext) -> str | None:
@@ -21,6 +22,18 @@ def resolve_fiduciary(ctx: RequestContext) -> str | None:
     if ctx.payload.get("fiduciary_id"):
         return str(ctx.payload["fiduciary_id"])
     return operator_fiduciary_id(authenticated_user_id(ctx))
+
+
+def _policy_purposes(policy_content: Any) -> list[dict]:
+    """Purpose objects of the first language block that declares any."""
+    if not isinstance(policy_content, dict):
+        return []
+    for block in policy_content.values():
+        if isinstance(block, dict):
+            purposes = block.get("data_processing_purposes") or []
+            if isinstance(purposes, list):
+                return [p for p in purposes if isinstance(p, dict)]
+    return []
 
 
 def _purpose_ids_by_language(policy_content: Any) -> dict[str, set[str]]:
@@ -90,6 +103,49 @@ def derive_ropa_entries(fiduciary_id: str, policy_id: str, policy_content: Any) 
                 str(purpose_id),
             ),
         )
+
+
+def queue_policy_change_notices(fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None) -> dict[str, int]:
+    """CU-02/CU-03: notify principals on a materially changed policy and require fresh consent.
+
+    Finds every principal holding active consent on an earlier version of this
+    policy, raises a PRINCIPAL notification and a PENDING re-consent request for
+    each. Delivery is handled by the notification adapter worker; the principal
+    responds through the /client request_reconsent endpoint.
+    """
+    fid = str(fiduciary_id)
+    holders = db.all(
+        """
+        SELECT DISTINCT cr.user_id
+        FROM consent_records cr
+        WHERE cr.fiduciary_id = %s AND cr.policy_id = %s AND cr.policy_version <> %s
+          AND cr.is_active_consent IS TRUE
+        """,
+        (fid, policy_id, new_version),
+    )
+    notified = 0
+    for holder in holders:
+        user_id = str(holder["user_id"])
+        try:
+            db.execute(
+                """
+                INSERT INTO reconsent_requests (fiduciary_id, policy_id, policy_version, user_id, reason)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (fiduciary_id, policy_id, policy_version, user_id) DO NOTHING
+                """,
+                (fid, policy_id, new_version, user_id, reason),
+            )
+            db.execute(
+                """
+                INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
+                VALUES ('PRINCIPAL', %s, %s, 'POLICY_CHANGE_RECONSENT_REQUIRED')
+                """,
+                (user_id, fid),
+            )
+            notified += 1
+        except Exception:
+            continue
+    return {"principals_affected": len(holders), "notified": notified}
 
 
 class FiduciaryService(Service):
@@ -386,6 +442,7 @@ class PolicyService(Service):
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
         content = require(ctx.payload.get("policy_content"), "policy_content")
         check_language_parity(content)
+        validate_duration_flags(content)  # PL-01: every purpose is open-ended or time-bound
         db.execute(
             "INSERT INTO consent_policies (id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at) VALUES (%s, %s, %s, NOW(), 'DRAFT', %s, %s, NOW(), NOW())",
             (
@@ -396,6 +453,7 @@ class PolicyService(Service):
                 db.as_jsonb(content),
             ),
         )
+        sync_purpose_lifecycle(fid, content)
         derive_ropa_entries(fid, pid, content)
         return {
             "success": True,
@@ -406,6 +464,7 @@ class PolicyService(Service):
         reject_operator(ctx)
         content = require(ctx.payload.get("policy_content"), "policy_content")
         check_language_parity(content)
+        validate_duration_flags(content)  # PL-01: every purpose is open-ended or time-bound
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
         updated = db.execute(
@@ -418,6 +477,8 @@ class PolicyService(Service):
         )
         if updated == 0:
             raise ApiError(400, "Bad Request", "Policy not found or not in DRAFT status.")
+        fid = require(ctx.payload.get("fiduciary_id") or resolve_fiduciary(ctx), "fiduciary_id")
+        sync_purpose_lifecycle(fid, content)
         return {"success": True, "message": "Policy updated successfully."}
 
     def publish_policy(self, ctx: RequestContext) -> dict:
@@ -433,7 +494,97 @@ class PolicyService(Service):
             "UPDATE consent_policies SET status = 'UNDER_REVIEW', last_updated_at = NOW() WHERE id = %s AND version = %s",
             (pid, version),
         )
-        return {"success": True, "message": "Policy published successfully."}
+        # CU-02/CU-03: publishing a materially changed policy must notify every
+        # principal with active consent on an earlier version and request fresh
+        # affirmative consent — the only moment consent is revisited under DD-01.
+        fid = str(row["fiduciary_id"])
+        counts = queue_policy_change_notices(fid, pid, version, reason=ctx.payload.get("change_reason"))
+        log_event(
+            authenticated_user_id(ctx) or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "POLICY_CHANGE_NOTIFIED",
+            {"policy_id": pid, "version": version, **counts},
+        )
+        out = {"success": True, "message": "Policy published successfully.", "data": {"notified": counts}}
+        return out
+
+    def notify_policy_change(self, ctx: RequestContext) -> dict:
+        """CU-02: notify affected principals of a changed policy (idempotent replay)."""
+        reject_operator(ctx)
+        pid = require(ctx.payload.get("policy_id"), "policy_id")
+        version = ctx.payload.get("version") or ""
+        fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        counts = queue_policy_change_notices(fid, pid, version, reason=ctx.payload.get("change_reason"))
+        log_event(
+            authenticated_user_id(ctx) or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "POLICY_CHANGE_NOTIFIED",
+            {"policy_id": pid, "version": version, **counts},
+        )
+        return {"success": True, "policy_id": pid, "version": version, **counts}
+
+    def request_reconsent(self, ctx: RequestContext) -> dict:
+        """CU-03: a principal confirms fresh affirmative consent on the new policy version."""
+        payload = ctx.payload
+        fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        policy_id = require(payload.get("policy_id"), "policy_id")
+        version = payload.get("version") or payload.get("policy_version") or ""
+        user_id = require(payload.get("user_id"), "user_id")
+
+        pending = db.one(
+            "SELECT id FROM reconsent_requests WHERE fiduciary_id = %s AND policy_id = %s AND policy_version = %s AND user_id = %s AND status = 'PENDING'",
+            (fid, policy_id, version, user_id),
+        )
+        if not pending:
+            raise ApiError(
+                400,
+                "Bad Request",
+                "No pending re-consent request exists for this principal, policy and version.",
+            )
+
+        consent = db.one(
+            "SELECT policy_content FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+            (policy_id, version, fid),
+        )
+        if not consent:
+            raise ApiError(404, "Not Found", f"Policy {policy_id} version {version} not found.")
+        declared = {str(p.get("id")) for p in _policy_purposes(consent.get("policy_content"))}
+
+        data_consents = require(payload.get("data_point_consents"), "data_point_consents")
+        if not isinstance(data_consents, list):
+            raise ApiError(400, "Bad Request", "data_point_consents must be an array.")
+        for point in data_consents:
+            if not isinstance(point, dict):
+                raise ApiError(400, "Bad Request", "data_point_consents entries must be objects.")
+            purpose_id = point.get("data_point_id") or point.get("purpose_id")
+            if not purpose_id or str(purpose_id) not in declared:
+                raise ApiError(
+                    400,
+                    "Bad Request",
+                    f"Purpose '{purpose_id}' is not declared in policy {policy_id} version {version} (CU-05).",
+                )
+
+        from .consent import ConsentService
+
+        record = ConsentService().record_consent(ctx)
+        record_id = record.get("data", {}).get("consent_record_id")
+        db.execute(
+            "UPDATE reconsent_requests SET status = 'GRANTED', responded_at = NOW(), consent_record_id = %s WHERE id = %s",
+            (record_id, pending["id"]),
+        )
+        log_event(
+            user_id,
+            fid,
+            "APP",
+            None,
+            "RECONSENT_GRANTED",
+            {"policy_id": policy_id, "version": version, "reconsent_request_id": str(pending["id"])},
+        )
+        return {"success": True, "reconsent_request_id": str(pending["id"]), "status": "GRANTED"}
 
     def delete_policy(self, ctx: RequestContext) -> dict:
         reject_operator(ctx)

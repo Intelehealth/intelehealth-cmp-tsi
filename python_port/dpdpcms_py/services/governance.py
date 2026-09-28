@@ -7,6 +7,7 @@ from .. import db
 from ..audit import get_log, list_logs, log_event
 from ..context import RequestContext
 from ..errors import ApiError
+from ..netutil import validate_outbound_url
 from ..security import hash_password, random_secret
 from .base import Service, require
 from .catalog import resolve_fiduciary
@@ -179,6 +180,13 @@ class NotificationService(Service):
         )
 
     def set_webhook_config(self, ctx: RequestContext) -> dict:
+        webhook_url = require(ctx.payload.get("webhook_url"), "webhook_url")
+        # SSRF guard at save time: the URL must be http(s) and resolve to a
+        # public address. It is re-validated at dispatch time before every POST.
+        try:
+            validate_outbound_url(webhook_url, "webhook_url")
+        except ValueError as exc:
+            raise ApiError(400, "Bad Request", str(exc)) from None
         db.execute(
             f"""
             INSERT INTO webhook_configs (fiduciary_id, category, webhook_url, secret_enc, enabled, last_updated_at)
@@ -190,7 +198,7 @@ class NotificationService(Service):
             (
                 require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),
                 require(ctx.payload.get("category"), "category"),
-                require(ctx.payload.get("webhook_url"), "webhook_url"),
+                webhook_url,
                 *db.bind_encrypt(ctx.payload.get("secret", "")),
                 bool(ctx.payload.get("enabled", True)),
             ),

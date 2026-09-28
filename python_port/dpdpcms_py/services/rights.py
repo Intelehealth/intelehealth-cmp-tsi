@@ -3,7 +3,8 @@ from __future__ import annotations
 from .. import db
 from ..audit import log_event
 from ..context import RequestContext
-from .base import Service, require
+from ..errors import ApiError
+from .base import Service, bind_principal_field, principal_list_filter, require
 from .catalog import resolve_fiduciary
 
 
@@ -17,6 +18,7 @@ class RightsService(Service):
     # ── Nomination (Section 15) ──────────────────────────────────────────
     def create_nomination(self, ctx: RequestContext) -> dict:
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        bind_principal_field(ctx, "nominating_principal_id")
         nominator = require(ctx.payload.get("nominating_principal_id"), "nominating_principal_id")
         nominated = require(ctx.payload.get("nominated_principal_id"), "nominated_principal_id")
         row = db.insert_returning(
@@ -51,7 +53,7 @@ class RightsService(Service):
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
         where = ["fiduciary_id = %s"]
         params: list = [fid]
-        nominator = ctx.payload.get("nominating_principal_id")
+        nominator = principal_list_filter(ctx, "nominating_principal_id")
         if nominator:
             where.append("nominating_principal_id = %s")
             params.append(nominator)
@@ -70,6 +72,15 @@ class RightsService(Service):
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
+        if ctx.auth_via_principal_jwt:
+            row = db.one(
+                f"SELECT nominating_principal_id FROM nominations WHERE {' AND '.join(where)}",
+                params,
+            )
+            if not row:
+                raise ApiError(404, "Not Found", "Nomination not found.")
+            if str(row["nominating_principal_id"]) != ctx.principal_user_id:
+                raise ApiError(403, "Forbidden", "You may only revoke your own nominations.")
         db.execute(
             f"UPDATE nominations SET status = 'REVOKED', last_updated_at = NOW() WHERE {' AND '.join(where)}", params
         )
@@ -78,6 +89,7 @@ class RightsService(Service):
     # ── Data correction ──────────────────────────────────────────────────
     def submit_correction(self, ctx: RequestContext) -> dict:
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        bind_principal_field(ctx, "user_id")
         user_id = require(ctx.payload.get("user_id"), "user_id")
         row = db.insert_returning(
             """
@@ -111,9 +123,10 @@ class RightsService(Service):
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
         where = ["fiduciary_id = %s"]
         params: list = [fid]
-        if ctx.payload.get("user_id"):
+        user_id = principal_list_filter(ctx, "user_id")
+        if user_id:
             where.append("user_id = %s")
-            params.append(ctx.payload["user_id"])
+            params.append(user_id)
         if ctx.payload.get("status"):
             where.append("status = %s")
             params.append(ctx.payload["status"].upper())
