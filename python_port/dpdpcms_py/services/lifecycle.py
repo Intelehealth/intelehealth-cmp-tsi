@@ -108,7 +108,9 @@ def sync_purpose_lifecycle(fiduciary_id: str, policy_content: Any) -> None:
         )
 
 
-def record_alert(fiduciary_id: str, alert_type: str, event_ref_id: str | None = None, payload: dict | None = None) -> str | None:
+def record_alert(
+    fiduciary_id: str, alert_type: str, event_ref_id: str | None = None, payload: dict | None = None
+) -> str | None:
     """Insert an alert row for a fiduciary (NT-06). Used by close_purpose and the alert API."""
     if not fiduciary_id or not alert_type:
         return None
@@ -147,7 +149,9 @@ def close_purpose_exec(
     purpose_id = str(purpose_id)
     action = str(deidentification_action or "ERASE").replace("-", "_").upper()
     if action not in VALID_DEIDENTIFICATION_ACTIONS:
-        raise ApiError(400, "Bad Request", f"deidentification_action must be one of {sorted(VALID_DEIDENTIFICATION_ACTIONS)}.")
+        raise ApiError(
+            400, "Bad Request", f"deidentification_action must be one of {sorted(VALID_DEIDENTIFICATION_ACTIONS)}."
+        )
 
     row = db.one(
         "SELECT purpose_id, state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
