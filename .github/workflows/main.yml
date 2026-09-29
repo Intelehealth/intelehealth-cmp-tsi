@@ -2,9 +2,9 @@ name: Main
 
 on:
   push:
-    branches: [p1_changes]
+    branches: [p2_changes]
   pull_request:
-    branches: [p1_changes]
+    branches: [p2_changes]
 
 permissions:
   contents: read
