@@ -5,6 +5,7 @@ import smtplib
 from email.message import EmailMessage
 
 from . import db
+from .audit import log_event
 from .config import settings
 from .defaults import DEFAULT_NOTIFICATION_MESSAGES
 from .netutil import post_json
@@ -132,9 +133,7 @@ def _deliver_gateway(channel: str, recipient_id: str, body: str) -> tuple[str | 
     if not url:
         return f"{channel} gateway not configured", None
     try:
-        status, response = post_json(
-            url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20
-        )
+        status, response = post_json(url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20)
         if status is None:
             return f"{channel} gateway unreachable: {response}", None
         if status >= 400:
@@ -215,6 +214,19 @@ def _deliver_pending(limit: int) -> dict[str, int]:
                 (attempt, delivery_id),
             )
             sent += 1
+            # LG-03: every dispatch (attempt and outcome) is audited so the trail
+            # shows what was notified, through which channel, and when.
+            log_event(
+                row.get("recipient_id") or "SYSTEM",
+                fid,
+                "NOTIFICATION",
+                delivery_id,
+                "NOTIFICATION_DISPATCHED",
+                {"channel": channel, "notification_type": row["notification_type"], "status": "SENT"},
+                purpose_id=None,
+                consent_status=None,
+                initiator="SYSTEM",
+            )
         elif channel not in {"EMAIL", "SMS", "PUSH"}:
             db.execute(
                 "UPDATE notification_deliveries SET status = 'SKIPPED', attempt_count = %s, last_attempt_at = NOW(), last_error = %s WHERE id = %s",

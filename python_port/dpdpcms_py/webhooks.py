@@ -17,9 +17,7 @@ SIGNATURE_HEADER = "X-TSI-Signature"
 DEFAULT_CATEGORY = "NOTIFICATION"
 
 
-def queue_webhook(
-    fiduciary_id: str, event_type: str, payload: dict[str, Any], category: str = DEFAULT_CATEGORY
-) -> None:
+def queue_webhook(fiduciary_id: str, event_type: str, payload: dict[str, Any], category: str = DEFAULT_CATEGORY) -> None:
     """Record an outbound webhook event for the dispatcher worker to deliver.
 
     The event is queued here (inline on the request thread) and delivered

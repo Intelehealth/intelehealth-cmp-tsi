@@ -19,6 +19,7 @@ class RequestContext:
     principal_user_id: str | None = None
     permissions: set[str] = field(default_factory=set)
     auth_via_principal_jwt: bool = False
+    source_ip: str | None = None
 
     @property
     def func(self) -> str:
