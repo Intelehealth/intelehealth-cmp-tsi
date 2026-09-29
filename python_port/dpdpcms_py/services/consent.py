@@ -9,7 +9,7 @@ from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
 from ..security import principal_token
-from .base import Service, page_limit, require
+from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, reject_principal, require
 from .catalog import resolve_fiduciary
 
 
@@ -24,6 +24,7 @@ def _consent_row(row: dict | None) -> dict | None:
 NOTIF_CONSENT_GIVEN = "CONSENT_GIVEN_NOTIFICATION"
 NOTIF_WITHDRAWAL_ACK = "WITHDRAWAL_ACKNOWLEDGMENT"
 NOTIF_ERASURE_REQUESTED = "ERASURE_REQUESTED_NOTIFICATION"
+NOTIF_VALIDATION_DENIED = "CONSENT_VALIDATION_DENIED"
 
 # Cessation-based retention window stamped on each purpose at withdrawal (Section
 # 8(7)). Mirrors the Java build, which recorded a 1095-day expiry per purpose.
@@ -133,6 +134,7 @@ def _notify_principal(user_id: str, fiduciary_id: str, notification_type: str) -
 class ConsentService(Service):
     def record_consent(self, ctx: RequestContext) -> dict:
         payload = ctx.payload
+        bind_principal_field(ctx, "user_id")
         fid = _fid(ctx)
         user_id = require(payload.get("user_id"), "user_id")
         policy_id = require(payload.get("policy_id"), "policy_id")
@@ -226,7 +228,25 @@ class ConsentService(Service):
                 ),
             )
         _notify_principal(user_id, fid, NOTIF_CONSENT_GIVEN)
-        log_event(user_id, fid, "APP", None, "CONSENT_GIVEN", {"policy_id": policy_id, "record_id": cid})
+        grant_purpose_ids = []
+        if isinstance(data_consents, list):
+            for point in data_consents:
+                if isinstance(point, dict) and _point_granted(point):
+                    pid = point.get("data_point_id") or point.get("purpose_id") or point.get("id")
+                    if pid:
+                        grant_purpose_ids.append(str(pid))
+        log_event(
+            user_id,
+            fid,
+            "APP",
+            None,
+            "CONSENT_GIVEN",
+            {"policy_id": policy_id, "record_id": cid},
+            purpose_id=grant_purpose_ids[0] if len(grant_purpose_ids) == 1 else None,
+            consent_status="CONSENT_GIVEN",
+            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            source_ip=ctx.source_ip,
+        )
         try:
             from ..webhooks import queue_webhook
 
@@ -241,6 +261,7 @@ class ConsentService(Service):
 
     def record_parent_consent(self, ctx: RequestContext) -> dict:
         payload = ctx.payload
+        bind_principal_field(ctx, "guardian_principal_id")
         row = db.insert_returning(
             """
             INSERT INTO parental_verification_logs
@@ -262,6 +283,7 @@ class ConsentService(Service):
         return {"success": True, "verification_log_id": str(row["id"])}
 
     def get_active_consent(self, ctx: RequestContext) -> dict:
+        bind_principal_field(ctx, "user_id")
         where = ["user_id = %s", "fiduciary_id = %s", "is_active_consent IS TRUE"]
         params: list[Any] = [require(ctx.payload.get("user_id"), "user_id"), _fid(ctx)]
         if ctx.payload.get("policy_id"):
@@ -283,9 +305,11 @@ class ConsentService(Service):
         row = db.one(f"SELECT * FROM consent_records WHERE {' AND '.join(where)}", params)
         if not row:
             raise ApiError(404, "Not Found", "Consent record not found.")
+        ensure_principal_owns(ctx, row.get("user_id"), label="Consent record")
         return _consent_row(row)
 
     def list_consent_history(self, ctx: RequestContext) -> list[dict]:
+        bind_principal_field(ctx, "user_id")
         page, limit = page_limit(ctx.payload)
         rows = db.all(
             "SELECT * FROM consent_records WHERE user_id = %s AND fiduciary_id = %s ORDER BY timestamp DESC LIMIT %s OFFSET %s",
@@ -340,6 +364,63 @@ class ConsentService(Service):
             out.append(row)
         return {"success": True, "data": out, "page": page, "limit": limit, "total": total["count"] if total else 0}
 
+    def export_consent_history(self, ctx: RequestContext) -> str:
+        """UD-04: a principal downloads their own consent history as CSV.
+
+        Scoped to the authenticated principal (never a cross-principal export) and
+        to their own fiduciary. CSV is used because no PDF library is installed;
+        the artefact is machine-readable and importable into a spreadsheet.
+        """
+        import csv
+        import io
+
+        bind_principal_field(ctx, "user_id")
+        fid = _fid(ctx)
+        user_id = require(ctx.payload.get("user_id"), "user_id")
+        rows = db.all(
+            """
+            SELECT timestamp, policy_id, policy_version, language_selected,
+                   consent_status_general, is_active_consent, data_point_consents
+            FROM consent_records
+            WHERE user_id = %s AND fiduciary_id = %s
+            ORDER BY timestamp DESC
+            """,
+            (user_id, fid),
+        )
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["timestamp", "policy_id", "policy_version", "language", "status", "active", "purposes"])
+        for row in rows:
+            points = row.get("data_point_consents") or []
+            purposes = ", ".join(
+                str(p.get("data_point_id") or p.get("id") or "")
+                + ("" if _point_granted(p) else ":withdrawn")
+                for p in points
+                if isinstance(p, dict)
+            )
+            writer.writerow(
+                [
+                    row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else row["timestamp"],
+                    row["policy_id"],
+                    row["policy_version"],
+                    row["language_selected"],
+                    row["consent_status_general"],
+                    "yes" if row["is_active_consent"] else "no",
+                    purposes,
+                ]
+            )
+        log_event(
+            user_id,
+            fid,
+            "APP",
+            None,
+            "CONSENT_HISTORY_EXPORTED",
+            {"rows": len(rows)},
+            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            source_ip=ctx.source_ip,
+        )
+        return output.getvalue()
+
     def list_principals(self, ctx: RequestContext) -> list[dict]:
         return db.to_jsonable(
             db.all(
@@ -349,6 +430,7 @@ class ConsentService(Service):
         )
 
     def link_user(self, ctx: RequestContext) -> dict:
+        reject_principal(ctx, "Linking anonymous sessions requires an application API key.")
         anon = require(ctx.payload.get("anonymous_user_id"), "anonymous_user_id")
         auth = require(ctx.payload.get("authenticated_user_id"), "authenticated_user_id")
         fid = _fid(ctx)
@@ -376,6 +458,7 @@ class ConsentService(Service):
         return {"success": True, "message": "User consent records linked successfully."}
 
     def validate_consent(self, ctx: RequestContext) -> dict:
+        bind_principal_field(ctx, "user_id")
         user_id = require(ctx.payload.get("user_id"), "user_id")
         purpose = require(ctx.payload.get("required_purpose_id"), "required_purpose_id")
         fid = _fid(ctx)
@@ -399,6 +482,29 @@ class ConsentService(Service):
             "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
             (fid, user_id, purpose, "VALID" if valid else "INVALID"),
         )
+        # CV-07: a denied validation must notify the principal, and the denial
+        # leaves an audit trail with the purpose and outcome as discrete columns
+        # (CV-06, LG-02).
+        if not valid:
+            _notify_principal(user_id, fid, NOTIF_VALIDATION_DENIED)
+            try:
+                from ..webhooks import queue_webhook
+
+                queue_webhook(fid, "CONSENT_DENIED", {"user_id": user_id, "purpose_id": purpose})
+            except Exception:  # pragma: no cover
+                pass
+            log_event(
+                user_id,
+                fid,
+                "APP",
+                None,
+                "CONSENT_VALIDATION_DENIED",
+                {"denied_purpose_id": purpose},
+                purpose_id=purpose,
+                consent_status="INVALID",
+                initiator="INTEGRATOR",
+                source_ip=ctx.source_ip,
+            )
         return {"valid": valid, "status": "VALID" if valid else "INVALID", "required_purpose_id": purpose}
 
     def withdraw_consent(self, ctx: RequestContext) -> dict:
@@ -408,6 +514,7 @@ class ConsentService(Service):
         return self._withdraw(ctx, erasure=True)
 
     def _withdraw(self, ctx: RequestContext, erasure: bool) -> dict:
+        bind_principal_field(ctx, "user_id")
         fid = _fid(ctx)
         user_id = require(ctx.payload.get("user_id"), "user_id")
         purpose_ids = _normalise_purpose_ids(ctx.payload)
@@ -422,6 +529,18 @@ class ConsentService(Service):
             row = cur.fetchone()
             if row:
                 points = row["data_point_consents"] or []
+                # CW-06: every purpose named for withdrawal must currently hold an
+                # active grant; withdrawing something that was never granted is an
+                # error an integrator can act on, not a silent success.
+                if purpose_ids:
+                    granted = {str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower() for p in points if isinstance(p, dict) and _point_granted(p)}
+                    missing = [pid for pid in purpose_ids if pid.lower() not in granted]
+                    if missing:
+                        raise ApiError(
+                            400,
+                            "Bad Request",
+                            f"Purpose(s) {sorted(missing)} do not have active consent and cannot be withdrawn.",
+                        )
                 full_withdrawal = not purpose_ids
                 updated: list[Any] = []
                 for point in points:
@@ -459,6 +578,10 @@ class ConsentService(Service):
             None,
             "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
             {"reason": ctx.payload.get("reason"), "purpose_ids": purpose_ids, "record_id": record_id},
+            purpose_id=purpose_ids[0] if purpose_ids and len(purpose_ids) == 1 else None,
+            consent_status=status,
+            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            source_ip=ctx.source_ip,
         )
         # CW-08: push a stop signal to linked systems instead of relying on them
         # to poll. Delivery happens through the webhook dispatcher worker.

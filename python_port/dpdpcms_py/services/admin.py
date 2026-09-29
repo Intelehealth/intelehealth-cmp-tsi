@@ -88,7 +88,12 @@ class OperatorService(Service):
             )
             raise ApiError(401, "Unauthorized", "Invalid credentials or account inactive.")
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ADMIN_FIDUCIARY_ID
-        jwt_token = token(row["email"], row["name"], row["role"])
+        mfa_row = db.one("SELECT mfa_enabled FROM operators WHERE id = %s", (row["id"],))
+        mfa_enabled = bool(mfa_row and mfa_row["mfa_enabled"])
+        # SA-06: when MFA is enabled, the password alone must not open the
+        # console. Issue a token marked mfa:false that only verify_mfa can
+        # upgrade to a full session.
+        jwt_token = token(row["email"], row["name"], row["role"], extra={"mfa": not mfa_enabled})
         log_event(
             identifier,
             fid,
@@ -96,14 +101,120 @@ class OperatorService(Service):
             str(row["id"]),
             "LOGIN_SUCCESS",
             "Operator Access Granted",
+            source_ip=ctx.source_ip,
         )
-        out = {"success": True, "token": jwt_token, "role": row["role"], "username": row["name"], "fiduciary_id": fid}
+        out = {
+            "success": True,
+            "token": jwt_token,
+            "role": row["role"],
+            "username": row["name"],
+            "fiduciary_id": fid,
+            "mfa_required": mfa_enabled,
+        }
         if row.get("fiduciary_name"):
             out["fiduciary_name"] = row["fiduciary_name"]
         return out
 
     def logout(self, ctx: RequestContext) -> dict:
         return {"success": True, "message": "Logged out successfully."}
+
+    # ── TOTP MFA (SA-06) ─────────────────────────────────────────────
+    def enrol_mfa(self, ctx: RequestContext) -> dict:
+        """SA-06: generate a TOTP secret for the caller and return the provisioning URI.
+
+        The secret is stored encrypted and shown exactly once; the account only
+        becomes mfa_enabled after a successful verify_mfa round-trip.
+        """
+        from .. import totp
+
+        actor = authenticated_user_id(ctx)
+        if not actor:
+            raise ApiError(401, "Unauthorized", "You must be a signed-in operator to enrol MFA.")
+        if (ctx.auth_token or {}).get("mfa") is True:
+            row = db.one("SELECT mfa_enabled FROM operators WHERE id = %s", (actor,))
+            if row and row["mfa_enabled"]:
+                raise ApiError(409, "Conflict", "MFA is already enabled on this account.")
+        secret = totp.generate_secret()
+        label = ctx.actor_email or ctx.actor_name or str(actor)
+        db.execute(
+            f"UPDATE operators SET mfa_secret_enc = {db.enc_expr()}, mfa_enabled = FALSE, mfa_enrolled_at = NOW(), last_updated_at = NOW() WHERE id = %s",
+            (*db.bind_encrypt(secret), actor),
+        )
+        log_event(
+            ctx.actor_email or "ADMIN",
+            ADMIN_FIDUCIARY_ID,
+            "ADMIN_CONSOLE",
+            actor,
+            "MFA_ENROLL_STARTED",
+            "TOTP secret generated; verification pending.",
+            source_ip=ctx.source_ip,
+        )
+        return {
+            "success": True,
+            "mfa": {
+                "secret": secret,
+                "otpauth_uri": totp.otpauth_uri(secret, label),
+                "digits": totp.DIGITS,
+                "period": totp.DEFAULT_STEP_SECONDS,
+            },
+            "message": "Scan this code in your authenticator app, then verify with verify_mfa.",
+        }
+
+    def verify_mfa(self, ctx: RequestContext) -> dict:
+        """SA-06: confirm a TOTP code and, once verified, issue a session token that
+        carries the mfa claim. The presenter must be the operator the secret belongs to."""
+        from .. import totp
+        from ..security import token as issue_token
+
+        code = require(ctx.payload.get("code"), "code")
+        operator_id = authenticated_user_id(ctx) or ctx.payload.get("user_id") or (
+            ctx.auth_token or {}
+        ).get("sub")
+        if not operator_id:
+            raise ApiError(400, "Bad Request", "user_id is required to verify MFA.")
+        row = db.one(
+            f"""
+            SELECT id, name, {db.decrypt_col("email_enc")} AS email, status, role
+            FROM operators WHERE id = %s
+            """,
+            (*db.bind_key(), operator_id),
+        )
+        if not row or row["status"] != "ACTIVE":
+            raise ApiError(401, "Unauthorized", "Operator not found or inactive.")
+        # The secret is stored pgp-sym-encrypted as base64; the app key decrypts it.
+        secret_row = db.one(
+            f"SELECT {db.decrypt_col('mfa_secret_enc')} AS secret FROM operators WHERE id = %s",
+            (*db.bind_key(), operator_id),
+        )
+        stored_secret = secret_row["secret"] if secret_row else None
+        if not stored_secret:
+            raise ApiError(400, "Bad Request", "No MFA secret is enrolled for this account.")
+        if not totp.verify_totp(stored_secret, code):
+            log_event(
+                row["email"] or operator_id,
+                ADMIN_FIDUCIARY_ID,
+                "ADMIN_CONSOLE",
+                str(row["id"]),
+                "MFA_VERIFY_FAILED",
+                {"reason": "Invalid or expired authenticator code."},
+                source_ip=ctx.source_ip,
+            )
+            raise ApiError(401, "Unauthorized", "Invalid or expired authenticator code.")
+        db.execute(
+            "UPDATE operators SET mfa_enabled = TRUE, mfa_verified_at = NOW(), last_updated_at = NOW() WHERE id = %s",
+            (operator_id,),
+        )
+        log_event(
+            row["email"] or operator_id,
+            ADMIN_FIDUCIARY_ID,
+            "ADMIN_CONSOLE",
+            str(row["id"]),
+            "MFA_ENABLED",
+            "TOTP verified; MFA now enforced on this account.",
+            source_ip=ctx.source_ip,
+        )
+        jwt_token = issue_token(row["email"], row["name"], row["role"], subject=str(row["id"]), extra={"mfa": True})
+        return {"success": True, "token": jwt_token, "mfa": True, "role": row["role"]}
 
     def list_users(self, ctx: RequestContext) -> list[dict]:
         role = verified_role(ctx)
@@ -147,12 +258,19 @@ class OperatorService(Service):
         role = require(payload.get("role"), "role").upper()
         if role == "ADMIN" and caller_role != "ADMIN":
             raise ApiError(403, "Forbidden", "Only ADMIN users may assign the ADMIN role.")
-        fid = payload.get("fiduciary_id") or None
+        # SA-01 / SA-02: every role must exist in the roles table (built-in or
+        # custom); a DPO may create OPERATOR or custom read roles but not manage
+        # ADMIN or AUDITOR assignments.
+        known = db.one("SELECT permissions FROM roles WHERE code = %s", (role,))
+        if not known:
+            raise ApiError(400, "Bad Request", f"Unknown role '{role}'. See list_roles.")
         login_uid = authenticated_user_id(ctx)
         if caller_role == "DPO":
             if role != "OPERATOR":
                 raise ApiError(403, "Forbidden", "DPO users may only create OPERATOR accounts.")
             fid = operator_fiduciary_id(login_uid)
+        else:
+            fid = payload.get("fiduciary_id") or None
         username = require(payload.get("username"), "username")
         email = require(payload.get("email"), "email")
         password = require(payload.get("password"), "password")
@@ -298,5 +416,8 @@ class AdminDashService(Service):
         )
 
     def list_access_logs(self, ctx: RequestContext) -> list[dict]:
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
         limit = int(ctx.payload.get("limit") or 10)
         return db.to_jsonable(db.all("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT %s", (limit,)))

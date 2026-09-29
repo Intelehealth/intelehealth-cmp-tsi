@@ -9,7 +9,7 @@ from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..defaults import DEFAULT_NOTIFICATION_MESSAGES
 from ..errors import ApiError
 from .admin import authenticated_user_id, operator_fiduciary_id
-from .base import Service, page_limit, reject_operator, require
+from .base import Service, bind_principal_field, page_limit, reject_operator, require
 from .lifecycle import sync_purpose_lifecycle, validate_duration_flags
 
 
@@ -105,9 +105,7 @@ def derive_ropa_entries(fiduciary_id: str, policy_id: str, policy_content: Any) 
         )
 
 
-def queue_policy_change_notices(
-    fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None
-) -> dict[str, int]:
+def queue_policy_change_notices(fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None) -> dict[str, int]:
     """CU-02/CU-03: notify principals on a materially changed policy and require fresh consent.
 
     Finds every principal holding active consent on an earlier version of this
@@ -532,6 +530,7 @@ class PolicyService(Service):
     def request_reconsent(self, ctx: RequestContext) -> dict:
         """CU-03: a principal confirms fresh affirmative consent on the new policy version."""
         payload = ctx.payload
+        bind_principal_field(ctx, "user_id")
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
         policy_id = require(payload.get("policy_id"), "policy_id")
         version = payload.get("version") or payload.get("policy_version") or ""
