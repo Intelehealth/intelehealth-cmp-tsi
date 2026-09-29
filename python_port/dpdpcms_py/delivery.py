@@ -133,7 +133,9 @@ def _deliver_gateway(channel: str, recipient_id: str, body: str) -> tuple[str | 
     if not url:
         return f"{channel} gateway not configured", None
     try:
-        status, response = post_json(url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20)
+        status, response = post_json(
+            url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20
+        )
         if status is None:
             return f"{channel} gateway unreachable: {response}", None
         if status >= 400:

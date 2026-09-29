@@ -6,7 +6,9 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "GRIEVANCE_SUBMITTED": {"en": "Your grievance has been submitted."},
     "GRIEVANCE_UPDATED": {"en": "Your grievance status was updated."},
     "BREACH_NOTIFICATION": {"en": "A personal data breach notification is available."},
-    "CONSENT_VALIDATION_DENIED": {"en": "A processing request under your consent was denied because no active consent exists for that purpose."},
+    "CONSENT_VALIDATION_DENIED": {
+        "en": "A processing request under your consent was denied because no active consent exists for that purpose."
+    },
     "CONSENT_GIVEN_NOTIFICATION": {"en": "Your consent preferences were recorded."},
     "WITHDRAWAL_ACKNOWLEDGMENT": {"en": "Your consent was withdrawn for one or more purposes."},
     "ERASURE_REQUESTED_NOTIFICATION": {"en": "Your erasure request has been submitted."},

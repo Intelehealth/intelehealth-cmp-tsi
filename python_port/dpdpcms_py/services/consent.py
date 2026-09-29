@@ -393,8 +393,7 @@ class ConsentService(Service):
         for row in rows:
             points = row.get("data_point_consents") or []
             purposes = ", ".join(
-                str(p.get("data_point_id") or p.get("id") or "")
-                + ("" if _point_granted(p) else ":withdrawn")
+                str(p.get("data_point_id") or p.get("id") or "") + ("" if _point_granted(p) else ":withdrawn")
                 for p in points
                 if isinstance(p, dict)
             )
@@ -533,7 +532,11 @@ class ConsentService(Service):
                 # active grant; withdrawing something that was never granted is an
                 # error an integrator can act on, not a silent success.
                 if purpose_ids:
-                    granted = {str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower() for p in points if isinstance(p, dict) and _point_granted(p)}
+                    granted = {
+                        str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower()
+                        for p in points
+                        if isinstance(p, dict) and _point_granted(p)
+                    }
                     missing = [pid for pid in purpose_ids if pid.lower() not in granted]
                     if missing:
                         raise ApiError(
