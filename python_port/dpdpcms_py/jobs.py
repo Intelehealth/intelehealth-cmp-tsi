@@ -108,7 +108,29 @@ def escalate_overdue_grievances() -> dict[str, int]:
 
 
 def _retention_for(fiduciary_id: str, purpose_id: str) -> tuple[int | None, str | None]:
-    """(retention_period_days, retention_start_event) from the fiduciary's active ROPA."""
+    """(retention_period_days, retention_start_event) for a closed purpose.
+
+    DD-03: the administrator-configured retention policy is the primary clock.
+    Falls back to the fiduciary's active ROPA when no policy applies.
+    """
+    row = db.one(
+        """
+        SELECT retention_duration_value, retention_duration_unit, retention_start_event, legal_reference
+        FROM retention_policies
+        WHERE fiduciary_id = %s AND status = 'ACTIVE'
+          AND (applicable_purposes = '[]'::jsonb OR applicable_purposes ? %s)
+        ORDER BY (applicable_purposes = '[]'::jsonb) ASC, created_at DESC
+        LIMIT 1
+        """,
+        (fiduciary_id, purpose_id),
+    )
+    if row:
+        days = int(row["retention_duration_value"] or 0) * {
+            "DAYS": 1,
+            "MONTHS": 30,
+            "YEARS": 365,
+        }.get(str(row["retention_duration_unit"] or "DAYS").upper(), 1)
+        return (days or None, row.get("retention_start_event"))
     row = db.one(
         """
         SELECT retention_period_days, retention_start_event
@@ -225,11 +247,7 @@ def run_retention_sweep() -> dict[str, int]:
                 )
                 notices += 1
                 log_event(
-                    "SYSTEM",
-                    fid,
-                    "SYSTEM",
-                    None,
-                    "PURGE_SCHEDULED",
+                    "SYSTEM", fid, "SYSTEM", None, "PURGE_SCHEDULED",
                     {"purpose_id": purpose_id, "due": due.isoformat(), "notice_hours": settings.purge_notice_hours},
                 )
     return {"purge_requests_created": created, "admin_notices": notices}
@@ -238,11 +256,7 @@ def run_retention_sweep() -> dict[str, int]:
 _CSV_SUBSCRIPTIONS: dict[str, tuple[str, str, str]] = {
     # subtype -> (table, default_columns, date_column)
     "CONSENT": ("consent_records", "id,user_id,policy_id,policy_version,consent_status_general,timestamp", "timestamp"),
-    "PRINCIPAL": (
-        "data_principal",
-        "user_id,fiduciary_id,last_consent_mechanism,age_category,created_at",
-        "created_at",
-    ),
+    "PRINCIPAL": ("data_principal", "user_id,fiduciary_id,last_consent_mechanism,age_category,created_at", "created_at"),
     "GRIEVANCE": ("grievances", "id,user_id,type,subject,status,submission_timestamp", "submission_timestamp"),
     "AUDIT": ("audit_logs", "id,fiduciary_id,timestamp,user_id,service_type,audit_action,context_details", "timestamp"),
 }
@@ -275,7 +289,9 @@ def execute_queued_jobs() -> dict[str, int]:
         try:
             if job_type == "CES":
                 close_due_time_bound_purposes()
-                db.execute("UPDATE jobs SET status = 'COMPLETED', completed_at = NOW() WHERE id = %s", (job_id,))
+                db.execute(
+                    "UPDATE jobs SET status = 'COMPLETED', completed_at = NOW() WHERE id = %s", (job_id,)
+                )
                 completed += 1
                 continue
             if job_type == "EXPORT" and subtype in _CSV_SUBSCRIPTIONS:
@@ -320,15 +336,9 @@ def _write_export(job: dict[str, Any]) -> Path:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow(
-                {key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()}
-            )
+            writer.writerow({key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()})
     log_event(
-        "SYSTEM",
-        str(job["fiduciary_id"]),
-        "SYSTEM",
-        str(job["id"]),
-        "JOB_COMPLETED",
+        "SYSTEM", str(job["fiduciary_id"]), "SYSTEM", str(job["id"]), "JOB_COMPLETED",
         {"output_file_path": str(path), "rows": len(rows)},
     )
     return path

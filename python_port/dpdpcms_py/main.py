@@ -58,6 +58,8 @@ CLIENT_ALLOWED_FUNCS = {
     "list_alerts",
     # P1: fresh affirmative consent on a material policy change (BRD 4.1.3)
     "request_reconsent",
+    # P2: principal downloads their own consent history (UD-04)
+    "export_consent_history",
 }
 CLIENT_FUNC_SCOPES = {
     "record_consent": "WRITE",
@@ -91,6 +93,8 @@ CLIENT_FUNC_SCOPES = {
     "list_alerts": "READ",
     # P1: fresh affirmative consent on a material policy change (BRD 4.1.3)
     "request_reconsent": "WRITE",
+    # P2: principal downloads their own consent history (UD-04)
+    "export_consent_history": "READ",
 }
 
 
@@ -202,6 +206,20 @@ def authenticate(ctx: RequestContext) -> None:
         token = decode_token(raw)
         if not token:
             raise ApiError(401, "Unauthorized", "Authentication failed.")
+        # SA-06: an account with MFA enabled must present an mfa-verified token
+        # for ANY function except the MFA round-trip itself and logout.
+        if token.get("mfa") is not True and func not in {"verify_mfa", "enrol_mfa", "logout"}:
+            email = token.get("email", "")
+            mfa_row = db.one(
+                f"SELECT mfa_enabled FROM operators WHERE email_hmac = {db.hmac_expr()} AND status = 'ACTIVE' LIMIT 1",
+                (*db.bind_hmac(email),),
+            )
+            if mfa_row and mfa_row["mfa_enabled"]:
+                raise ApiError(
+                    403,
+                    "Forbidden",
+                    "Multi-factor verification is required to continue. Call verify_mfa with the code from your authenticator app.",
+                )
         ctx.auth_token = token
         return
     if ctx.category == "client":
@@ -255,6 +273,7 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
             payload=payload,
             headers={k: v for k, v in request.headers.items()},
             method=request.method,
+            source_ip=request.client.host if request.client else None,
         )
         service_cls = SERVICE_REGISTRY.get(service)
         if not service_cls:

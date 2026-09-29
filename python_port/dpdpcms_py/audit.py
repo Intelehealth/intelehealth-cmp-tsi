@@ -22,6 +22,11 @@ def log_event(
     service_id: str | None,
     action: str,
     details: str | dict | None = None,
+    *,
+    purpose_id: str | None = None,
+    consent_status: str | None = None,
+    initiator: str | None = None,
+    source_ip: str | None = None,
 ) -> None:
     context = details if isinstance(details, str) else json.dumps(details or {}, default=str)
     fid = fiduciary_id if fiduciary_id and fiduciary_id != ADMIN_FIDUCIARY_ID else None
@@ -37,8 +42,9 @@ def log_event(
             """
             INSERT INTO audit_logs
                 (id, fiduciary_id, timestamp, user_id, service_type, service_id,
-                 audit_action, context_details, prev_log_hash, current_log_hash, system_metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 audit_action, context_details, prev_log_hash, current_log_hash,
+                 system_metadata, purpose_id, consent_status, initiator, source_ip)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 str(uuid.uuid4()),
@@ -52,6 +58,10 @@ def log_event(
                 previous_hash,
                 current_hash,
                 db.as_jsonb({"python_port": True}),
+                purpose_id,
+                consent_status,
+                initiator,
+                source_ip,
             ),
         )
 
@@ -68,13 +78,20 @@ def list_logs(payload: dict) -> list[dict]:
     if payload.get("audit_action"):
         where.append("audit_action = %s")
         params.append(payload["audit_action"])
+    if payload.get("purpose_id"):
+        where.append("purpose_id = %s")
+        params.append(payload["purpose_id"])
+    if payload.get("initiator"):
+        where.append("initiator = %s")
+        params.append(payload["initiator"])
     limit = int(payload.get("limit") or 50)
     params.append(limit)
     return db.to_jsonable(
         db.all(
             f"""
         SELECT id, fiduciary_id, timestamp, user_id, service_type, service_id,
-               audit_action, context_details, prev_log_hash, current_log_hash
+               audit_action, context_details, prev_log_hash, current_log_hash,
+               purpose_id, consent_status, initiator, source_ip
         FROM audit_logs
         WHERE {" AND ".join(where)}
         ORDER BY timestamp DESC
