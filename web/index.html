@@ -110,6 +110,14 @@
                        placeholder="••••••••••••">
             </div>
 
+            <!-- MFA Code Input (two-step login) -->
+            <div id="mfa-field" class="hidden">
+                <label for="mfa-code" class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Authenticator Code</label>
+                <input type="text" id="mfa-code" name="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                       class="input-style w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-2 focus:ring-primary-text focus:border-primary-text outline-none transition-all text-sm"
+                       placeholder="000000">
+            </div>
+
             <!-- Submit Button -->
             <button type="submit"
                     class="animated-button w-full h-11 inline-flex items-center justify-center rounded-md font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-opacity-90 transition-all">
@@ -138,6 +146,8 @@ async function handleLogin(event) {
     const email = document.getElementById('email').value;
     const password = document.getElementById('password').value;
     const messageArea = document.getElementById('login-message');
+    const mfaField = document.getElementById('mfa-field');
+    const mfaCode = document.getElementById('mfa-code');
 
     // Reset UI
     messageArea.textContent = '';
@@ -156,6 +166,45 @@ async function handleLogin(event) {
     messageArea.classList.remove('hidden');
     messageArea.classList.add('text-blue-500');
 
+    // Step two: complete MFA with the challenge token from the first response.
+    const pendingToken = localStorage.getItem('pendingAuthToken');
+    if (pendingToken && mfaCode.value.trim()) {
+        const code = mfaCode.value.trim();
+        if (code.length !== 6 || !/^\d{6}$/.test(code)) {
+            messageArea.textContent = "Enter the 6-digit code from your authenticator app.";
+            messageArea.classList.replace('text-blue-500', 'text-teal-600');
+            mfaCode.focus();
+            return;
+        }
+        const verifyResponse = await fetch(API_LOGIN_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + pendingToken },
+            body: JSON.stringify({ _func: "verify_mfa", code: code })
+        });
+        const verifyData = await verifyResponse.json();
+        localStorage.removeItem('pendingAuthToken');
+        if (verifyResponse.ok && verifyData.success === true && verifyData.token) {
+            localStorage.setItem('authToken', verifyData.token);
+            localStorage.setItem('username', localStorage.getItem('pendingUsername') || '');
+            localStorage.setItem('role', verifyData.role || localStorage.getItem('pendingRole') || '');
+            localStorage.setItem('fiduciary_id', localStorage.getItem('pendingFiduciaryId') || '');
+            localStorage.removeItem('pendingUsername');
+            localStorage.removeItem('pendingRole');
+            localStorage.removeItem('pendingFiduciaryId');
+            messageArea.textContent = "MFA verified. Redirecting to vault...";
+            messageArea.classList.replace('text-blue-500', 'text-teal-600');
+            setTimeout(() => {
+                window.location.href = (localStorage.getItem('role') === 'ADMIN') ? ADMIN_DASHBOARD_URL : DPO_DASHBOARD_URL;
+            }, 800);
+        } else {
+            messageArea.textContent = verifyData.message || "Invalid authenticator code. Please try again.";
+            messageArea.classList.replace('text-blue-500', 'text-red-500');
+            mfaCode.value = '';
+            mfaCode.focus();
+        }
+        return;
+    }
+
     try {
         const payload = { _func: "login", identifier: email, password: password };
 
@@ -166,6 +215,20 @@ async function handleLogin(event) {
         });
 
         const responseData = await response.json();
+
+        if (response.ok && responseData.success === true && responseData.mfa_required) {
+            // Step two: MFA is enabled on this account. Persist the challenge
+            // token, show the code input, and wait for a second submit.
+            localStorage.setItem('pendingAuthToken', responseData.token);
+            localStorage.setItem('pendingUsername', responseData.username);
+            localStorage.setItem('pendingRole', responseData.role);
+            localStorage.setItem('pendingFiduciaryId', responseData.fiduciary_id);
+            messageArea.textContent = "Enter the 6-digit code from your authenticator app.";
+            messageArea.classList.replace('text-blue-500', 'text-teal-600');
+            mfaField.classList.remove('hidden');
+            mfaCode.focus();
+            return;
+        }
 
         if (response.ok && responseData.success === true) {
             // Persist context for management console
