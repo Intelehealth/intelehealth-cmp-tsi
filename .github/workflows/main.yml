@@ -1,6 +1,7 @@
 name: Main
 
 on:
+  workflow_dispatch: {}
   push:
     branches: [p2_changes]
   pull_request:
