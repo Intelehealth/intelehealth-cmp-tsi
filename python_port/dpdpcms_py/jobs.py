@@ -247,7 +247,11 @@ def run_retention_sweep() -> dict[str, int]:
                 )
                 notices += 1
                 log_event(
-                    "SYSTEM", fid, "SYSTEM", None, "PURGE_SCHEDULED",
+                    "SYSTEM",
+                    fid,
+                    "SYSTEM",
+                    None,
+                    "PURGE_SCHEDULED",
                     {"purpose_id": purpose_id, "due": due.isoformat(), "notice_hours": settings.purge_notice_hours},
                 )
     return {"purge_requests_created": created, "admin_notices": notices}
@@ -256,7 +260,11 @@ def run_retention_sweep() -> dict[str, int]:
 _CSV_SUBSCRIPTIONS: dict[str, tuple[str, str, str]] = {
     # subtype -> (table, default_columns, date_column)
     "CONSENT": ("consent_records", "id,user_id,policy_id,policy_version,consent_status_general,timestamp", "timestamp"),
-    "PRINCIPAL": ("data_principal", "user_id,fiduciary_id,last_consent_mechanism,age_category,created_at", "created_at"),
+    "PRINCIPAL": (
+        "data_principal",
+        "user_id,fiduciary_id,last_consent_mechanism,age_category,created_at",
+        "created_at",
+    ),
     "GRIEVANCE": ("grievances", "id,user_id,type,subject,status,submission_timestamp", "submission_timestamp"),
     "AUDIT": ("audit_logs", "id,fiduciary_id,timestamp,user_id,service_type,audit_action,context_details", "timestamp"),
 }
@@ -289,9 +297,7 @@ def execute_queued_jobs() -> dict[str, int]:
         try:
             if job_type == "CES":
                 close_due_time_bound_purposes()
-                db.execute(
-                    "UPDATE jobs SET status = 'COMPLETED', completed_at = NOW() WHERE id = %s", (job_id,)
-                )
+                db.execute("UPDATE jobs SET status = 'COMPLETED', completed_at = NOW() WHERE id = %s", (job_id,))
                 completed += 1
                 continue
             if job_type == "EXPORT" and subtype in _CSV_SUBSCRIPTIONS:
@@ -336,9 +342,15 @@ def _write_export(job: dict[str, Any]) -> Path:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()})
+            writer.writerow(
+                {key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()}
+            )
     log_event(
-        "SYSTEM", str(job["fiduciary_id"]), "SYSTEM", str(job["id"]), "JOB_COMPLETED",
+        "SYSTEM",
+        str(job["fiduciary_id"]),
+        "SYSTEM",
+        str(job["id"]),
+        "JOB_COMPLETED",
         {"output_file_path": str(path), "rows": len(rows)},
     )
     return path

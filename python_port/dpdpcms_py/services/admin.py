@@ -167,9 +167,7 @@ class OperatorService(Service):
         from ..security import token as issue_token
 
         code = require(ctx.payload.get("code"), "code")
-        operator_id = authenticated_user_id(ctx) or ctx.payload.get("user_id") or (
-            ctx.auth_token or {}
-        ).get("sub")
+        operator_id = authenticated_user_id(ctx) or ctx.payload.get("user_id") or (ctx.auth_token or {}).get("sub")
         if not operator_id:
             raise ApiError(400, "Bad Request", "user_id is required to verify MFA.")
         row = db.one(
