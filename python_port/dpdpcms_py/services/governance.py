@@ -9,7 +9,7 @@ from ..context import RequestContext
 from ..errors import ApiError
 from ..netutil import validate_outbound_url
 from ..security import hash_password, random_secret
-from .base import Service, require
+from .base import Service, bind_principal_field, principal_list_filter, require
 from .catalog import resolve_fiduciary
 
 API_KEY_COLUMNS = (
@@ -104,15 +104,27 @@ class ApiKeyService(Service):
 
 class AuditService(Service):
     def list_audit_logs(self, ctx: RequestContext) -> list[dict]:
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
         return list_logs(ctx.payload)
 
     def list_recent_audit_logs(self, ctx: RequestContext) -> list[dict]:
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
         return list_logs(ctx.payload)
 
     def list_access_logs(self, ctx: RequestContext) -> list[dict]:
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
         return list_logs(ctx.payload)
 
     def get_audit_log(self, ctx: RequestContext) -> dict:
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
         row = get_log(require(ctx.payload.get("id"), "id"))
         if not row:
             raise ApiError(404, "Not Found", "Audit log not found.")
@@ -129,15 +141,23 @@ class AuditService(Service):
             ctx.payload.get("service_id"),
             require(ctx.payload.get("audit_action"), "audit_action"),
             ctx.payload.get("context_details"),
+            purpose_id=ctx.payload.get("purpose_id"),
+            consent_status=ctx.payload.get("consent_status"),
+            initiator=ctx.payload.get("initiator"),
+            source_ip=ctx.source_ip,
         )
         return {"success": True}
 
 
 class NotificationService(Service):
     def list_notifications(self, ctx: RequestContext) -> list[dict]:
-        recipient = ctx.payload.get("recipient_id") or ctx.payload.get("user_id")
+        bind_principal_field(ctx, "user_id")
+        recipient = principal_list_filter(ctx, "recipient_id") or ctx.payload.get("user_id")
         where = ["fiduciary_id = %s"]
         params = [require(resolve_fiduciary(ctx), "fiduciary_id")]
+        if ctx.auth_via_principal_jwt:
+            where.append("recipient_type = %s")
+            params.append("PRINCIPAL")
         if recipient:
             where.append("recipient_id = %s")
             params.append(recipient)
@@ -147,12 +167,34 @@ class NotificationService(Service):
         )
 
     def mark_notification_read(self, ctx: RequestContext) -> dict:
+        nid = require(ctx.payload.get("notification_id"), "notification_id")
         where = ["id = %s"]
-        params: list = [require(ctx.payload.get("notification_id"), "notification_id")]
+        params: list = [nid]
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
-        db.execute(f"UPDATE notifications SET read_at = NOW() WHERE {' AND '.join(where)}", params)
+        if ctx.auth_via_principal_jwt:
+            where.append("recipient_type = %s")
+            params.append("PRINCIPAL")
+            where.append("recipient_id = %s")
+            params.append(require(ctx.principal_user_id, "principal"))
+        read = db.execute(f"UPDATE notifications SET read_at = NOW() WHERE {' AND '.join(where)}", params)
+        if read:
+            row = db.one(
+                "SELECT recipient_id, fiduciary_id FROM notifications WHERE id = %s",
+                (ctx.payload.get("notification_id"),),
+            )
+            if row:
+                log_event(
+                    row.get("recipient_id") or ctx.actor_email or "PRINCIPAL",
+                    row["fiduciary_id"],
+                    "APP",
+                    str(ctx.payload.get("notification_id")),
+                    "NOTIFICATION_ACKNOWLEDGED",
+                    {"notification_id": ctx.payload.get("notification_id")},
+                    initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+                    source_ip=ctx.source_ip,
+                )
         return {"success": True}
 
     def set_notification_message(self, ctx: RequestContext) -> dict:

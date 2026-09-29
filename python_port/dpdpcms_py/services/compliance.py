@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, page_limit, require
+from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, require
 from .catalog import resolve_fiduciary
 
 
@@ -53,17 +55,37 @@ class ComplianceService(Service):
 
 class GrievanceService(Service):
     def submit_grievance(self, ctx: RequestContext) -> dict:
+        bind_principal_field(ctx, "user_id")
         user_id = require(ctx.payload.get("user_id"), "user_id")
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
         grievance_type = require(ctx.payload.get("type"), "type")
         sla_days = 7 if grievance_type.upper() == "ERASURE_REQUEST" else 30
+        consent_record_id = ctx.payload.get("consent_record_id")
+        # GR-14: the complaint may be linked to the consent record it concerns.
+        if consent_record_id:
+            linked = db.one(
+                "SELECT id FROM consent_records WHERE id = %s AND user_id = %s AND fiduciary_id = %s",
+                (consent_record_id, user_id, fid),
+            )
+            if not linked:
+                raise ApiError(
+                    400,
+                    "Bad Request",
+                    "consent_record_id does not reference a consent record belonging to this principal and fiduciary.",
+                )
+        # UD-10 / GR-05: a short human-quotable reference the principal can raise
+        # in follow-up contact. Collision-safe within a fiduciary via the unique
+        # index on (fiduciary_id, reference_number).
+        reference_number = self._next_reference(fid)
         row = db.insert_returning(
             """
             INSERT INTO grievances
                 (id, user_id, fiduciary_id, type, subject, description,
-                 submission_timestamp, status, communication_log, attachments, due_date)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), 'NEW', %s, %s, NOW() + make_interval(days => %s))
-            RETURNING id
+                 submission_timestamp, status, communication_log, attachments, due_date,
+                 reference_number, consent_record_id)
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), 'NEW', %s, %s,
+                    NOW() + make_interval(days => %s), %s, %s)
+            RETURNING id, reference_number
             """,
             (
                 user_id,
@@ -74,6 +96,8 @@ class GrievanceService(Service):
                 db.as_jsonb([]),
                 db.as_jsonb(ctx.payload.get("attachments") or []),
                 sla_days,
+                reference_number,
+                consent_record_id,
             ),
         )
         gid = str(row["id"])
@@ -81,8 +105,43 @@ class GrievanceService(Service):
             "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED')",
             (user_id, fid),
         )
-        log_event(user_id, fid, "APP", None, "GRIEVANCE_SUBMITTED", {"grievance_id": gid, "type": grievance_type})
-        return {"success": True, "grievance_id": gid}
+        log_event(
+            user_id,
+            fid,
+            "APP",
+            None,
+            "GRIEVANCE_SUBMITTED",
+            {"grievance_id": gid, "type": grievance_type, "reference_number": reference_number},
+            purpose_id=consent_record_id,
+            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            source_ip=ctx.source_ip,
+        )
+        return {
+            "success": True,
+            "grievance_id": gid,
+            "reference_number": reference_number,
+        }
+
+    @staticmethod
+    def _next_reference(fiduciary_id: str) -> str:
+        """A short, human-quotable reference: GRV-<year>-<6 hex chars>.
+
+        The per-fiduciary unique index means a collision falls back to a fresh
+        value rather than failing the submission.
+        """
+        import uuid as uuidlib
+
+        for _ in range(5):
+            ref = f"GRV-{datetime.now(UTC).year}-{str(uuidlib.uuid4().hex[:6]).upper()}"
+            if (
+                db.one(
+                    "SELECT 1 FROM grievances WHERE fiduciary_id = %s AND reference_number = %s LIMIT 1",
+                    (fiduciary_id, ref),
+                )
+                is None
+            ):
+                return ref
+        raise ApiError(409, "Conflict", "Could not allocate a unique grievance reference.")
 
     def get_grievance(self, ctx: RequestContext) -> dict:
         gid = ctx.payload.get("grievance_id") or ctx.payload.get("id")
@@ -94,6 +153,7 @@ class GrievanceService(Service):
         row = db.one(f"SELECT * FROM grievances WHERE {' AND '.join(where)}", params)
         if not row:
             raise ApiError(404, "Not Found", "Grievance not found.")
+        ensure_principal_owns(ctx, row.get("user_id"), label="Grievance")
         return db.to_jsonable(row)
 
     def list_grievances(self, ctx: RequestContext) -> list[dict]:
@@ -113,6 +173,7 @@ class GrievanceService(Service):
         )
 
     def list_user_grievances(self, ctx: RequestContext) -> list[dict]:
+        bind_principal_field(ctx, "user_id")
         return db.to_jsonable(
             db.all(
                 "SELECT * FROM grievances WHERE fiduciary_id = %s AND user_id = %s ORDER BY submission_timestamp DESC",

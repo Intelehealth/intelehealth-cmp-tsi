@@ -49,6 +49,19 @@ def bind_principal_field(ctx: RequestContext, field: str) -> None:
         ctx.payload[field] = ctx.principal_user_id
 
 
+def ensure_principal_owns(
+    ctx: RequestContext,
+    owner_user_id: str | None,
+    *,
+    label: str = "Resource",
+) -> None:
+    """Block cross-principal access for principal JWT sessions (404 avoids ID leakage)."""
+    if not ctx.auth_via_principal_jwt:
+        return
+    if owner_user_id is None or str(owner_user_id) != ctx.principal_user_id:
+        raise ApiError(404, "Not Found", f"{label} not found.")
+
+
 def principal_list_filter(ctx: RequestContext, field: str) -> str | None:
     """When called with a principal JWT, return the id that must be used to filter list queries."""
     if ctx.auth_via_principal_jwt:
