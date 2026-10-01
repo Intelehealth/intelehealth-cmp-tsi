@@ -151,7 +151,15 @@ class OperatorService(Service):
                 options={"require": ["exp", "iat", "iss", "aud", "sub"]},
             )
         except Exception:
-            log_event("SSO", ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", None, "LOGIN_FAILURE", "Invalid SSO token.", source_ip=ctx.source_ip)
+            log_event(
+                "SSO",
+                ADMIN_FIDUCIARY_ID,
+                "ADMIN_CONSOLE",
+                None,
+                "LOGIN_FAILURE",
+                "Invalid SSO token.",
+                source_ip=ctx.source_ip,
+            )
             raise ApiError(401, "Unauthorized", "Single sign-on failed.") from None
         email = claims.get("email")
         if not email or claims.get("email_verified") is False:
@@ -165,7 +173,15 @@ class OperatorService(Service):
             db.bind_hmac(email),
         )
         if not row:
-            log_event(email, ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", None, "LOGIN_FAILURE", "SSO: no active operator.", source_ip=ctx.source_ip)
+            log_event(
+                email,
+                ADMIN_FIDUCIARY_ID,
+                "ADMIN_CONSOLE",
+                None,
+                "LOGIN_FAILURE",
+                "SSO: no active operator.",
+                source_ip=ctx.source_ip,
+            )
             raise ApiError(401, "Unauthorized", "No active operator account matches this identity.")
         amr = {str(m).lower() for m in (claims.get("amr") or [])}
         idp_mfa = bool(amr & {"mfa", "otp", "hwk", "swk", "fido", "sms"})
