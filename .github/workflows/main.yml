@@ -3,9 +3,9 @@ name: Main
 on:
   workflow_dispatch: {}
   push:
-    branches: [p2_changes]
+    branches: [p3_changes]
   pull_request:
-    branches: [p2_changes]
+    branches: [p3_changes]
 
 permissions:
   contents: read
