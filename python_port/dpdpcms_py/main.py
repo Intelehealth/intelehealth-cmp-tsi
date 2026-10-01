@@ -14,6 +14,7 @@ from .context import RequestContext
 from .errors import ApiError, error_body
 from .security import api_key_valid, bearer_token, decode_token
 from .services import SERVICE_REGISTRY
+from .services.roles import MFA_EXEMPT_FUNCS, enforce_role_permission
 from .validators import validate_payload
 
 log = logging.getLogger("dpdpcms")
@@ -21,6 +22,8 @@ log = logging.getLogger("dpdpcms")
 ADMIN_NOAUTH_FUNCS = {"reset_password", "login", "verify_recovery_key", "reset_password_via_recovery"}
 BOOTSTRAP_ALLOWED = {("setup", "initial_setup")}
 PUBLIC_ALLOWED_FUNCS = {
+    # SA-06: operator single sign-on (the IdP's id_token is the credential).
+    "sso_login",
     "principal_login",
     "list_active_fiduciaries",
     "list_fiduciary_personas",
@@ -60,6 +63,12 @@ CLIENT_ALLOWED_FUNCS = {
     "request_reconsent",
     # P2: principal downloads their own consent history (UD-04)
     "export_consent_history",
+    # BRD traceability: withdrawal implications, grievance follow-up, purge proof
+    "get_withdrawal_implications",
+    "add_grievance_communication",
+    "submit_grievance_feedback",
+    "upload_grievance_attachment",
+    "confirm_purge_status",
 }
 CLIENT_FUNC_SCOPES = {
     "record_consent": "WRITE",
@@ -95,6 +104,11 @@ CLIENT_FUNC_SCOPES = {
     "request_reconsent": "WRITE",
     # P2: principal downloads their own consent history (UD-04)
     "export_consent_history": "READ",
+    "get_withdrawal_implications": "READ",
+    "add_grievance_communication": "WRITE",
+    "submit_grievance_feedback": "WRITE",
+    "upload_grievance_attachment": "WRITE",
+    "confirm_purge_status": "PURGE",
 }
 
 
@@ -131,6 +145,13 @@ class _DbJSONResponse(JSONResponse):
 
 
 def _json_response(data: Any, status: int = 200) -> Response:
+    if isinstance(data, bytes):
+        # Binary exports (UD-04 PDF) are served as a download.
+        return Response(
+            data,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="consent-history.pdf"'},
+        )
     if isinstance(data, str):
         return PlainTextResponse(data)
     return _DbJSONResponse(data if data is not None else {}, status_code=status)
@@ -206,21 +227,49 @@ def authenticate(ctx: RequestContext) -> None:
         token = decode_token(raw)
         if not token:
             raise ApiError(401, "Unauthorized", "Authentication failed.")
+        # Principal and operator JWTs share a signing key, so the token type must
+        # be checked: a principal token is never an operator session.
+        if token.get("typ") == "principal" or not token.get("email"):
+            raise ApiError(401, "Unauthorized", "Authentication failed.")
+        # Every admin call must map to an ACTIVE operator. This also revokes the
+        # tokens of deactivated accounts, and makes the database role (not the
+        # role claim baked into the token) the one that is authorised.
+        operator = db.one(
+            f"""
+            SELECT o.id, o.role, o.fiduciary_id, o.mfa_enabled,
+                   EXTRACT(EPOCH FROM o.tokens_valid_after) AS valid_after,
+                   EXISTS (SELECT 1 FROM revoked_tokens r WHERE r.jti = %s) AS revoked
+            FROM operators o
+            WHERE o.email_hmac = {db.hmac_expr()} AND o.status = 'ACTIVE' LIMIT 1
+            """,
+            (str(token.get("jti") or ""), *db.bind_hmac(token.get("email", ""))),
+        )
+        if not operator:
+            raise ApiError(401, "Unauthorized", "Authentication failed.")
+        # SA-05: logout revokes the one token; deactivation or a password change
+        # revokes every token issued before it, immediately rather than at expiry.
+        if operator.get("revoked") or (
+            operator.get("valid_after") is not None and int(token.get("iat") or 0) < int(operator["valid_after"])
+        ):
+            raise ApiError(401, "Unauthorized", "This session has been revoked. Please sign in again.")
         # SA-06: an account with MFA enabled must present an mfa-verified token
         # for ANY function except the MFA round-trip itself and logout.
-        if token.get("mfa") is not True and func not in {"verify_mfa", "enrol_mfa", "logout"}:
-            email = token.get("email", "")
-            mfa_row = db.one(
-                f"SELECT mfa_enabled FROM operators WHERE email_hmac = {db.hmac_expr()} AND status = 'ACTIVE' LIMIT 1",
-                (*db.bind_hmac(email),),
+        if token.get("mfa") is not True and func not in MFA_EXEMPT_FUNCS and operator["mfa_enabled"]:
+            raise ApiError(
+                403,
+                "Forbidden",
+                "Multi-factor verification is required to continue. Call verify_mfa with the code from your authenticator app.",
             )
-            if mfa_row and mfa_row["mfa_enabled"]:
-                raise ApiError(
-                    403,
-                    "Forbidden",
-                    "Multi-factor verification is required to continue. Call verify_mfa with the code from your authenticator app.",
-                )
-        ctx.auth_token = token
+        ctx.auth_token = {**token, "role": operator["role"]}
+        ctx.operator_id = str(operator["id"])
+        # A fiduciary-scoped operator (DPO, OPERATOR, AUDITOR...) is bound to its
+        # own tenant exactly like an API key: never trust a body-supplied
+        # fiduciary_id. Only a global ADMIN selects a tenant via the payload.
+        if operator.get("fiduciary_id") and str(operator["role"]).upper() != "ADMIN":
+            ctx.fiduciary_id = str(operator["fiduciary_id"])
+            ctx.payload["fiduciary_id"] = ctx.fiduciary_id
+        # SA-02/SA-03: every admin function is gated by the roles table.
+        enforce_role_permission(ctx)
         return
     if ctx.category == "client":
         if func not in CLIENT_ALLOWED_FUNCS:
@@ -233,6 +282,7 @@ def authenticate(ctx: RequestContext) -> None:
             ctx.fiduciary_id = str(principal_claims.get("fid"))
             ctx.principal_user_id = str(principal_claims.get("sub"))
             ctx.auth_via_principal_jwt = True
+            ctx.session_id = str(principal_claims.get("jti") or "") or None
             if ctx.payload.get("user_id") and ctx.payload["user_id"] != ctx.principal_user_id:
                 raise ApiError(
                     403, "Forbidden", "User ID mismatch: token does not authorize access to the requested principal."

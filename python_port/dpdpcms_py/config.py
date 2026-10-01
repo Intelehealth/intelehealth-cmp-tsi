@@ -61,8 +61,21 @@ class Settings:
     webhook_retry_limit: int = 5
     # ── P1 worker sweep thresholds ──────────────────────────────────────────
     alert_escalation_hours: int = 24
-    purge_notice_hours: int = 48  # DPDP Rule 8(2): 48h notice before deletion
+    purge_notice_hours: int = 48          # DPDP Rule 8(2): 48h notice before deletion
     grievance_escalation_hours: int = 24  # beyond the SLA due_date
+    # Rights-portal DUMMY_OTP mode accepts a fixed code, i.e. no authentication.
+    # Off unless TSI_DPDP_CMS_ENV=local or ALLOW_DUMMY_OTP=true.
+    allow_dummy_otp: bool = False
+    # SA-09: days a purge may stay unconfirmed before the DPO is told.
+    purge_completion_sla_days: int = 30
+    # CC-05: DigiLocker partner verifier for guardian identity (empty = not configured).
+    digilocker_verify_url: str = ""
+    # SA-06: OpenID Connect SSO for operators (all three empty = SSO disabled).
+    sso_issuer: str = ""
+    sso_audience: str = ""
+    sso_jwks_url: str = ""
+    # GR-04: grievance attachment limits.
+    attachment_max_bytes: int = 5 * 1024 * 1024
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -90,6 +103,8 @@ class Settings:
             raise RuntimeError("BRAND_NAME must be 12 characters or fewer.")
 
         allowed = tuple(origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip())
+        environment = os.getenv("TSI_DPDP_CMS_ENV", "local")
+        dummy_default = "true" if environment == "local" else "false"
         return cls(
             db_dsn=cls._dsn_from_env(),
             db_encryption_key=_secret("DB_ENCRYPTION_KEY"),
@@ -97,7 +112,7 @@ class Settings:
             lookup_salt=_secret("TSI_LOOKUP_SALT"),
             allowed_origins=allowed,
             brand_name=brand,
-            environment=os.getenv("TSI_DPDP_CMS_ENV", "local"),
+            environment=environment,
             export_path=Path(os.getenv("TSI_EXPORT_PATH", str(ROOT / "exports"))),
             bootstrap_token=_secret("BOOTSTRAP_TOKEN"),
             worker_poll_seconds=int(os.getenv("WORKER_POLL_SECONDS", "30")),
@@ -115,6 +130,13 @@ class Settings:
             alert_escalation_hours=int(os.getenv("ALERT_ESCALATION_HOURS", "24")),
             purge_notice_hours=int(os.getenv("PURGE_NOTICE_HOURS", "48")),
             grievance_escalation_hours=int(os.getenv("GRIEVANCE_ESCALATION_HOURS", "24")),
+            allow_dummy_otp=os.getenv("ALLOW_DUMMY_OTP", dummy_default).lower() in {"1", "true", "yes"},
+            purge_completion_sla_days=int(os.getenv("PURGE_COMPLETION_SLA_DAYS", "30")),
+            digilocker_verify_url=os.getenv("DIGILOCKER_VERIFY_URL", ""),
+            sso_issuer=os.getenv("SSO_ISSUER", ""),
+            sso_audience=os.getenv("SSO_AUDIENCE", ""),
+            sso_jwks_url=os.getenv("SSO_JWKS_URL", ""),
+            attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
         )
 
 

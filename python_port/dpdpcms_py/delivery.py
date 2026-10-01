@@ -46,20 +46,17 @@ def _enqueue(notification_id: str, channel: str, recipient: str | None, status: 
 
 def _recipient_email(recipient_type: str, recipient_id: str) -> str | None:
     """Resolve a delivery address for a non-principal recipient from encrypted columns."""
-    col = "(SELECT pgp_sym_decrypt(decode(%s, 'base64'), %s))"
-    if recipient_type in {"DPO", "ADMIN", "OPERATOR"}:
-        row = db.one(
-            f"SELECT {col} AS email FROM operators WHERE id = %s AND email_enc IS NOT NULL",
-            (settings.db_encryption_key, settings.db_encryption_key, recipient_id),
-        )
-        return str(row["email"]) if row and row.get("email") else None
-    for table, id_column in (("fiduciaries", "id"), ("apps", "id")):
+    tables = ("operators",) if recipient_type in {"DPO", "ADMIN", "OPERATOR"} else ("fiduciaries", "apps")
+    for table in tables:
+        # A bad recipient id (not a UUID, say) must never abort the delivery
+        # sweep — it just has no resolvable address.
         try:
             row = db.one(
-                f"SELECT {col} AS email FROM {table} WHERE {id_column} = %s AND email_enc IS NOT NULL",
-                (settings.db_encryption_key, settings.db_encryption_key, recipient_id),
+                f"SELECT {db.decrypt_col('email_enc')} AS email FROM {table} WHERE id = %s AND email_enc IS NOT NULL",
+                (*db.bind_key(), recipient_id),
             )
         except Exception:
+            log.warning("Could not resolve email for %s recipient %s", recipient_type, recipient_id, exc_info=True)
             continue
         if row and row.get("email"):
             return str(row["email"])
@@ -92,6 +89,17 @@ def _backfill_deliveries(limit: int) -> int:
         recipient_id = str(row["recipient_id"] or "")
         _enqueue(nid, "IN_APP", recipient_id, status="SENT")
         count += 1
+        # LG-03: the in-app notice is delivered the moment it is enqueued, so
+        # that is when its dispatch is audited (other channels on send).
+        log_event(
+            recipient_id or "SYSTEM",
+            str(row["fiduciary_id"]) if row.get("fiduciary_id") else None,
+            "NOTIFICATION",
+            nid,
+            "NOTIFICATION_DISPATCHED",
+            {"channel": "IN_APP", "notification_type": row["notification_type"], "status": "SENT"},
+            initiator="SYSTEM",
+        )
         if settings.smtp_host and recipient_type not in {"PRINCIPAL"}:
             email = _recipient_email(recipient_type, recipient_id)
             if email:
@@ -133,9 +141,7 @@ def _deliver_gateway(channel: str, recipient_id: str, body: str) -> tuple[str | 
     if not url:
         return f"{channel} gateway not configured", None
     try:
-        status, response = post_json(
-            url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20
-        )
+        status, response = post_json(url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20)
         if status is None:
             return f"{channel} gateway unreachable: {response}", None
         if status >= 400:

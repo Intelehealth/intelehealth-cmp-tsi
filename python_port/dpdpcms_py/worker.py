@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 from . import delivery, jobs, webhooks
@@ -18,15 +19,27 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
     """
     if dry_run:
         return {"dry_run": True, "sweeps": list_sweeps()}
-    summary: dict[str, Any] = {
-        "delivery": delivery.process_pending_notifications(),
-        "webhooks": webhooks.process_pending_webhooks(),
-        "time_bound_purposes": jobs.close_due_time_bound_purposes(),
-        "alerts": jobs.escalate_stale_alerts(),
-        "grievances": jobs.escalate_overdue_grievances(),
-        "retention": jobs.run_retention_sweep(),
-        "jobs": jobs.execute_queued_jobs(),
+    sweeps: dict[str, Callable[[], Any]] = {
+        "delivery": delivery.process_pending_notifications,
+        "webhooks": webhooks.process_pending_webhooks,
+        "time_bound_purposes": jobs.close_due_time_bound_purposes,
+        "alerts": jobs.escalate_stale_alerts,
+        "grievances": jobs.escalate_overdue_grievances,
+        "retention": jobs.run_retention_sweep,
+        "jobs": jobs.execute_queued_jobs,
+        "overdue_purges": jobs.flag_overdue_purges,
+        "legal_holds": jobs.release_expired_legal_holds,
+        "revoked_tokens": jobs.prune_revoked_tokens,
     }
+    # Each sweep is isolated: one failing sweep is logged and reported, and the
+    # rest of the cycle still runs.
+    summary: dict[str, Any] = {}
+    for name, sweep in sweeps.items():
+        try:
+            summary[name] = sweep()
+        except Exception as exc:  # noqa: BLE001 - one bad sweep must not halt the others
+            log.exception("Sweep %s failed", name)
+            summary[name] = {"error": f"{type(exc).__name__}: {exc}"}
     return summary
 
 
@@ -39,6 +52,9 @@ def list_sweeps() -> list[str]:
         "jobs.escalate_overdue_grievances         (UD-12, GR-09)",
         "jobs.run_retention_sweep                 (PL-04/SA-09, SA-11)",
         "jobs.execute_queued_jobs                 (LG-07 export jobs)",
+        "jobs.flag_overdue_purges                 (SA-09 unconfirmed purges)",
+        "jobs.release_expired_legal_holds         (CW-11 legal hold end)",
+        "jobs.prune_revoked_tokens                (SA-05 revocation list)",
     ]
 
 

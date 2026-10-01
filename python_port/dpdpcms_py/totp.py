@@ -40,7 +40,7 @@ def _hotp(secret: str, counter: int) -> str:
     digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
     binary = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
-    return f"{binary % 10**DIGITS:0{DIGITS}d}"
+    return f"{binary % 10 ** DIGITS:0{DIGITS}d}"
 
 
 def totp_at(secret: str, timestamp: float | None = None, step_seconds: int = DEFAULT_STEP_SECONDS) -> str:
@@ -48,6 +48,29 @@ def totp_at(secret: str, timestamp: float | None = None, step_seconds: int = DEF
     now = timestamp if timestamp is not None else time.time()
     counter = int(now // step_seconds)
     return _hotp(secret, counter)
+
+
+def match_counter(
+    secret: str,
+    code: str,
+    timestamp: float | None = None,
+    window: int = 1,
+    step_seconds: int = DEFAULT_STEP_SECONDS,
+) -> int | None:
+    """The time-step counter `code` is valid for within `window` steps, or None.
+
+    Callers persist the returned counter and refuse any later code whose counter
+    is not strictly greater, so a code can be accepted only once (RFC 6238 s5.2).
+    """
+    supplied = _normalise_code(code)
+    now = timestamp if timestamp is not None else time.time()
+    counter = int(now // step_seconds)
+    matched = None
+    # Compare every candidate so timing does not reveal which step matched.
+    for offset in range(-window, window + 1):
+        if hmac.compare_digest(_hotp(secret, counter + offset), supplied) and matched is None:
+            matched = counter + offset
+    return matched
 
 
 def verify_totp(
@@ -58,18 +81,7 @@ def verify_totp(
     step_seconds: int = DEFAULT_STEP_SECONDS,
 ) -> bool:
     """True when `code` matches the code valid at `timestamp` within `window` steps."""
-    expected = totp_at(secret, timestamp, step_seconds)
-    if hmac.compare_digest(expected, _normalise_code(code)):
-        return True
-    now = timestamp if timestamp is not None else time.time()
-    counter = int(now // step_seconds)
-    for offset in range(-window, window + 1):
-        if offset == 0:
-            continue
-        candidate = _hotp(secret, counter + offset)
-        if hmac.compare_digest(candidate, _normalise_code(code)):
-            return True
-    return False
+    return match_counter(secret, code, timestamp, window, step_seconds) is not None
 
 
 def _normalise_code(code: str) -> str:

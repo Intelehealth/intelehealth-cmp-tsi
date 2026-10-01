@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
 import socket
-import urllib.error
-import urllib.request
+import ssl
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 log = logging.getLogger("dpdpcms.net")
 
@@ -62,12 +62,8 @@ def resolve_public(host: str) -> str:
     return public[0]
 
 
-def validate_outbound_url(url: str, label: str = "URL") -> str:
-    """SSRF guard shared by the webhook and delivery-gateway paths.
-
-    Requires http(s), a non-embedded host, and a public (non-private, non-
-    loopback, non-link-local) resolved destination. Returns the validated URL.
-    """
+def _validated_target(url: str, label: str) -> tuple[ParseResult, str]:
+    """Parse and SSRF-check `url`; returns (parsed URL, the public IP it resolved to)."""
     if not url or not isinstance(url, str):
         raise ValueError(f"{label} is required.")
     parsed = urlparse(url)
@@ -77,8 +73,40 @@ def validate_outbound_url(url: str, label: str = "URL") -> str:
         raise ValueError(f"{label} has no host.")
     if parsed.username or parsed.password:
         raise ValueError(f"{label} must not embed credentials.")
-    resolve_public(parsed.hostname.lower().rstrip("."))
+    return parsed, resolve_public(parsed.hostname.lower().rstrip("."))
+
+
+def validate_outbound_url(url: str, label: str = "URL") -> str:
+    """SSRF guard shared by the webhook and delivery-gateway paths.
+
+    Requires http(s), a non-embedded host, and a public (non-private, non-
+    loopback, non-link-local) resolved destination. Returns the validated URL.
+    """
+    _validated_target(url, label)
     return url
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connects to a pre-validated IP while keeping the URL's host for the Host header."""
+
+    def __init__(self, host: str, pinned_ip: str, **kwargs: Any) -> None:
+        super().__init__(host, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """As above, with TLS SNI and certificate checks against the URL's hostname."""
+
+    def __init__(self, host: str, pinned_ip: str, **kwargs: Any) -> None:
+        super().__init__(host, context=ssl.create_default_context(), **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
 def post_json(
@@ -87,20 +115,31 @@ def post_json(
     headers: dict[str, str] | None = None,
     timeout: int = 15,
 ) -> tuple[int | None, str]:
-    """SSRF-guarded HTTP POST of a JSON body. Returns (status_code, body)."""
-    validate_outbound_url(url, "URL")
+    """SSRF-guarded HTTP POST of a JSON body. Returns (status_code, body).
+
+    The connection goes to the exact address that passed validation, so a DNS
+    answer that changes between the check and the connect (rebinding) cannot
+    redirect it. Redirects are never followed: a 3xx could point anywhere,
+    including a metadata endpoint, so it is reported as a failed delivery.
+    """
+    parsed, pinned_ip = _validated_target(url, "URL")
     data = json.dumps(payload, default=str).encode("utf-8")
-    if headers is None:
-        headers = {}
+    headers = dict(headers or {})
     headers.setdefault("Content-Type", "application/json")
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    connection_cls = _PinnedHTTPSConnection if parsed.scheme == "https" else _PinnedHTTPConnection
+    conn = connection_cls(parsed.hostname, pinned_ip, port=parsed.port, timeout=timeout)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            return int(response.status), body
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return int(exc.code), body
-    except Exception as exc:  # socket/timeout/URLError — no usable response
+        conn.request("POST", path, body=data, headers=headers)
+        response = conn.getresponse()
+        body = response.read().decode("utf-8", errors="replace")
+        if 300 <= response.status < 400:
+            return None, f"refused: redirect ({response.status}) to {response.getheader('Location')!r} not followed"
+        return int(response.status), body
+    except Exception as exc:  # socket/timeout/TLS — no usable response
         log.warning("Outbound POST to %s failed: %s", url, exc)
         return None, str(exc)
+    finally:
+        conn.close()

@@ -19,6 +19,11 @@ class RequestContext:
     principal_user_id: str | None = None
     permissions: set[str] = field(default_factory=set)
     auth_via_principal_jwt: bool = False
+    # Set for admin-category calls once the bearer token is matched to an ACTIVE
+    # operator row; the role on auth_token is then the database role, not the claim.
+    operator_id: str | None = None
+    # CC-06: the server-side session a consent action happened in (principal JWT jti).
+    session_id: str | None = None
     source_ip: str | None = None
 
     @property
