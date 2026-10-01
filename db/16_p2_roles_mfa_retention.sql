@@ -30,7 +30,7 @@ INSERT INTO roles (code, name, description, is_builtin, permissions) VALUES
         '["consent:read","policy:read","grievance:read","audit:read"]'::jsonb),
     ('OPERATOR', 'Operator', 'Day-to-day operational tasks; no audit or role access.', TRUE,
         '["consent:read","consent:write","policy:read","purge:read","grievance:read","notification:read"]'::jsonb)
-ON CONFLICT (code) DO NOTHING;
+ON CONFLICT DO NOTHING;  -- any unique index: code alone before 17, (scope, code) after
 
 -- ============================================================
 -- TOTP MFA for administrator accounts (SA-06). The shared secret is stored
