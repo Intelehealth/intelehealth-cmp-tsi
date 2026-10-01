@@ -108,9 +108,7 @@ def sync_purpose_lifecycle(fiduciary_id: str, policy_content: Any) -> None:
         )
 
 
-def record_alert(
-    fiduciary_id: str, alert_type: str, event_ref_id: str | None = None, payload: dict | None = None
-) -> str | None:
+def record_alert(fiduciary_id: str, alert_type: str, event_ref_id: str | None = None, payload: dict | None = None) -> str | None:
     """Insert an alert row for a fiduciary (NT-06). Used by close_purpose and the alert API."""
     if not fiduciary_id or not alert_type:
         return None
@@ -149,9 +147,7 @@ def close_purpose_exec(
     purpose_id = str(purpose_id)
     action = str(deidentification_action or "ERASE").replace("-", "_").upper()
     if action not in VALID_DEIDENTIFICATION_ACTIONS:
-        raise ApiError(
-            400, "Bad Request", f"deidentification_action must be one of {sorted(VALID_DEIDENTIFICATION_ACTIONS)}."
-        )
+        raise ApiError(400, "Bad Request", f"deidentification_action must be one of {sorted(VALID_DEIDENTIFICATION_ACTIONS)}.")
 
     row = db.one(
         "SELECT purpose_id, state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
@@ -169,6 +165,7 @@ def close_purpose_exec(
         FROM consent_records cr,
              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
         WHERE cr.fiduciary_id = %s
+          AND cr.is_active_consent IS TRUE
           AND p ->> 'data_point_id' = %s
           AND (
                 p ->> 'consent_granted' = 'true'
@@ -179,6 +176,13 @@ def close_purpose_exec(
     )
     principals = {str(h["user_id"]) for h in holders}
 
+    # PL-03: closure and the retention sweep must agree. When a retention period
+    # governs this purpose (configured policy, else the ROPA — the same lookup the
+    # sweep uses), closure starts that clock and the sweep raises the purge when
+    # it elapses; only an unretained purpose is purged at closure.
+    from ..jobs import _retention_for
+
+    retention_days, _start = _retention_for(fiduciary_id, purpose_id)
     created = 0
     skipped = 0
     actor = _operator_uuid(closed_by)
@@ -193,6 +197,15 @@ def close_purpose_exec(
             (actor, reason, action, fiduciary_id, purpose_id),
         )
         for user_id in principals:
+            if retention_days:
+                cur.execute(
+                    """
+                    INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
+                    VALUES ('PRINCIPAL', %s, %s, 'PURPOSE_CLOSED')
+                    """,
+                    (user_id, fiduciary_id),
+                )
+                continue
             cur.execute(
                 """
                 SELECT 1 FROM purge_requests
@@ -208,10 +221,10 @@ def close_purpose_exec(
                 continue
             cur.execute(
                 """
-                INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details)
-                VALUES (%s, %s, %s, 'PurposeClosed', %s)
+                INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details, action)
+                VALUES (%s, %s, %s, 'PurposeClosed', %s, %s)
                 """,
-                (user_id, fiduciary_id, purpose_id, reason),
+                (user_id, fiduciary_id, purpose_id, reason, action),
             )
             created += 1
             cur.execute(
@@ -231,7 +244,12 @@ def close_purpose_exec(
     try:
         from ..webhooks import queue_webhook
 
-        queue_webhook(fiduciary_id, "PURPOSE_CLOSED", {"purpose_id": purpose_id, "action": action}, category="PURGE")
+        queue_webhook(
+            fiduciary_id,
+            "PURPOSE_CLOSED",
+            {"purpose_id": purpose_id, "action": action, "retention_days": retention_days},
+            category="PURGE",
+        )
     except Exception:  # pragma: no cover
         pass
     if enqueue_alert_dispatch:
@@ -256,6 +274,8 @@ def close_purpose_exec(
         "principals_affected": len(principals),
         "purge_requests_created": created,
         "purge_requests_skipped": skipped,
+        # Non-null = data is kept for this many days from closure, then purged by the sweep.
+        "retention_deferred_days": retention_days,
         "alert_id": alert_id,
     }
 

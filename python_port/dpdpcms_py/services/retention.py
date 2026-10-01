@@ -6,7 +6,7 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, page_limit, require
+from .base import Service, page_limit, require, tenant_filter
 from .catalog import resolve_fiduciary
 
 VALID_UNITS = {"DAYS", "MONTHS", "YEARS"}
@@ -33,6 +33,44 @@ def retention_duration_days(value: int | None, unit: str | None) -> int:
     return value * multiplier
 
 
+def applicable_policy(fiduciary_id: str, purpose_id: str | None) -> dict | None:
+    """The ACTIVE retention policy governing `purpose_id`: a purpose-specific one
+    beats the fiduciary's catch-all (empty applicable_purposes). For "ALL" (a
+    whole-account erasure) any policy with a legal basis governs."""
+    if purpose_id in (None, "", "ALL"):
+        return db.one(
+            """
+            SELECT * FROM retention_policies
+            WHERE fiduciary_id = %s AND status = 'ACTIVE'
+            ORDER BY (legal_reference IS NULL) ASC, created_at DESC LIMIT 1
+            """,
+            (fiduciary_id,),
+        )
+    return db.one(
+        """
+        SELECT * FROM retention_policies
+        WHERE fiduciary_id = %s AND status = 'ACTIVE'
+          AND (applicable_purposes = '[]'::jsonb OR applicable_purposes ? %s)
+        ORDER BY (applicable_purposes = '[]'::jsonb) ASC, created_at DESC
+        LIMIT 1
+        """,
+        (fiduciary_id, purpose_id),
+    )
+
+
+def legal_hold_for(fiduciary_id: str, purpose_id: str | None) -> dict | None:
+    """CW-11/SA-10: {"legal_reference", "days"} when the law requires keeping the
+    data under `purpose_id`, else None. Evaluated when erasure is requested."""
+    policy = applicable_policy(fiduciary_id, purpose_id)
+    if not policy or not policy.get("legal_reference"):
+        return None
+    return {
+        "legal_reference": policy["legal_reference"],
+        "days": retention_duration_days(policy["retention_duration_value"], policy["retention_duration_unit"]),
+        "action_at_expiry": policy.get("action_at_expiry") or "ERASE",
+    }
+
+
 class RetentionService(Service):
     """SA-08/SA-10/SA-12: administrator-configurable retention schedules.
 
@@ -54,9 +92,7 @@ class RetentionService(Service):
         value = int(require(payload.get("retention_duration_value"), "retention_duration_value"))
         unit = str(payload.get("retention_duration_unit") or "DAYS").upper()
         days = retention_duration_days(value, unit)
-        start_event = (
-            str(payload.get("retention_start_event") or "CESSATION").replace("_", " ").upper().replace(" ", "_")
-        )
+        start_event = str(payload.get("retention_start_event") or "CESSATION").replace("_", " ").upper().replace(" ", "_")
         if start_event not in VALID_START_EVENTS:
             raise ApiError(400, "Bad Request", f"retention_start_event must be one of {sorted(VALID_START_EVENTS)}.")
         action = str(payload.get("action_at_expiry") or "ERASE").replace("-", "_").upper()
@@ -73,9 +109,7 @@ class RetentionService(Service):
             )
         legal_reference = payload.get("legal_reference")
         if not legal_reference and action != "ERASE":
-            raise ApiError(
-                400, "Bad Request", "action_at_expiry other than ERASE requires a legal_reference exemption."
-            )
+            raise ApiError(400, "Bad Request", "action_at_expiry other than ERASE requires a legal_reference exemption.")
         if policy_id:
             db.execute(
                 """
@@ -207,7 +241,8 @@ class RetentionService(Service):
             ctx.payload.get("policy_id") or ctx.payload.get("id"),
             "policy_id",
         )
-        row = db.one("SELECT * FROM retention_policies WHERE id = %s", (policy_id,))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(f"SELECT * FROM retention_policies WHERE id = %s{scope}", (policy_id, *scope_params))
         if not row:
             raise ApiError(404, "Not Found", "Retention policy not found.")
         days = retention_duration_days(row["retention_duration_value"], row["retention_duration_unit"])

@@ -4,7 +4,7 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, bind_principal_field, principal_list_filter, require
+from .base import Service, bind_principal_field, principal_list_filter, require, tenant_filter
 from .catalog import resolve_fiduciary
 
 
@@ -141,14 +141,17 @@ class RightsService(Service):
     def update_correction_status(self, ctx: RequestContext) -> dict:
         cid = require(ctx.payload.get("id"), "id")
         status = require(ctx.payload.get("status"), "status").upper()
-        db.execute(
-            """
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"""
             UPDATE data_correction_requests
             SET status = %s, resolution_note = COALESCE(%s, resolution_note),
                 resolved_at = CASE WHEN %s IN ('APPROVED', 'REJECTED') THEN NOW() ELSE resolved_at END,
                 last_updated_at = NOW()
-            WHERE id = %s
+            WHERE id = %s{scope}
             """,
-            (status, ctx.payload.get("resolution_note"), status, cid),
+            (status, ctx.payload.get("resolution_note"), status, cid, *scope_params),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Correction request not found.")
         return {"success": True}

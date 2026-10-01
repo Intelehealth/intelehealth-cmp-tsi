@@ -7,10 +7,17 @@ from ..audit import log_event
 from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..errors import ApiError
 from ..security import hash_password, passphrase, token, verify_password
-from .base import Service, require
+from .base import Service, require, tenant_filter
+
+# SA-06: consecutive bad authenticator codes before the account's MFA step is
+# locked, and for how long.
+MFA_MAX_FAILURES = 5
+MFA_LOCKOUT_MINUTES = 15
 
 
 def authenticated_user_id(ctx: RequestContext) -> str | None:
+    if ctx.operator_id:
+        return ctx.operator_id
     if not ctx.actor_email:
         return None
     row = db.one(
@@ -85,6 +92,7 @@ class OperatorService(Service):
                 None,
                 "LOGIN_FAILURE",
                 "Invalid credentials or account inactive.",
+                source_ip=ctx.source_ip,
             )
             raise ApiError(401, "Unauthorized", "Invalid credentials or account inactive.")
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ADMIN_FIDUCIARY_ID
@@ -115,7 +123,84 @@ class OperatorService(Service):
             out["fiduciary_name"] = row["fiduciary_name"]
         return out
 
+    def sso_login(self, ctx: RequestContext) -> dict:
+        """SA-06: single sign-on through the organisation's OpenID Connect provider.
+
+        The console completes the provider's login and posts the id_token here.
+        It is verified against the provider's published keys (SSO_JWKS_URL), its
+        issuer (SSO_ISSUER) and this CMS as audience (SSO_AUDIENCE); its email
+        must belong to an ACTIVE operator. When the provider attests MFA (amr
+        claim) the session is MFA-verified; otherwise an account with TOTP
+        enrolled must still pass verify_mfa.
+        """
+        import jwt
+
+        from ..config import settings
+
+        if not (settings.sso_issuer and settings.sso_audience and settings.sso_jwks_url):
+            raise ApiError(404, "Not Found", "Single sign-on is not configured.")
+        raw = require(ctx.payload.get("id_token"), "id_token")
+        try:
+            signing_key = jwt.PyJWKClient(settings.sso_jwks_url).get_signing_key_from_jwt(raw)
+            claims = jwt.decode(
+                raw,
+                signing_key.key,
+                algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
+                audience=settings.sso_audience,
+                issuer=settings.sso_issuer,
+                options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+            )
+        except Exception:
+            log_event("SSO", ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", None, "LOGIN_FAILURE", "Invalid SSO token.", source_ip=ctx.source_ip)
+            raise ApiError(401, "Unauthorized", "Single sign-on failed.") from None
+        email = claims.get("email")
+        if not email or claims.get("email_verified") is False:
+            raise ApiError(401, "Unauthorized", "The identity provider did not supply a verified email.")
+        row = db.one(
+            f"""
+            SELECT o.id, o.name, o.role, o.fiduciary_id, o.mfa_enabled, f.name AS fiduciary_name
+            FROM operators o LEFT JOIN fiduciaries f ON o.fiduciary_id = f.id
+            WHERE o.email_hmac = {db.hmac_expr()} AND o.status = 'ACTIVE'
+            """,
+            db.bind_hmac(email),
+        )
+        if not row:
+            log_event(email, ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", None, "LOGIN_FAILURE", "SSO: no active operator.", source_ip=ctx.source_ip)
+            raise ApiError(401, "Unauthorized", "No active operator account matches this identity.")
+        amr = {str(m).lower() for m in (claims.get("amr") or [])}
+        idp_mfa = bool(amr & {"mfa", "otp", "hwk", "swk", "fido", "sms"})
+        mfa_ok = idp_mfa or not row["mfa_enabled"]
+        fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ADMIN_FIDUCIARY_ID
+        jwt_token = token(email, row["name"], row["role"], subject=str(row["id"]), extra={"mfa": mfa_ok, "sso": True})
+        log_event(
+            email,
+            fid,
+            "DPO_CONSOLE" if row["role"] == "DPO" else "ADMIN_CONSOLE",
+            str(row["id"]),
+            "LOGIN_SUCCESS",
+            {"method": "SSO", "issuer": settings.sso_issuer, "idp_mfa": idp_mfa},
+            source_ip=ctx.source_ip,
+        )
+        out = {
+            "success": True,
+            "token": jwt_token,
+            "role": row["role"],
+            "username": row["name"],
+            "fiduciary_id": fid,
+            "mfa_required": not mfa_ok,
+        }
+        if row.get("fiduciary_name"):
+            out["fiduciary_name"] = row["fiduciary_name"]
+        return out
+
     def logout(self, ctx: RequestContext) -> dict:
+        """SA-05: revoke this session's token so it cannot be replayed until expiry."""
+        token = ctx.auth_token or {}
+        if token.get("jti") and token.get("exp"):
+            db.execute(
+                "INSERT INTO revoked_tokens (jti, expires_at) VALUES (%s, to_timestamp(%s)) ON CONFLICT (jti) DO NOTHING",
+                (str(token["jti"]), int(token["exp"])),
+            )
         return {"success": True, "message": "Logged out successfully."}
 
     # ── TOTP MFA (SA-06) ─────────────────────────────────────────────
@@ -130,16 +215,28 @@ class OperatorService(Service):
         actor = authenticated_user_id(ctx)
         if not actor:
             raise ApiError(401, "Unauthorized", "You must be a signed-in operator to enrol MFA.")
-        if (ctx.auth_token or {}).get("mfa") is True:
-            row = db.one("SELECT mfa_enabled FROM operators WHERE id = %s", (actor,))
-            if row and row["mfa_enabled"]:
-                raise ApiError(409, "Conflict", "MFA is already enabled on this account.")
+        # Once MFA is enabled the enrolled secret is the second factor; letting a
+        # password-only session replace it would let a stolen password enrol the
+        # attacker's own authenticator.
+        row = db.one("SELECT mfa_enabled FROM operators WHERE id = %s", (actor,))
+        if row and row["mfa_enabled"]:
+            if (ctx.auth_token or {}).get("mfa") is not True:
+                raise ApiError(
+                    403, "Forbidden", "MFA is enabled on this account. Verify with your current authenticator first."
+                )
+            raise ApiError(409, "Conflict", "MFA is already enabled on this account.")
         secret = totp.generate_secret()
         label = ctx.actor_email or ctx.actor_name or str(actor)
-        db.execute(
-            f"UPDATE operators SET mfa_secret_enc = {db.enc_expr()}, mfa_enabled = FALSE, mfa_enrolled_at = NOW(), last_updated_at = NOW() WHERE id = %s",
+        updated = db.execute(
+            f"""
+            UPDATE operators SET mfa_secret_enc = {db.enc_expr()}, mfa_enabled = FALSE, mfa_enrolled_at = NOW(),
+                   mfa_last_counter = NULL, mfa_failed_attempts = 0, mfa_locked_until = NULL, last_updated_at = NOW()
+            WHERE id = %s AND mfa_enabled IS NOT TRUE
+            """,
             (*db.bind_encrypt(secret), actor),
         )
+        if updated == 0:
+            raise ApiError(409, "Conflict", "MFA is already enabled on this account.")
         log_event(
             ctx.actor_email or "ADMIN",
             ADMIN_FIDUCIARY_ID,
@@ -167,34 +264,58 @@ class OperatorService(Service):
         from ..security import token as issue_token
 
         code = require(ctx.payload.get("code"), "code")
-        operator_id = authenticated_user_id(ctx) or ctx.payload.get("user_id") or (ctx.auth_token or {}).get("sub")
+        # The secret verified is always the caller's own: a session can never name
+        # another operator's account to test codes against.
+        operator_id = authenticated_user_id(ctx)
         if not operator_id:
-            raise ApiError(400, "Bad Request", "user_id is required to verify MFA.")
+            raise ApiError(401, "Unauthorized", "You must be a signed-in operator to verify MFA.")
+        # The secret is stored pgp-sym-encrypted as base64; the app key decrypts it.
         row = db.one(
             f"""
-            SELECT id, name, {db.decrypt_col("email_enc")} AS email, status, role
+            SELECT id, name, {db.decrypt_col("email_enc")} AS email, status, role,
+                   {db.decrypt_col("mfa_secret_enc")} AS secret,
+                   COALESCE(mfa_locked_until > NOW(), FALSE) AS locked
             FROM operators WHERE id = %s
             """,
-            (*db.bind_key(), operator_id),
+            (*db.bind_key(), *db.bind_key(), operator_id),
         )
         if not row or row["status"] != "ACTIVE":
             raise ApiError(401, "Unauthorized", "Operator not found or inactive.")
-        # The secret is stored pgp-sym-encrypted as base64; the app key decrypts it.
-        secret_row = db.one(
-            f"SELECT {db.decrypt_col('mfa_secret_enc')} AS secret FROM operators WHERE id = %s",
-            (*db.bind_key(), operator_id),
-        )
-        stored_secret = secret_row["secret"] if secret_row else None
+        stored_secret = row.get("secret")
         if not stored_secret:
             raise ApiError(400, "Bad Request", "No MFA secret is enrolled for this account.")
-        if not totp.verify_totp(stored_secret, code):
+        if row["locked"]:
+            raise ApiError(429, "Too Many Requests", "Too many invalid authenticator codes. Try again later.")
+        counter = totp.match_counter(stored_secret, code)
+        # A code is single-use: the stored counter only advances when the new one
+        # is strictly greater, which rejects a replay atomically.
+        accepted = counter is not None and (
+            db.execute(
+                """
+                UPDATE operators SET mfa_last_counter = %s, mfa_failed_attempts = 0, mfa_locked_until = NULL
+                WHERE id = %s AND (mfa_last_counter IS NULL OR mfa_last_counter < %s)
+                """,
+                (counter, operator_id, counter),
+            )
+            == 1
+        )
+        if not accepted:
+            db.execute(
+                """
+                UPDATE operators SET mfa_failed_attempts = mfa_failed_attempts + 1,
+                       mfa_locked_until = CASE WHEN mfa_failed_attempts + 1 >= %s
+                                               THEN NOW() + make_interval(mins => %s) ELSE mfa_locked_until END
+                WHERE id = %s
+                """,
+                (MFA_MAX_FAILURES, MFA_LOCKOUT_MINUTES, operator_id),
+            )
             log_event(
                 row["email"] or operator_id,
                 ADMIN_FIDUCIARY_ID,
                 "ADMIN_CONSOLE",
                 str(row["id"]),
                 "MFA_VERIFY_FAILED",
-                {"reason": "Invalid or expired authenticator code."},
+                {"reason": "Invalid, expired or already-used authenticator code."},
                 source_ip=ctx.source_ip,
             )
             raise ApiError(401, "Unauthorized", "Invalid or expired authenticator code.")
@@ -242,9 +363,10 @@ class OperatorService(Service):
 
     def get_user(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
+        scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT id AS user_id, name AS username, {db.decrypt_col('email_enc')} AS email, fiduciary_id, role AS role_name FROM operators WHERE id = %s",
-            (*db.bind_key(), uid),
+            f"SELECT id AS user_id, name AS username, {db.decrypt_col('email_enc')} AS email, fiduciary_id, role AS role_name FROM operators WHERE id = %s{scope}",
+            (*db.bind_key(), uid, *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "User not found.")
@@ -259,7 +381,10 @@ class OperatorService(Service):
         # SA-01 / SA-02: every role must exist in the roles table (built-in or
         # custom); a DPO may create OPERATOR or custom read roles but not manage
         # ADMIN or AUDITOR assignments.
-        known = db.one("SELECT permissions FROM roles WHERE code = %s", (role,))
+        known = db.one(
+            "SELECT 1 FROM roles WHERE code = %s AND (fiduciary_id IS NULL OR fiduciary_id = %s::uuid)",
+            (role, ctx.fiduciary_id or payload.get("fiduciary_id") or None),
+        )
         if not known:
             raise ApiError(400, "Bad Request", f"Unknown role '{role}'. See list_roles.")
         login_uid = authenticated_user_id(ctx)
@@ -291,30 +416,58 @@ class OperatorService(Service):
         fields = ["name = %s", "last_updated_at = NOW()"]
         params: list[Any] = [ctx.payload.get("username")]
         if ctx.payload.get("password"):
-            fields.append("password_hash = %s")
+            # SA-05: a new password ends every existing session of the account.
+            fields.append("password_hash = %s, tokens_valid_after = NOW()")
             params.append(hash_password(ctx.payload["password"]))
         if verified_role(ctx) == "ADMIN":
             fields.append("fiduciary_id = %s")
             params.append(ctx.payload.get("fiduciary_id") or None)
-        params.append(uid)
-        db.execute(f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'", params)
+        scope, scope_params = tenant_filter(ctx)
+        params.extend([uid, *scope_params])
+        db.execute(f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'{scope}", params)
+        log_event(
+            ctx.actor_email or "ADMIN",
+            ctx.fiduciary_id or ADMIN_FIDUCIARY_ID,
+            "ADMIN_CONSOLE",
+            authenticated_user_id(ctx),
+            "USER_UPDATED",
+            {"user_id": uid, "password_changed": bool(ctx.payload.get("password"))},
+            source_ip=ctx.source_ip,
+        )
         return {"success": True, "message": "User updated successfully."}
 
     def deactivate_user(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
+        scope, scope_params = tenant_filter(ctx)
         db.execute(
-            "UPDATE operators SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s AND role != 'ADMIN'",
-            (uid,),
+            f"UPDATE operators SET status = 'INACTIVE', tokens_valid_after = NOW(), last_updated_at = NOW() WHERE id = %s AND role != 'ADMIN'{scope}",
+            (uid, *scope_params),
+        )
+        log_event(
+            ctx.actor_email or "ADMIN",
+            ctx.fiduciary_id or ADMIN_FIDUCIARY_ID,
+            "ADMIN_CONSOLE",
+            authenticated_user_id(ctx),
+            "USER_DEACTIVATED",
+            {"user_id": uid},
+            source_ip=ctx.source_ip,
         )
         return {"success": True}
 
     def generate_recovery_key(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
         phrase = passphrase()
-        db.execute(
-            "UPDATE operators SET recovery_key_hash = %s, last_updated_at = NOW() WHERE id = %s",
-            (hash_password(phrase), uid),
+        # A recovery passphrase resets the target's password, so a tenant-scoped
+        # caller may only mint one for a non-ADMIN operator in its own tenant.
+        scope, scope_params = tenant_filter(ctx)
+        if scope:
+            scope += " AND role != 'ADMIN'"
+        updated = db.execute(
+            f"UPDATE operators SET recovery_key_hash = %s, last_updated_at = NOW() WHERE id = %s{scope}",
+            (hash_password(phrase), uid, *scope_params),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "User not found.")
         return {"success": True, "passphrase": phrase}
 
     def verify_recovery_key(self, ctx: RequestContext) -> dict:
@@ -332,7 +485,7 @@ class OperatorService(Service):
         self.verify_recovery_key(ctx)
         email = ctx.payload["email"]
         db.execute(
-            f"UPDATE operators SET password_hash = %s, recovery_key_hash = NULL, last_updated_at = NOW() WHERE email_hmac = {db.hmac_expr()}",
+            f"UPDATE operators SET password_hash = %s, recovery_key_hash = NULL, tokens_valid_after = NOW(), last_updated_at = NOW() WHERE email_hmac = {db.hmac_expr()}",
             (hash_password(require(ctx.payload.get("new_password"), "new_password")), *db.bind_hmac(email)),
         )
         return {"success": True}
@@ -418,4 +571,10 @@ class AdminDashService(Service):
 
         require_audit_access(ctx)
         limit = int(ctx.payload.get("limit") or 10)
-        return db.to_jsonable(db.all("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT %s", (limit,)))
+        scope, scope_params = tenant_filter(ctx)
+        return db.to_jsonable(
+            db.all(
+                f"SELECT * FROM audit_logs WHERE 1 = 1{scope} ORDER BY timestamp DESC LIMIT %s",
+                (*scope_params, limit),
+            )
+        )

@@ -6,8 +6,94 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, require
+from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, require, tenant_filter
 from .catalog import resolve_fiduciary
+
+# Every status a purge request may carry: the DPO console's PURGE_* / LEGAL_HOLD
+# values plus the generic ones from the original schema comment (01_init.sql).
+# Mirrored by the CHECK constraint in db/17_defect_fixes.sql.
+PURGE_STATUSES = {
+    "PENDING",
+    "IN_PROGRESS",
+    "COMPLETED",
+    "FAILED",
+    "UNDER_LEGAL_HOLD",
+    "PURGE_IN_PROGRESS",
+    "PURGE_COMPLETED",
+    "PURGE_FAILED",
+    "LEGAL_HOLD_APPLIED",
+}
+
+
+# GR-02: the complaint categories the rights portal offers, plus the two
+# consent-specific ones the BRD names (consent and data handling).
+GRIEVANCE_TYPES = {
+    "GENERAL_COMPLAINT",
+    "ERASURE_REQUEST",
+    "DATA_ACCESS_REQUEST",
+    "CORRECTION_REQUEST",
+    "CONSENT_COMPLAINT",
+    "DATA_HANDLING_COMPLAINT",
+}
+GRIEVANCE_STATUSES = {"NEW", "IN_PROGRESS", "ESCALATED", "RESOLVED", "CLOSED"}
+ATTACHMENT_TYPES = {"application/pdf", "image/png", "image/jpeg", "text/plain"}
+# GR-10: the notification a principal receives at each grievance stage.
+GRIEVANCE_STAGE_NOTICES = {
+    "ASSIGNED": "GRIEVANCE_ASSIGNED",
+    "IN_PROGRESS": "GRIEVANCE_IN_PROGRESS",
+    "ESCALATED": "GRIEVANCE_ESCALATED",
+    "RESOLVED": "GRIEVANCE_RESOLVED",
+    "CLOSED": "GRIEVANCE_RESOLVED",
+}
+
+
+def _notify_grievance_stage(user_id: str, fiduciary_id: str, stage: str) -> None:
+    notice = GRIEVANCE_STAGE_NOTICES.get(stage)
+    if notice:
+        db.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, %s)",
+            (user_id, fiduciary_id, notice),
+        )
+
+
+def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
+    """SA-13: irreversibly de-identify what the CMS itself holds about a principal.
+
+    The processor deletes the business data; this removes the CMS's own copy of
+    the identifier. Every row keyed by the principal is re-keyed to a keyed hash
+    (HMAC with the deployment's lookup salt), so the consent evidence trail stays
+    countable but no longer names anyone, and free-text grievance content is
+    blanked. The audit log already stores only the pseudonym.
+    """
+    from ..security import pseudonym
+
+    token = f"erased:{pseudonym(f'{fiduciary_id}:{user_id}')}"
+    counts: dict[str, int] = {}
+    with db.connection() as conn, conn.cursor() as cur:
+        for table, column in (
+            ("consent_records", "user_id"),
+            ("notifications", "recipient_id"),
+            ("consent_validations", "user_id"),
+            ("purge_requests", "user_id"),
+        ):
+            cur.execute(f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s", (token, fiduciary_id, user_id))
+            counts[table] = cur.rowcount
+        cur.execute(
+            """
+            UPDATE grievances SET user_id = %s, subject = '[erased]', description = '[erased]',
+                   communication_log = '[]'::jsonb, feedback_comment = NULL
+            WHERE fiduciary_id = %s AND user_id = %s
+            """,
+            (token, fiduciary_id, user_id),
+        )
+        counts["grievances"] = cur.rowcount
+        cur.execute("DELETE FROM data_principal WHERE fiduciary_id = %s AND user_id = %s", (fiduciary_id, user_id))
+        counts["data_principal"] = cur.rowcount
+        cur.execute(
+            "UPDATE purge_requests SET cms_erased_at = NOW() WHERE fiduciary_id = %s AND user_id = %s",
+            (fiduciary_id, token),
+        )
+    return counts
 
 
 class ComplianceService(Service):
@@ -28,28 +114,119 @@ class ComplianceService(Service):
         )
 
     def get_purge_request(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM purge_requests WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT * FROM purge_requests WHERE id = %s{scope}",
+            (require(ctx.payload.get("id"), "id"), *scope_params),
+        )
         if not row:
             raise ApiError(404, "Not Found", "Purge request not found.")
         return db.to_jsonable(row)
 
     def update_purge_status(self, ctx: RequestContext) -> dict:
-        where = ["id = %s"]
-        params: list = [require(ctx.payload.get("id"), "id")]
-        if ctx.fiduciary_id:
-            where.append("fiduciary_id = %s")
-            params.append(ctx.fiduciary_id)
-        db.execute(
-            f"UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW() WHERE {' AND '.join(where)}",
-            [require(ctx.payload.get("status"), "status"), ctx.payload.get("details"), *params],
+        status = str(require(ctx.payload.get("status"), "status")).upper()
+        if status not in PURGE_STATUSES:
+            raise ApiError(400, "Bad Request", f"status must be one of {sorted(PURGE_STATUSES)}.")
+        return self._set_purge_status(
+            ctx, require(ctx.payload.get("id"), "id"), status, ctx.payload.get("details"), evidence=None
         )
-        return {"success": True}
+
+    def confirm_purge_status(self, ctx: RequestContext) -> dict:
+        """SA-09: the processor that executed a purge confirms it with evidence
+        (records affected, who confirmed, any error), so completion is recorded
+        as verified rather than assumed."""
+        status = str(require(ctx.payload.get("status"), "status")).upper()
+        if status not in {"PURGE_COMPLETED", "PURGE_FAILED", "COMPLETED", "FAILED"}:
+            raise ApiError(400, "Bad Request", "status must be PURGE_COMPLETED or PURGE_FAILED.")
+        try:
+            affected = int(require(ctx.payload.get("records_affected_count"), "records_affected_count"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "Bad Request", "records_affected_count must be an integer.") from None
+        if affected < 0:
+            raise ApiError(400, "Bad Request", "records_affected_count must not be negative.")
+        evidence = {
+            "records_affected_count": affected,
+            "confirmed_by_entity_id": require(ctx.payload.get("confirmed_by_entity_id"), "confirmed_by_entity_id"),
+            "error_message": ctx.payload.get("error_message"),
+            "confirmed_at": datetime.now(UTC).isoformat(),
+            "confirmed_via": "API_KEY" if ctx.permissions else "CONSOLE",
+        }
+        return self._set_purge_status(
+            ctx,
+            require(ctx.payload.get("purge_request_id"), "purge_request_id"),
+            "PURGE_COMPLETED" if status in {"PURGE_COMPLETED", "COMPLETED"} else "PURGE_FAILED",
+            ctx.payload.get("details"),
+            evidence=evidence,
+        )
+
+    def _set_purge_status(self, ctx: RequestContext, request_id: str, status: str, details, evidence) -> dict:
+        scope, scope_params = tenant_filter(ctx)
+        current = db.one(
+            f"SELECT id, user_id, fiduciary_id, purpose_id, trigger_event, status, hold_until FROM purge_requests WHERE id = %s{scope}",
+            (request_id, *scope_params),
+        )
+        if not current:
+            raise ApiError(404, "Not Found", "Purge request not found.")
+        # CW-11: data under an unexpired legal hold may not be reported deleted.
+        if (
+            current["status"] == "LEGAL_HOLD_APPLIED"
+            and status in {"PURGE_COMPLETED", "COMPLETED"}
+            and current.get("hold_until")
+            and current["hold_until"] > datetime.now(UTC)
+        ):
+            raise ApiError(409, "Conflict", "This request is under a legal hold until its retention period ends.")
+        completed = status in {"PURGE_COMPLETED", "COMPLETED"}
+        db.execute(
+            """
+            UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW(),
+                   completion_evidence = COALESCE(%s, completion_evidence),
+                   completed_at = CASE WHEN %s THEN NOW() ELSE completed_at END
+            WHERE id = %s
+            """,
+            (status, details, db.as_jsonb(evidence) if evidence else None, completed, request_id),
+        )
+        fid, user_id = str(current["fiduciary_id"]), str(current["user_id"])
+        erased = None
+        # SA-13: once a whole-account erasure is confirmed done (and nothing for
+        # this principal is still held by law), the CMS de-identifies its own copy.
+        if completed and current["trigger_event"] == "ErasureRequest" and current["purpose_id"] == "ALL":
+            still_held = db.one(
+                "SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND user_id = %s AND status = 'LEGAL_HOLD_APPLIED' LIMIT 1",
+                (fid, user_id),
+            )
+            if not still_held:
+                erased = erase_cms_copy(fid, user_id)
+        log_event(
+            ctx.actor_email or ("INTEGRATOR" if ctx.permissions else "DPO"),
+            fid,
+            "DPO_CONSOLE" if ctx.category == "admin" else "APP",
+            None,
+            "PURGE_STATUS_UPDATED",
+            {"purge_request_id": request_id, "status": status, "evidence": evidence, "cms_copy_erased": bool(erased)},
+            purpose_id=current["purpose_id"],
+            source_ip=ctx.source_ip,
+        )
+        out = {"success": True, "status": status}
+        if erased is not None:
+            out["cms_copy_erased"] = erased
+        return out
 
     def assign_purge_request(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE purge_requests SET assigned_operator_id = %s, last_updated_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("operator_id"), "operator_id"), require(ctx.payload.get("id"), "id")),
+        operator_id = require(ctx.payload.get("operator_id"), "operator_id")
+        request_id = require(ctx.payload.get("id"), "id")
+        # The request and the assignee must both belong to the request's tenant.
+        updated = db.execute(
+            """
+            UPDATE purge_requests pr SET assigned_operator_id = o.id, last_updated_at = NOW()
+            FROM operators o
+            WHERE pr.id = %s AND o.id = %s AND o.status = 'ACTIVE'
+              AND (o.fiduciary_id = pr.fiduciary_id OR o.role = 'ADMIN')
+              AND (%s::uuid IS NULL OR pr.fiduciary_id = %s::uuid)
+            """,
+            (request_id, operator_id, ctx.fiduciary_id, ctx.fiduciary_id),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Purge request or operator not found.")
         return {"success": True}
 
 
@@ -58,8 +235,11 @@ class GrievanceService(Service):
         bind_principal_field(ctx, "user_id")
         user_id = require(ctx.payload.get("user_id"), "user_id")
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
-        grievance_type = require(ctx.payload.get("type"), "type")
-        sla_days = 7 if grievance_type.upper() == "ERASURE_REQUEST" else 30
+        grievance_type = str(require(ctx.payload.get("type"), "type")).strip().upper()
+        # GR-02: categories are a fixed set the DPO routes on, not free text.
+        if grievance_type not in GRIEVANCE_TYPES:
+            raise ApiError(400, "Bad Request", f"type must be one of {sorted(GRIEVANCE_TYPES)}.")
+        sla_days = 7 if grievance_type == "ERASURE_REQUEST" else 30
         consent_record_id = ctx.payload.get("consent_record_id")
         # GR-14: the complaint may be linked to the consent record it concerns.
         if consent_record_id:
@@ -145,8 +325,17 @@ class GrievanceService(Service):
 
     def get_grievance(self, ctx: RequestContext) -> dict:
         gid = ctx.payload.get("grievance_id") or ctx.payload.get("id")
-        where = ["id = %s"]
-        params: list = [require(gid, "grievance_id")]
+        reference = ctx.payload.get("reference_number")
+        # GR-05: a principal can quote the reference number instead of the id.
+        if gid:
+            where = ["id = %s"]
+            params: list = [gid]
+        else:
+            where = ["reference_number = %s"]
+            params = [require(reference, "grievance_id or reference_number")]
+            if not ctx.fiduciary_id:
+                where.append("fiduciary_id = %s")
+                params.append(require(ctx.payload.get("fiduciary_id"), "fiduciary_id"))
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
@@ -181,31 +370,191 @@ class GrievanceService(Service):
             )
         )
 
+    @staticmethod
+    def _log_entry(ctx: RequestContext, kind: str, text: str | None, **extra) -> dict:
+        """GR-13: one timestamped entry in the grievance's action log."""
+        return {
+            "at": datetime.now(UTC).isoformat(),
+            "kind": kind,
+            "by": ctx.principal_user_id or ctx.actor_email or ("INTEGRATOR" if ctx.fiduciary_id else "SYSTEM"),
+            "text": text,
+            **extra,
+        }
+
     def update_grievance_status(self, ctx: RequestContext) -> dict:
-        gid = ctx.payload.get("grievance_id") or ctx.payload.get("id")
-        db.execute(
-            "UPDATE grievances SET status = %s, resolution_details = COALESCE(%s, resolution_details), resolution_timestamp = CASE WHEN %s IN ('RESOLVED','CLOSED') THEN NOW() ELSE resolution_timestamp END, last_updated_at = NOW() WHERE id = %s",
-            (
-                require(ctx.payload.get("status"), "status"),
-                ctx.payload.get("resolution_details"),
-                ctx.payload.get("status"),
-                require(gid, "grievance_id"),
-            ),
+        gid = require(ctx.payload.get("grievance_id") or ctx.payload.get("id"), "grievance_id")
+        status = str(require(ctx.payload.get("status"), "status")).upper()
+        if status not in GRIEVANCE_STATUSES:
+            raise ApiError(400, "Bad Request", f"status must be one of {sorted(GRIEVANCE_STATUSES)}.")
+        resolution = ctx.payload.get("resolution_details")
+        # GR-11: a grievance is closed only with a resolution summary for the principal.
+        if status in {"RESOLVED", "CLOSED"} and not str(resolution or "").strip():
+            raise ApiError(400, "Bad Request", "resolution_details is required to resolve or close a grievance.")
+        scope, scope_params = tenant_filter(ctx)
+        entry = self._log_entry(ctx, "STATUS_CHANGE", resolution, status=status)
+        row = db.one(
+            f"""
+            UPDATE grievances SET status = %s, resolution_details = COALESCE(%s, resolution_details),
+                   resolution_timestamp = CASE WHEN %s IN ('RESOLVED','CLOSED') THEN NOW() ELSE resolution_timestamp END,
+                   communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb,
+                   last_updated_at = NOW()
+            WHERE id = %s{scope}
+            RETURNING user_id, fiduciary_id
+            """,
+            (status, resolution, status, db.as_jsonb([entry]), gid, *scope_params),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "Grievance not found.")
+        # GR-10: the principal hears about every significant stage.
+        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), status)
+        log_event(
+            ctx.actor_email or "DPO",
+            str(row["fiduciary_id"]),
+            "DPO_CONSOLE",
+            None,
+            "GRIEVANCE_STATUS_UPDATED",
+            {"grievance_id": gid, "status": status},
+            source_ip=ctx.source_ip,
         )
         return {"success": True}
 
     def assign_grievance(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE grievances SET assigned_dpo_user_id = %s, status = 'IN_PROGRESS', last_updated_at = NOW() WHERE id = %s",
-            (
-                require(ctx.payload.get("operator_id"), "operator_id"),
-                require(ctx.payload.get("grievance_id"), "grievance_id"),
-            ),
+        # The grievance and the assignee must both belong to the grievance's tenant.
+        gid = require(ctx.payload.get("grievance_id"), "grievance_id")
+        operator_id = require(ctx.payload.get("operator_id"), "operator_id")
+        entry = self._log_entry(ctx, "ASSIGNED", None, operator_id=str(operator_id))
+        row = db.one(
+            """
+            UPDATE grievances g SET assigned_dpo_user_id = o.id, status = 'IN_PROGRESS', last_updated_at = NOW(),
+                   communication_log = COALESCE(g.communication_log, '[]'::jsonb) || %s::jsonb
+            FROM operators o
+            WHERE g.id = %s AND o.id = %s AND o.status = 'ACTIVE'
+              AND (o.fiduciary_id = g.fiduciary_id OR o.role = 'ADMIN')
+              AND (%s::uuid IS NULL OR g.fiduciary_id = %s::uuid)
+            RETURNING g.user_id, g.fiduciary_id
+            """,
+            (db.as_jsonb([entry]), gid, operator_id, ctx.fiduciary_id, ctx.fiduciary_id),
         )
+        if not row:
+            raise ApiError(404, "Not Found", "Grievance or operator not found.")
+        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), "ASSIGNED")
         return {"success": True}
 
     def add_grievance_communication(self, ctx: RequestContext) -> dict:
-        return self.update_grievance_status(ctx)
+        """GR-13: append a threaded entry (a message, a note, an action taken) to the
+        grievance's action log without changing its status. A principal may add to
+        their own grievance; the console and integrators to any in their tenant."""
+        gid = require(ctx.payload.get("grievance_id") or ctx.payload.get("id"), "grievance_id")
+        message = str(require(ctx.payload.get("message"), "message")).strip()
+        if not message:
+            raise ApiError(400, "Bad Request", "message must not be empty.")
+        scope, scope_params = tenant_filter(ctx)
+        if ctx.auth_via_principal_jwt:
+            scope += " AND user_id = %s"
+            scope_params.append(ctx.principal_user_id)
+        entry = self._log_entry(ctx, str(ctx.payload.get("kind") or "MESSAGE").upper(), message)
+        row = db.one(
+            f"""
+            UPDATE grievances SET communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb,
+                   last_updated_at = NOW()
+            WHERE id = %s{scope}
+            RETURNING id
+            """,
+            (db.as_jsonb([entry]), gid, *scope_params),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "Grievance not found.")
+        return {"success": True, "entry": entry}
+
+    def submit_grievance_feedback(self, ctx: RequestContext) -> dict:
+        """GR-12: the principal rates how their resolved grievance was handled."""
+        bind_principal_field(ctx, "user_id")
+        user_id = require(ctx.payload.get("user_id"), "user_id")
+        gid = require(ctx.payload.get("grievance_id"), "grievance_id")
+        try:
+            rating = int(require(ctx.payload.get("rating"), "rating"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "Bad Request", "rating must be an integer from 1 to 5.") from None
+        if not 1 <= rating <= 5:
+            raise ApiError(400, "Bad Request", "rating must be an integer from 1 to 5.")
+        fid = require(resolve_fiduciary(ctx), "fiduciary_id")
+        row = db.one(
+            """
+            UPDATE grievances SET feedback_rating = %s, feedback_comment = %s, feedback_at = NOW(), last_updated_at = NOW()
+            WHERE id = %s AND fiduciary_id = %s AND user_id = %s AND status IN ('RESOLVED', 'CLOSED')
+              AND feedback_at IS NULL
+            RETURNING id
+            """,
+            (rating, ctx.payload.get("comment"), gid, fid, user_id),
+        )
+        if not row:
+            raise ApiError(
+                409, "Conflict", "Feedback can be given once, by the complainant, after the grievance is resolved."
+            )
+        log_event(
+            user_id,
+            fid,
+            "APP",
+            None,
+            "GRIEVANCE_FEEDBACK",
+            {"grievance_id": gid, "rating": rating},
+            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            source_ip=ctx.source_ip,
+        )
+        return {"success": True, "grievance_id": gid, "rating": rating}
+
+    def upload_grievance_attachment(self, ctx: RequestContext) -> dict:
+        """GR-04: attach supporting evidence to a grievance.
+
+        The file arrives base64-encoded in the JSON body, is checked against an
+        allow-list of types and the ATTACHMENT_MAX_BYTES limit, and is stored
+        under the export path by its SHA-256, never by the caller's file name.
+        """
+        import base64
+        import hashlib
+
+        from ..config import settings
+
+        gid = require(ctx.payload.get("grievance_id"), "grievance_id")
+        content_type = str(require(ctx.payload.get("content_type"), "content_type")).lower()
+        if content_type not in ATTACHMENT_TYPES:
+            raise ApiError(400, "Bad Request", f"content_type must be one of {sorted(ATTACHMENT_TYPES)}.")
+        file_name = str(require(ctx.payload.get("file_name"), "file_name"))[:255]
+        try:
+            data = base64.b64decode(str(require(ctx.payload.get("content_base64"), "content_base64")), validate=True)
+        except ValueError:
+            raise ApiError(400, "Bad Request", "content_base64 is not valid base64.") from None
+        if not data or len(data) > settings.attachment_max_bytes:
+            raise ApiError(413, "Payload Too Large", f"Attachments must be 1 to {settings.attachment_max_bytes} bytes.")
+        scope, scope_params = tenant_filter(ctx)
+        if ctx.auth_via_principal_jwt:
+            scope += " AND user_id = %s"
+            scope_params.append(ctx.principal_user_id)
+        grievance = db.one(f"SELECT id, fiduciary_id FROM grievances WHERE id = %s{scope}", (gid, *scope_params))
+        if not grievance:
+            raise ApiError(404, "Not Found", "Grievance not found.")
+        digest = hashlib.sha256(data).hexdigest()
+        folder = settings.export_path / "attachments" / str(grievance["fiduciary_id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / digest
+        if not path.exists():
+            path.write_bytes(data)
+        uploader = ctx.principal_user_id or ctx.actor_email or "INTEGRATOR"
+        row = db.insert_returning(
+            """
+            INSERT INTO grievance_attachments
+                (grievance_id, fiduciary_id, file_name, content_type, size_bytes, sha256, storage_path, uploaded_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (gid, grievance["fiduciary_id"], file_name, content_type, len(data), digest, str(path), uploader),
+        )
+        attachment = {"attachment_id": str(row["id"]), "file_name": file_name, "sha256": digest, "size_bytes": len(data)}
+        db.execute(
+            "UPDATE grievances SET attachments = COALESCE(attachments, '[]'::jsonb) || %s::jsonb, last_updated_at = NOW() WHERE id = %s",
+            (db.as_jsonb([attachment]), gid),
+        )
+        return {"success": True, **attachment}
 
 
 class BreachService(Service):
@@ -252,20 +601,27 @@ class BreachService(Service):
         )
 
     def get_breach(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM breach_incidents WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT * FROM breach_incidents WHERE id = %s{scope}", (require(ctx.payload.get("id"), "id"), *scope_params)
+        )
         if not row:
             raise ApiError(404, "Not Found", "Breach not found.")
         return db.to_jsonable(row)
 
     def update_breach_status(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE breach_incidents SET status = %s, resolution_notes = COALESCE(%s, resolution_notes), last_updated_at = NOW() WHERE id = %s",
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"UPDATE breach_incidents SET status = %s, resolution_notes = COALESCE(%s, resolution_notes), last_updated_at = NOW() WHERE id = %s{scope}",
             (
                 require(ctx.payload.get("status"), "status"),
                 ctx.payload.get("resolution_notes"),
                 require(ctx.payload.get("id"), "id"),
+                *scope_params,
             ),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Breach not found.")
         return {"success": True}
 
     def download_breach_report(self, ctx: RequestContext) -> dict:

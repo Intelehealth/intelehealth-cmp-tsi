@@ -9,7 +9,7 @@ from ..context import RequestContext
 from ..errors import ApiError
 from ..netutil import validate_outbound_url
 from ..security import hash_password, random_secret
-from .base import Service, bind_principal_field, principal_list_filter, require
+from .base import Service, bind_principal_field, principal_list_filter, require, tenant_filter
 from .catalog import resolve_fiduciary
 
 API_KEY_COLUMNS = (
@@ -80,26 +80,50 @@ class ApiKeyService(Service):
         return db.to_jsonable(db.all(sql, tuple(params)))
 
     def revoke_api_key(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE api_keys SET status = 'REVOKED', revoked_at = NOW() WHERE id = %s", (api_key_id(ctx.payload),)
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"UPDATE api_keys SET status = 'REVOKED', revoked_at = NOW() WHERE id = %s{scope}",
+            (api_key_id(ctx.payload), *scope_params),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "API key not found.")
         return {"success": True, "message": "API Key revoked successfully."}
 
     def get_api_key_details(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx, "ak.fiduciary_id")
         row = db.one(
-            f"SELECT {API_KEY_COLUMNS} FROM api_keys ak LEFT JOIN apps ap ON ak.app_id = ap.id WHERE ak.id = %s",
-            (api_key_id(ctx.payload),),
+            f"SELECT {API_KEY_COLUMNS} FROM api_keys ak LEFT JOIN apps ap ON ak.app_id = ap.id WHERE ak.id = %s{scope}",
+            (api_key_id(ctx.payload), *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "API key not found.")
         return db.to_jsonable(row)
 
     def update_api_key_status(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE api_keys SET status = %s WHERE id = %s",
-            (require(ctx.payload.get("status"), "status"), api_key_id(ctx.payload)),
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"UPDATE api_keys SET status = %s WHERE id = %s{scope}",
+            (require(ctx.payload.get("status"), "status"), api_key_id(ctx.payload), *scope_params),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "API key not found.")
         return {"success": True}
+
+
+# SA-07: audit actions that make up the access and role-modification report.
+ACCESS_REPORT_ACTIONS = {
+    "LOGIN_SUCCESS",
+    "LOGIN_FAILURE",
+    "USER_CREATED",
+    "USER_UPDATED",
+    "USER_DEACTIVATED",
+    "ROLE_CREATED",
+    "ROLE_PERMISSIONS_UPDATED",
+    "ROLE_DELETED",
+    "MFA_ENROLL_STARTED",
+    "MFA_ENABLED",
+    "MFA_VERIFY_FAILED",
+}
 
 
 class AuditService(Service):
@@ -126,12 +150,49 @@ class AuditService(Service):
 
         require_audit_access(ctx)
         row = get_log(require(ctx.payload.get("id"), "id"))
-        if not row:
+        if not row or (ctx.fiduciary_id and str(row.get("fiduciary_id")) != ctx.fiduciary_id):
             raise ApiError(404, "Not Found", "Audit log not found.")
         return row
 
     def get_audit_log_entry(self, ctx: RequestContext) -> dict:
         return self.get_audit_log(ctx)
+
+    def list_access_report(self, ctx: RequestContext) -> dict:
+        """SA-07: who signed in (or failed to), and every change to accounts,
+        roles and MFA, for a date range. Tenant-scoped like every audit read."""
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        where = ["audit_action = ANY(%s)"]
+        params: list = [sorted(ACCESS_REPORT_ACTIONS)]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
+        elif ctx.payload.get("fiduciary_id"):
+            where.append("fiduciary_id = %s")
+            params.append(ctx.payload["fiduciary_id"])
+        if ctx.payload.get("start_date"):
+            where.append("timestamp >= %s::timestamp")
+            params.append(ctx.payload["start_date"])
+        if ctx.payload.get("end_date"):
+            where.append("timestamp <= %s::timestamp")
+            params.append(ctx.payload["end_date"])
+        params.append(min(int(ctx.payload.get("limit") or 500), 5000))
+        rows = db.to_jsonable(
+            db.all(
+                f"""
+                SELECT id, timestamp, fiduciary_id, user_id, service_type, service_id, audit_action,
+                       context_details, source_ip
+                FROM audit_logs WHERE {" AND ".join(where)}
+                ORDER BY timestamp DESC LIMIT %s
+                """,
+                params,
+            )
+        )
+        summary: dict[str, int] = {}
+        for row in rows:
+            summary[row["audit_action"]] = summary.get(row["audit_action"], 0) + 1
+        return {"success": True, "summary": summary, "events": rows}
 
     def log_event(self, ctx: RequestContext) -> dict:
         log_event(
@@ -325,7 +386,11 @@ class JobService(Service):
         )
 
     def download_file(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT output_file_path FROM jobs WHERE id = %s", (require(ctx.payload.get("job_id"), "job_id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT output_file_path FROM jobs WHERE id = %s{scope}",
+            (require(ctx.payload.get("job_id"), "job_id"), *scope_params),
+        )
         return db.to_jsonable(row or {})
 
 
@@ -387,13 +452,18 @@ class RopaService(Service):
             if key in ctx.payload:
                 fields.append(f"{key} = %s")
                 params.append(db.as_jsonb(ctx.payload[key]))
-        params.append(rid)
-        db.execute(f"UPDATE ropa_entries SET {', '.join(fields)} WHERE id = %s", params)
+        scope, scope_params = tenant_filter(ctx)
+        params.extend([rid, *scope_params])
+        if db.execute(f"UPDATE ropa_entries SET {', '.join(fields)} WHERE id = %s{scope}", params) == 0:
+            raise ApiError(404, "Not Found", "ROPA entry not found.")
         return {"success": True}
 
     def publish_entry(self, ctx: RequestContext) -> dict:
         entry_id = require(ctx.payload.get("id"), "id")
-        entry = db.one("SELECT fiduciary_id, linked_policy_ids FROM ropa_entries WHERE id = %s", (entry_id,))
+        scope, scope_params = tenant_filter(ctx)
+        entry = db.one(
+            f"SELECT fiduciary_id, linked_policy_ids FROM ropa_entries WHERE id = %s{scope}", (entry_id, *scope_params)
+        )
         if not entry:
             raise ApiError(404, "Not Found", "ROPA entry not found.")
         db.execute("UPDATE ropa_entries SET status = 'active', updated_at = NOW() WHERE id = %s", (entry_id,))
@@ -415,8 +485,8 @@ class RopaService(Service):
         if pending and pending["count"] > 0:
             return False
         updated = db.execute(
-            "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = NOW() WHERE id = %s AND status = 'UNDER_REVIEW'",
-            (policy_id,),
+            "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = NOW() WHERE id = %s AND fiduciary_id = %s AND status = 'UNDER_REVIEW'",
+            (policy_id, fiduciary_id),
         )
         if not updated:
             return False
@@ -424,9 +494,10 @@ class RopaService(Service):
         return True
 
     def retire_entry(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx)
         db.execute(
-            "UPDATE ropa_entries SET status = 'retired', updated_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("id"), "id"),),
+            f"UPDATE ropa_entries SET status = 'retired', updated_at = NOW() WHERE id = %s{scope}",
+            (require(ctx.payload.get("id"), "id"), *scope_params),
         )
         return {"success": True}
 
@@ -445,7 +516,10 @@ class RopaService(Service):
         )
 
     def get_entry(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM ropa_entries WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT * FROM ropa_entries WHERE id = %s{scope}", (require(ctx.payload.get("id"), "id"), *scope_params)
+        )
         if not row:
             raise ApiError(404, "Not Found", "ROPA entry not found.")
         return db.to_jsonable(row)
@@ -515,7 +589,11 @@ class LegalService(Service):
         )
 
     def get_certificate(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM evidence_certificates WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT * FROM evidence_certificates WHERE id = %s{scope}",
+            (require(ctx.payload.get("id"), "id"), *scope_params),
+        )
         if not row:
             raise ApiError(404, "Not Found", "Certificate not found.")
         return db.to_jsonable(row)
