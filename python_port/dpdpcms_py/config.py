@@ -61,7 +61,7 @@ class Settings:
     webhook_retry_limit: int = 5
     # ── P1 worker sweep thresholds ──────────────────────────────────────────
     alert_escalation_hours: int = 24
-    purge_notice_hours: int = 48          # DPDP Rule 8(2): 48h notice before deletion
+    purge_notice_hours: int = 48  # DPDP Rule 8(2): 48h notice before deletion
     grievance_escalation_hours: int = 24  # beyond the SLA due_date
     # Rights-portal DUMMY_OTP mode accepts a fixed code, i.e. no authentication.
     # Off unless TSI_DPDP_CMS_ENV=local or ALLOW_DUMMY_OTP=true.

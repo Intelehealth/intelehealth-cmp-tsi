@@ -40,7 +40,7 @@ def _hotp(secret: str, counter: int) -> str:
     digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
     binary = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
-    return f"{binary % 10 ** DIGITS:0{DIGITS}d}"
+    return f"{binary % 10**DIGITS:0{DIGITS}d}"
 
 
 def totp_at(secret: str, timestamp: float | None = None, step_seconds: int = DEFAULT_STEP_SECONDS) -> str:

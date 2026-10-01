@@ -599,8 +599,7 @@ class ConsentService(Service):
         for row in rows:
             points = row.get("data_point_consents") or []
             purposes = ", ".join(
-                str(p.get("data_point_id") or p.get("id") or "")
-                + ("" if _point_granted(p) else ":withdrawn")
+                str(p.get("data_point_id") or p.get("id") or "") + ("" if _point_granted(p) else ":withdrawn")
                 for p in points
                 if isinstance(p, dict)
             )
@@ -632,7 +631,12 @@ class ConsentService(Service):
             from ..pdfgen import text_pdf
 
             csv_lines = output.getvalue().splitlines()
-            lines = [f"Principal: {user_id}", f"Generated: {datetime.now(UTC).isoformat()}", f"Records: {len(rows)}", ""]
+            lines = [
+                f"Principal: {user_id}",
+                f"Generated: {datetime.now(UTC).isoformat()}",
+                f"Records: {len(rows)}",
+                "",
+            ]
             for entry in csv.reader(csv_lines[1:]):
                 stamp, policy, version, lang, status, active, purposes = entry
                 lines += [
@@ -782,7 +786,9 @@ class ConsentService(Service):
             raise ApiError(404, "Not Found", "No active consent found.")
         content = record.get("policy_content") or {}
         block = content.get(language) or content.get("en") or next(iter(content.values()), {})
-        purposes = {str(p.get("id")).lower(): p for p in (block.get("data_processing_purposes") or []) if isinstance(p, dict)}
+        purposes = {
+            str(p.get("id")).lower(): p for p in (block.get("data_processing_purposes") or []) if isinstance(p, dict)
+        }
         wanted = {pid.lower() for pid in _normalise_purpose_ids(ctx.payload)}
         out = []
         for point in record.get("data_point_consents") or []:
@@ -839,7 +845,11 @@ class ConsentService(Service):
                 # active grant; withdrawing something that was never granted is an
                 # error an integrator can act on, not a silent success.
                 if purpose_ids:
-                    granted = {str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower() for p in points if isinstance(p, dict) and _point_granted(p)}
+                    granted = {
+                        str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower()
+                        for p in points
+                        if isinstance(p, dict) and _point_granted(p)
+                    }
                     missing = [pid for pid in purpose_ids if pid.lower() not in granted]
                     if missing:
                         raise ApiError(

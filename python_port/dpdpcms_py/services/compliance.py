@@ -76,7 +76,10 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
             ("consent_validations", "user_id"),
             ("purge_requests", "user_id"),
         ):
-            cur.execute(f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s", (token, fiduciary_id, user_id))
+            cur.execute(
+                f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s",
+                (token, fiduciary_id, user_id),
+            )
             counts[table] = cur.rowcount
         cur.execute(
             """
@@ -549,7 +552,12 @@ class GrievanceService(Service):
             """,
             (gid, grievance["fiduciary_id"], file_name, content_type, len(data), digest, str(path), uploader),
         )
-        attachment = {"attachment_id": str(row["id"]), "file_name": file_name, "sha256": digest, "size_bytes": len(data)}
+        attachment = {
+            "attachment_id": str(row["id"]),
+            "file_name": file_name,
+            "sha256": digest,
+            "size_bytes": len(data),
+        }
         db.execute(
             "UPDATE grievances SET attachments = COALESCE(attachments, '[]'::jsonb) || %s::jsonb, last_updated_at = NOW() WHERE id = %s",
             (db.as_jsonb([attachment]), gid),
@@ -603,7 +611,8 @@ class BreachService(Service):
     def get_breach(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT * FROM breach_incidents WHERE id = %s{scope}", (require(ctx.payload.get("id"), "id"), *scope_params)
+            f"SELECT * FROM breach_incidents WHERE id = %s{scope}",
+            (require(ctx.payload.get("id"), "id"), *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "Breach not found.")
