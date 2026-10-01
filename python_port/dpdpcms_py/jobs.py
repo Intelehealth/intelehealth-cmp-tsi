@@ -80,21 +80,28 @@ def escalate_stale_alerts() -> dict[str, int]:
 
 def escalate_overdue_grievances() -> dict[str, int]:
     """UD-12 / GR-09: auto-escalate grievances past their SLA due date."""
+    # GR-09: escalate once the SLA due date plus the configured grace period
+    # (GRIEVANCE_ESCALATION_HOURS) has passed. The UPDATE ... RETURNING is the
+    # claim, so two workers can never escalate the same grievance twice (UD-12).
     rows = db.all(
         """
-        SELECT id, user_id, fiduciary_id
-        FROM grievances
-        WHERE status IN ('NEW', 'IN_PROGRESS') AND due_date IS NOT NULL AND due_date < NOW()
-        ORDER BY due_date
-        LIMIT %s
+        UPDATE grievances SET status = 'ESCALATED', escalated_at = NOW(), last_updated_at = NOW()
+        WHERE id IN (
+            SELECT id FROM grievances
+            WHERE status IN ('NEW', 'IN_PROGRESS') AND due_date IS NOT NULL
+              AND due_date + make_interval(hours => %s) < NOW()
+            ORDER BY due_date
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, user_id, fiduciary_id
         """,
-        (settings.worker_batch_size,),
+        (settings.grievance_escalation_hours, settings.worker_batch_size),
     )
     count = 0
     for row in rows:
         gid = str(row["id"])
         fid = str(row["fiduciary_id"])
-        db.execute("UPDATE grievances SET status = 'ESCALATED', last_updated_at = NOW() WHERE id = %s", (gid,))
         db.execute(
             """
             INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
@@ -168,6 +175,71 @@ def _cessation_for(fiduciary_id: str, purpose_id: str) -> datetime | None:
     return row["cessation"] if row else None
 
 
+def _expiry_action(fiduciary_id: str, purpose_id: str) -> str:
+    """PL-03: ERASE or DE_IDENTIFY for a purge raised at retention expiry — the
+    retention policy's action_at_expiry, else the action chosen at closure."""
+    from .services.retention import applicable_policy
+
+    policy = applicable_policy(fiduciary_id, purpose_id)
+    if policy and policy.get("action_at_expiry"):
+        return str(policy["action_at_expiry"]).upper()
+    row = db.one(
+        "SELECT deidentification_action FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
+        (fiduciary_id, purpose_id),
+    )
+    return str((row or {}).get("deidentification_action") or "ERASE").upper()
+
+
+def flag_overdue_purges() -> dict[str, int]:
+    """SA-09: a purge the CMS orchestrated must be confirmed done. Requests still
+    open past PURGE_COMPLETION_SLA_DAYS (and not under legal hold) are flagged to
+    the DPO once, so an unconfirmed deletion never passes silently."""
+    rows = db.all(
+        """
+        UPDATE purge_requests SET overdue_notified_at = NOW()
+        WHERE id IN (
+            SELECT id FROM purge_requests
+            WHERE status IN ('PENDING', 'IN_PROGRESS', 'PURGE_IN_PROGRESS')
+              AND overdue_notified_at IS NULL
+              AND initiated_at < NOW() - make_interval(days => %s)
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, fiduciary_id, purpose_id
+        """,
+        (settings.purge_completion_sla_days, settings.worker_batch_size),
+    )
+    for row in rows:
+        fid = str(row["fiduciary_id"])
+        db.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('DPO', %s, %s, 'PURGE_OVERDUE')",
+            (_dpo_recipient(fid), fid),
+        )
+        log_event(
+            "SYSTEM", fid, "SYSTEM", None, "PURGE_OVERDUE",
+            {"purge_request_id": str(row["id"]), "purpose_id": row["purpose_id"]},
+        )
+    return {"flagged": len(rows)}
+
+
+def release_expired_legal_holds() -> dict[str, int]:
+    """CW-11: a legal hold lasts for the retention period it cites; once that
+    ends the request becomes an ordinary pending purge."""
+    released = db.execute(
+        """
+        UPDATE purge_requests SET status = 'PENDING', last_updated_at = NOW(),
+               details = COALESCE(details || ' ', '') || '[legal hold expired]'
+        WHERE status = 'LEGAL_HOLD_APPLIED' AND hold_until IS NOT NULL AND hold_until < NOW()
+        """
+    )
+    return {"released": released or 0}
+
+
+def prune_revoked_tokens() -> dict[str, int]:
+    """SA-05: a revoked token only needs remembering until it would have expired anyway."""
+    return {"pruned": db.execute("DELETE FROM revoked_tokens WHERE expires_at < NOW()") or 0}
+
+
 def _dpo_recipient(fiduciary_id: str) -> str:
     row = db.one(
         "SELECT id FROM operators WHERE fiduciary_id = %s AND role = 'DPO' AND status = 'ACTIVE' ORDER BY created_at LIMIT 1",
@@ -197,8 +269,8 @@ def run_retention_sweep() -> dict[str, int]:
             if _claim_pending_purges(fid, purpose_id, "RetentionPolicyExpiry"):
                 rowcount = db.execute(
                     """
-                    INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details)
-                    SELECT DISTINCT cr.user_id, cr.fiduciary_id, %s, 'RetentionPolicyExpiry', %s
+                    INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details, action)
+                    SELECT DISTINCT cr.user_id, cr.fiduciary_id, %s, 'RetentionPolicyExpiry', %s, %s
                     FROM consent_records cr,
                          LATERAL jsonb_array_elements(cr.data_point_consents) AS p
                     WHERE cr.fiduciary_id = %s AND p ->> 'data_point_id' = %s
@@ -214,6 +286,7 @@ def run_retention_sweep() -> dict[str, int]:
                     (
                         purpose_id,
                         f"Retention period of {retention_days} days elapsed from cessation {due.isoformat()} (PL-04).",
+                        _expiry_action(fid, purpose_id),
                         fid,
                         purpose_id,
                         purpose_id,
@@ -247,11 +320,7 @@ def run_retention_sweep() -> dict[str, int]:
                 )
                 notices += 1
                 log_event(
-                    "SYSTEM",
-                    fid,
-                    "SYSTEM",
-                    None,
-                    "PURGE_SCHEDULED",
+                    "SYSTEM", fid, "SYSTEM", None, "PURGE_SCHEDULED",
                     {"purpose_id": purpose_id, "due": due.isoformat(), "notice_hours": settings.purge_notice_hours},
                 )
     return {"purge_requests_created": created, "admin_notices": notices}
@@ -260,11 +329,7 @@ def run_retention_sweep() -> dict[str, int]:
 _CSV_SUBSCRIPTIONS: dict[str, tuple[str, str, str]] = {
     # subtype -> (table, default_columns, date_column)
     "CONSENT": ("consent_records", "id,user_id,policy_id,policy_version,consent_status_general,timestamp", "timestamp"),
-    "PRINCIPAL": (
-        "data_principal",
-        "user_id,fiduciary_id,last_consent_mechanism,age_category,created_at",
-        "created_at",
-    ),
+    "PRINCIPAL": ("data_principal", "user_id,fiduciary_id,last_consent_mechanism,age_category,created_at", "created_at"),
     "GRIEVANCE": ("grievances", "id,user_id,type,subject,status,submission_timestamp", "submission_timestamp"),
     "AUDIT": ("audit_logs", "id,fiduciary_id,timestamp,user_id,service_type,audit_action,context_details", "timestamp"),
 }
@@ -297,7 +362,9 @@ def execute_queued_jobs() -> dict[str, int]:
         try:
             if job_type == "CES":
                 close_due_time_bound_purposes()
-                db.execute("UPDATE jobs SET status = 'COMPLETED', completed_at = NOW() WHERE id = %s", (job_id,))
+                db.execute(
+                    "UPDATE jobs SET status = 'COMPLETED', completed_at = NOW() WHERE id = %s", (job_id,)
+                )
                 completed += 1
                 continue
             if job_type == "EXPORT" and subtype in _CSV_SUBSCRIPTIONS:
@@ -342,15 +409,9 @@ def _write_export(job: dict[str, Any]) -> Path:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow(
-                {key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()}
-            )
+            writer.writerow({key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()})
     log_event(
-        "SYSTEM",
-        str(job["fiduciary_id"]),
-        "SYSTEM",
-        str(job["id"]),
-        "JOB_COMPLETED",
+        "SYSTEM", str(job["fiduciary_id"]), "SYSTEM", str(job["id"]), "JOB_COMPLETED",
         {"output_file_path": str(path), "rows": len(rows)},
     )
     return path
