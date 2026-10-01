@@ -26,6 +26,18 @@ def page_limit(payload: dict, default: int = 10) -> tuple[int, int]:
     return page, limit
 
 
+def tenant_filter(ctx: RequestContext, column: str = "fiduciary_id") -> tuple[str, list[Any]]:
+    """SQL fragment that confines a by-id query to the caller's tenant.
+
+    Returns (" AND <column> = %s", [fid]) for any tenant-bound caller (API key,
+    principal JWT, or a fiduciary-scoped operator) and ("", []) for a global
+    administrator, so callers can append it to a WHERE clause unconditionally.
+    """
+    if ctx.fiduciary_id:
+        return f" AND {column} = %s", [str(ctx.fiduciary_id)]
+    return "", []
+
+
 def reject_operator(ctx: RequestContext) -> None:
     if (ctx.actor_role or "").upper() == "OPERATOR":
         raise ApiError(403, "Forbidden", "Operators are not permitted to perform this action.")

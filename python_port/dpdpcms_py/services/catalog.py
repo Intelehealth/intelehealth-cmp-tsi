@@ -9,7 +9,7 @@ from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..defaults import DEFAULT_NOTIFICATION_MESSAGES
 from ..errors import ApiError
 from .admin import authenticated_user_id, operator_fiduciary_id
-from .base import Service, bind_principal_field, page_limit, reject_operator, require
+from .base import Service, bind_principal_field, page_limit, reject_operator, require, tenant_filter
 from .lifecycle import sync_purpose_lifecycle, validate_duration_flags
 
 
@@ -105,9 +105,7 @@ def derive_ropa_entries(fiduciary_id: str, policy_id: str, policy_content: Any) 
         )
 
 
-def queue_policy_change_notices(
-    fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None
-) -> dict[str, int]:
+def queue_policy_change_notices(fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None) -> dict[str, int]:
     """CU-02/CU-03: notify principals on a materially changed policy and require fresh consent.
 
     Finds every principal holding active consent on an earlier version of this
@@ -155,6 +153,9 @@ class FiduciaryService(Service):
         page, limit = page_limit(ctx.payload)
         params: list[Any] = [*db.bind_key()]
         where = ["status IS NOT NULL"]
+        if ctx.fiduciary_id:
+            where.append("id = %s")
+            params.append(ctx.fiduciary_id)
         if ctx.payload.get("status"):
             where.append("status = %s")
             params.append(ctx.payload["status"])
@@ -262,22 +263,27 @@ class FiduciaryService(Service):
         if "phone" in ctx.payload:
             fields.append(f"phone_plaintext = %s, phone_enc = {db.enc_expr()}")
             params.extend([ctx.payload["phone"], *db.bind_encrypt(ctx.payload["phone"])])
-        params.append(fid)
-        db.execute(f"UPDATE fiduciaries SET {', '.join(fields)} WHERE id = %s", params)
+        scope, scope_params = tenant_filter(ctx, "id")
+        params.extend([fid, *scope_params])
+        if db.execute(f"UPDATE fiduciaries SET {', '.join(fields)} WHERE id = %s{scope}", params) == 0:
+            raise ApiError(404, "Not Found", "Data Fiduciary not found.")
         return {"success": True, "message": "Fiduciary updated successfully."}
 
     def delete_fiduciary(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx, "id")
         db.execute(
-            "UPDATE fiduciaries SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
+            f"UPDATE fiduciaries SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s{scope}",
+            (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"), *scope_params),
         )
         return {"success": True}
 
     def validate_fiduciary_domain(self, ctx: RequestContext) -> dict:
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         status = "VALIDATED"
+        scope, scope_params = tenant_filter(ctx, "id")
         db.execute(
-            "UPDATE fiduciaries SET domain_validation_status = %s, last_updated_at = NOW() WHERE id = %s", (status, fid)
+            f"UPDATE fiduciaries SET domain_validation_status = %s, last_updated_at = NOW() WHERE id = %s{scope}",
+            (status, fid, *scope_params),
         )
         return {"fiduciary_id": fid, "domain_validation_status": status, "message": "Domain validation successful."}
 
@@ -307,9 +313,10 @@ class AppService(Service):
         )
 
     def get_app(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT id AS app_id, fiduciary_id, name, {db.decrypt_col('email_enc')} AS email, {db.decrypt_col('phone_enc')} AS phone, dpa_reference, processing_purposes, status FROM apps WHERE id = %s",
-            (*db.bind_key(), *db.bind_key(), require(ctx.payload.get("app_id"), "app_id")),
+            f"SELECT id AS app_id, fiduciary_id, name, {db.decrypt_col('email_enc')} AS email, {db.decrypt_col('phone_enc')} AS phone, dpa_reference, processing_purposes, status FROM apps WHERE id = %s{scope}",
+            (*db.bind_key(), *db.bind_key(), require(ctx.payload.get("app_id"), "app_id"), *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "App not found.")
@@ -354,14 +361,17 @@ class AppService(Service):
         if "phone" in ctx.payload:
             fields.append(f"phone_plaintext = %s, phone_enc = {db.enc_expr()}")
             params.extend([ctx.payload["phone"], *db.bind_encrypt(ctx.payload["phone"])])
-        params.append(app_id)
-        db.execute(f"UPDATE apps SET {', '.join(fields)} WHERE id = %s", params)
+        scope, scope_params = tenant_filter(ctx)
+        params.extend([app_id, *scope_params])
+        if db.execute(f"UPDATE apps SET {', '.join(fields)} WHERE id = %s{scope}", params) == 0:
+            raise ApiError(404, "Not Found", "App not found.")
         return {"success": True}
 
     def delete_app(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx)
         db.execute(
-            "UPDATE apps SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("app_id"), "app_id"),),
+            f"UPDATE apps SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s{scope}",
+            (require(ctx.payload.get("app_id"), "app_id"), *scope_params),
         )
         return {"success": True}
 
@@ -395,7 +405,7 @@ class PolicyService(Service):
         if ctx.payload.get("status"):
             where.append("status = %s")
             params.append(ctx.payload["status"])
-        fid = ctx.payload.get("fiduciary_id_filter") or ctx.payload.get("fiduciary_id")
+        fid = ctx.fiduciary_id or ctx.payload.get("fiduciary_id_filter") or ctx.payload.get("fiduciary_id")
         if fid:
             where.append("fiduciary_id = %s")
             params.append(fid)
@@ -469,12 +479,14 @@ class PolicyService(Service):
         validate_duration_flags(content)  # PL-01: every purpose is open-ended or time-bound
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
+        scope, scope_params = tenant_filter(ctx)
         updated = db.execute(
-            "UPDATE consent_policies SET policy_content = %s, last_updated_at = NOW() WHERE id = %s AND version = %s AND status = 'DRAFT'",
+            f"UPDATE consent_policies SET policy_content = %s, last_updated_at = NOW() WHERE id = %s AND version = %s AND status = 'DRAFT'{scope}",
             (
                 db.as_jsonb(content),
                 pid,
                 version,
+                *scope_params,
             ),
         )
         if updated == 0:
@@ -487,14 +499,16 @@ class PolicyService(Service):
         reject_operator(ctx)
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
+        scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            "SELECT fiduciary_id, jurisdiction FROM consent_policies WHERE id = %s AND version = %s", (pid, version)
+            f"SELECT fiduciary_id, jurisdiction FROM consent_policies WHERE id = %s AND version = %s{scope}",
+            (pid, version, *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "Policy not found.")
         db.execute(
-            "UPDATE consent_policies SET status = 'UNDER_REVIEW', last_updated_at = NOW() WHERE id = %s AND version = %s",
-            (pid, version),
+            "UPDATE consent_policies SET status = 'UNDER_REVIEW', last_updated_at = NOW() WHERE id = %s AND version = %s AND fiduciary_id = %s",
+            (pid, version, row["fiduciary_id"]),
         )
         # CU-02/CU-03: publishing a materially changed policy must notify every
         # principal with active consent on an earlier version and request fresh
@@ -591,8 +605,9 @@ class PolicyService(Service):
 
     def delete_policy(self, ctx: RequestContext) -> dict:
         reject_operator(ctx)
+        scope, scope_params = tenant_filter(ctx)
         db.execute(
-            "UPDATE consent_policies SET status = 'ARCHIVED', last_updated_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("policy_id"), "policy_id"),),
+            f"UPDATE consent_policies SET status = 'ARCHIVED', last_updated_at = NOW() WHERE id = %s{scope}",
+            (require(ctx.payload.get("policy_id"), "policy_id"), *scope_params),
         )
         return {"success": True}
