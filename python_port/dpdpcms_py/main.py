@@ -14,6 +14,7 @@ from .context import RequestContext
 from .errors import ApiError, error_body
 from .security import api_key_valid, bearer_token, decode_token
 from .services import SERVICE_REGISTRY
+from .services.consent import resolve_wallet_action
 from .services.roles import MFA_EXEMPT_FUNCS, enforce_role_permission
 from .validators import validate_payload
 
@@ -68,6 +69,7 @@ CLIENT_ALLOWED_FUNCS = {
     "add_grievance_communication",
     "submit_grievance_feedback",
     "upload_grievance_attachment",
+    "get_grievance_attachment",
     "confirm_purge_status",
 }
 CLIENT_FUNC_SCOPES = {
@@ -108,6 +110,7 @@ CLIENT_FUNC_SCOPES = {
     "add_grievance_communication": "WRITE",
     "submit_grievance_feedback": "WRITE",
     "upload_grievance_attachment": "WRITE",
+    "get_grievance_attachment": "READ",
     "confirm_purge_status": "PURGE",
 }
 
@@ -312,6 +315,9 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
         payload = await payload_from(request)
         if func and not payload.get("_func"):
             payload["_func"] = func
+        if service == "wallet":
+            # D14: authorise the operation the wallet action runs, not "sync".
+            resolve_wallet_action(payload)
         if request.method == "POST":
             errors = validate_payload(payload)
             if errors:

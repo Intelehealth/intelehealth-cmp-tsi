@@ -1,69 +1,102 @@
-"""A minimal PDF writer: monospaced text pages, no dependencies.
+"""PDF rendering for UD-04's consent-history download.
 
-Enough for UD-04's consent-history download. Text uses the built-in Courier
-font with WinAnsi encoding, so characters outside Latin-1 are replaced with '?'
-(the CSV export carries the exact values).
+Text is shaped with HarfBuzz (through fpdf2) and drawn with bundled Noto fonts,
+so a principal can read the export in any Eighth Schedule language: Indic
+conjuncts and vowel signs are composed correctly, and Urdu, Kashmiri and Sindhi
+run right-to-left. Each character falls back to the first bundled font that
+covers it, so mixed-script lines (English labels, a Hindi purpose name) work.
+Fonts are OFL-licensed; see fonts/README.md.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
+
+from fontTools.ttLib import TTFont
+from fpdf import FPDF
+
+FONT_DIR = Path(__file__).with_name("fonts")
+# Primary font first; the rest are per-character fallbacks.
+FONTS = (
+    "NotoSans",
+    "NotoSansDevanagari",  # hi, mr, ne, sa, kok, mai, doi, brx (and ks/sd in Devanagari)
+    "NotoSansBengali",  # bn, as, mni (Bengali script)
+    "NotoSansGujarati",
+    "NotoSansGurmukhi",  # pa
+    "NotoSansOriya",  # or
+    "NotoSansTamil",
+    "NotoSansTelugu",
+    "NotoSansKannada",
+    "NotoSansMalayalam",
+    "NotoNaskhArabic",  # ur, ks, sd (Perso-Arabic script)
+    "NotoSansOlChiki",  # sat
+    "NotoSansMeeteiMayek",  # mni (Meetei Mayek script)
+)
 FONT_SIZE = 9
-LEADING = 12
-MARGIN = 40
-PAGE_W, PAGE_H = 595, 842  # A4 in points
-LINES_PER_PAGE = (PAGE_H - 2 * MARGIN) // LEADING
-MAX_CHARS = 95  # Courier 9pt across A4 minus margins
+TITLE_SIZE = 14
+LINE_HEIGHT = 5  # mm
+MARGIN = 15  # mm
+LRM = "‎"  # LEFT-TO-RIGHT MARK: fixes the base direction of a line
 
 
-def _escape(text: str) -> str:
-    safe = text.encode("latin-1", errors="replace").decode("latin-1")
-    return safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+@lru_cache(maxsize=1)
+def _font_paths() -> tuple[tuple[str, Path], ...]:
+    paths = tuple((name, FONT_DIR / f"{name}-Regular.ttf") for name in FONTS)
+    missing = [str(path) for _, path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"PDF fonts missing: {', '.join(missing)}")
+    return paths
 
 
-def _wrap(lines: list[str]) -> list[str]:
-    out: list[str] = []
-    for line in lines:
-        line = str(line).replace("\t", "    ")
-        while len(line) > MAX_CHARS:
-            out.append(line[:MAX_CHARS])
-            line = "  " + line[MAX_CHARS:]
-        out.append(line)
-    return out
+@lru_cache(maxsize=1)
+def _coverage() -> dict[str, frozenset[int]]:
+    return {name: frozenset(TTFont(str(path), lazy=True).getBestCmap()) for name, path in _font_paths()}
+
+
+def _fonts_for(text: str) -> list[str]:
+    """The primary font plus each fallback that covers a character the fonts
+    before it do not - so a document embeds only the scripts it uses."""
+    coverage = _coverage()
+    pending = {ord(ch) for ch in text if not ch.isspace()} - coverage[FONTS[0]]
+    chosen = [FONTS[0]]
+    for name in FONTS[1:]:
+        if pending & coverage[name]:
+            chosen.append(name)
+            pending -= coverage[name]
+    return chosen
+
+
+class _Doc(FPDF):
+    def footer(self) -> None:
+        self.set_y(-12)
+        self.set_font(FONTS[0], size=8)
+        self.cell(0, 5, f"Page {self.page_no()} of {{nb}}", align="R")
 
 
 def text_pdf(title: str, lines: list[str]) -> bytes:
-    """Render `title` and `lines` as a paginated A4 PDF document."""
-    body = _wrap([title, "=" * min(len(title), MAX_CHARS), "", *lines])
-    pages = [body[i : i + LINES_PER_PAGE] for i in range(0, len(body), LINES_PER_PAGE)] or [[]]
-
-    objects: list[bytes] = []
-    # 1 catalog, 2 pages tree, 3 font; then a (page, content) pair per page.
-    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(len(pages)))
-    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode())
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>")
-    for i, page in enumerate(pages):
-        stream_lines = [f"BT /F1 {FONT_SIZE} Tf {LEADING} TL {MARGIN} {PAGE_H - MARGIN} Td"]
-        for line in page:
-            stream_lines.append(f"({_escape(line)}) Tj T*")
-        stream_lines.append(
-            f"ET BT /F1 8 Tf {PAGE_W - MARGIN - 60} {MARGIN / 2} Td (Page {i + 1} of {len(pages)}) Tj ET"
-        )
-        stream = "\n".join(stream_lines).encode("latin-1")
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}] "
-            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {5 + 2 * i} 0 R >>".encode()
-        )
-        objects.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
-
-    out = bytearray(b"%PDF-1.4\n")
-    offsets = []
-    for number, obj in enumerate(objects, start=1):
-        offsets.append(len(out))
-        out += f"{number} 0 obj\n".encode() + obj + b"\nendobj\n"
-    xref = len(out)
-    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
-    for offset in offsets:
-        out += f"{offset:010d} 00000 n \n".encode()
-    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
-    return bytes(out)
+    """Render `title` and `lines` as a paginated A4 PDF document (any script)."""
+    pdf = _Doc(format="A4")
+    pdf.set_margins(MARGIN, MARGIN, MARGIN)
+    pdf.set_auto_page_break(True, margin=MARGIN + 5)
+    paths = dict(_font_paths())
+    fonts = _fonts_for(title + "".join(str(line) for line in lines))
+    for name in fonts:
+        pdf.add_font(name, fname=str(paths[name]))
+    if len(fonts) > 1:
+        pdf.set_fallback_fonts(fonts[1:], exact_match=False)
+    pdf.set_text_shaping(True)
+    pdf.add_page()
+    pdf.set_font(FONTS[0], size=TITLE_SIZE)
+    pdf.multi_cell(0, 8, title, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+    pdf.set_font(FONTS[0], size=FONT_SIZE)
+    for line in lines:
+        text = str(line).replace("\t", "    ")
+        if text.strip():
+            # Labels are English, so every line runs left-to-right at its base;
+            # an RTL run inside it (an Urdu purpose name) is still reordered.
+            pdf.multi_cell(0, LINE_HEIGHT, LRM + text, new_x="LMARGIN", new_y="NEXT")
+        else:
+            pdf.ln(LINE_HEIGHT)
+    return bytes(pdf.output())
