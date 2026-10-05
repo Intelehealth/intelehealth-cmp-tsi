@@ -1,7 +1,10 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 psycopg[binary]>=3.2
-PyJWT>=2.8
+PyJWT[crypto]>=2.8  # [crypto]: RS/ES keys for SSO id_token verification (SA-06)
 bcrypt>=4.1
 jsonschema>=4.22
 python-dotenv>=1.0
+fpdf2>=2.8  # UD-04 consent-history PDF
+uharfbuzz>=0.39  # text shaping for Indic and Perso-Arabic scripts in that PDF
+fonttools>=4.34  # font coverage lookup (also an fpdf2 dependency)
