@@ -41,9 +41,15 @@ SERVICE_RESOURCES = {
     "retention": "retention",
     "role": "role",
 }
-READ_PREFIXES = ("list_", "get_", "validate_", "download_", "export_")
+# Only side-effect-free prefixes classify as reads. validate_* is NOT one:
+# validate_fiduciary_domain writes the fiduciary row and validate_consent logs
+# the check and can notify the principal, so a validate_ function is a write
+# unless it is listed in FUNC_PERMISSIONS as a read.
+READ_PREFIXES = ("list_", "get_", "download_", "export_")
 FUNC_PERMISSIONS = {
     ("admindash", "list_access_logs"): "audit:read",
+    ("ropa", "validate_completeness"): "ropa:read",
+    ("retention", "validate_completeness"): "retention:read",
     ("role", "create_role"): "role:manage",
     ("role", "set_role_permissions"): "role:manage",
     ("role", "delete_role"): "role:manage",

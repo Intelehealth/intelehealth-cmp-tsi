@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from .. import db
@@ -8,6 +9,8 @@ from ..context import RequestContext
 from ..errors import ApiError
 from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, require, tenant_filter
 from .catalog import resolve_fiduciary
+
+log = logging.getLogger("dpdpcms.compliance")
 
 # Every status a purge request may carry: the DPO console's PURGE_* / LEGAL_HOLD
 # values plus the generic ones from the original schema comment (01_init.sql).
@@ -76,15 +79,24 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
             ("consent_validations", "user_id"),
             ("purge_requests", "user_id"),
         ):
-            cur.execute(
-                f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s",
-                (token, fiduciary_id, user_id),
-            )
+            cur.execute(f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s", (token, fiduciary_id, user_id))
             counts[table] = cur.rowcount
+        # Uploaded evidence goes with the grievance text: rows first (inside the
+        # transaction), files after commit.
+        cur.execute(
+            """
+            DELETE FROM grievance_attachments
+            WHERE grievance_id IN (SELECT id FROM grievances WHERE fiduciary_id = %s AND user_id = %s)
+            RETURNING storage_path
+            """,
+            (fiduciary_id, user_id),
+        )
+        attachment_paths = {row["storage_path"] for row in cur.fetchall()}
+        counts["grievance_attachments"] = len(attachment_paths)
         cur.execute(
             """
             UPDATE grievances SET user_id = %s, subject = '[erased]', description = '[erased]',
-                   communication_log = '[]'::jsonb, feedback_comment = NULL
+                   communication_log = '[]'::jsonb, feedback_comment = NULL, attachments = '[]'::jsonb
             WHERE fiduciary_id = %s AND user_id = %s
             """,
             (token, fiduciary_id, user_id),
@@ -96,7 +108,25 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
             "UPDATE purge_requests SET cms_erased_at = NOW() WHERE fiduciary_id = %s AND user_id = %s",
             (fiduciary_id, token),
         )
+    _remove_unreferenced_files(attachment_paths)
     return counts
+
+
+def _remove_unreferenced_files(paths: set[str]) -> None:
+    """Delete attachment files no remaining row points at.
+
+    Storage is content-addressed, so an identical file uploaded to another
+    grievance shares the path and must survive.
+    """
+    from pathlib import Path
+
+    for path in paths:
+        if db.one("SELECT 1 FROM grievance_attachments WHERE storage_path = %s LIMIT 1", (path,)):
+            continue
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            log.warning("Could not delete erased attachment file %s", path)
 
 
 class ComplianceService(Service):
@@ -552,17 +582,40 @@ class GrievanceService(Service):
             """,
             (gid, grievance["fiduciary_id"], file_name, content_type, len(data), digest, str(path), uploader),
         )
-        attachment = {
-            "attachment_id": str(row["id"]),
-            "file_name": file_name,
-            "sha256": digest,
-            "size_bytes": len(data),
-        }
+        attachment = {"attachment_id": str(row["id"]), "file_name": file_name, "sha256": digest, "size_bytes": len(data)}
         db.execute(
             "UPDATE grievances SET attachments = COALESCE(attachments, '[]'::jsonb) || %s::jsonb, last_updated_at = NOW() WHERE id = %s",
             (db.as_jsonb([attachment]), gid),
         )
         return {"success": True, **attachment}
+
+    def get_grievance_attachment(self, ctx: RequestContext) -> dict:
+        """GR-04: read back an attachment, with the same ownership rules as upload."""
+        import base64
+        from pathlib import Path
+
+        aid = require(ctx.payload.get("attachment_id"), "attachment_id")
+        scope, scope_params = tenant_filter(ctx, "a.fiduciary_id")
+        if ctx.auth_via_principal_jwt:
+            scope += " AND g.user_id = %s"
+            scope_params.append(ctx.principal_user_id)
+        row = db.one(
+            f"""
+            SELECT a.id, a.grievance_id, a.file_name, a.content_type, a.size_bytes, a.sha256,
+                   a.storage_path, a.uploaded_by, a.created_at
+            FROM grievance_attachments a JOIN grievances g ON g.id = a.grievance_id
+            WHERE a.id = %s{scope}
+            """,
+            (aid, *scope_params),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "Attachment not found.")
+        try:
+            data = Path(row["storage_path"]).read_bytes()
+        except OSError:
+            raise ApiError(410, "Gone", "The attachment file is no longer stored.") from None
+        meta = db.to_jsonable({k: v for k, v in row.items() if k != "storage_path"})
+        return {**meta, "attachment_id": str(row["id"]), "content_base64": base64.b64encode(data).decode("ascii")}
 
 
 class BreachService(Service):
@@ -611,8 +664,7 @@ class BreachService(Service):
     def get_breach(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT * FROM breach_incidents WHERE id = %s{scope}",
-            (require(ctx.payload.get("id"), "id"), *scope_params),
+            f"SELECT * FROM breach_incidents WHERE id = %s{scope}", (require(ctx.payload.get("id"), "id"), *scope_params)
         )
         if not row:
             raise ApiError(404, "Not Found", "Breach not found.")
