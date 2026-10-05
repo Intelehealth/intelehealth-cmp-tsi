@@ -28,18 +28,55 @@ _PRIVATE_NETS = (
     ipaddress.ip_network("203.0.113.0/24"),
     ipaddress.ip_network("224.0.0.0/4"),
     ipaddress.ip_network("240.0.0.0/4"),
+    ipaddress.ip_network("::/128"),
     ipaddress.ip_network("::1/128"),
+    # IPv6 forms that embed an IPv4 address. Normalised below where possible;
+    # listed here too so a form _embedded_ipv4 misses is still refused.
+    ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped
+    ipaddress.ip_network("::/96"),  # IPv4-compatible (deprecated)
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known prefix
+    ipaddress.ip_network("64:ff9b:1::/48"),  # NAT64 local-use
+    ipaddress.ip_network("100::/64"),  # discard-only
+    ipaddress.ip_network("2001::/23"),  # IETF protocol assignments (incl. Teredo)
+    ipaddress.ip_network("2001:db8::/32"),  # documentation
+    ipaddress.ip_network("2002::/16"),  # 6to4
+    ipaddress.ip_network("3fff::/20"),  # documentation
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("ff00::/8"),
 )
 
 
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 address an IPv6 literal tunnels to, if it has one."""
+    if ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    if ip.sixtofour:
+        return ip.sixtofour
+    if ip.teredo:
+        return ip.teredo[1]
+    packed = ip.packed
+    if packed[:12] == bytes(12) or ip in _NAT64_NET:  # IPv4-compatible / NAT64
+        return ipaddress.IPv4Address(packed[12:])
+    return None
+
+
 def _is_private(host: str) -> bool:
     try:
-        ip = ipaddress.ip_address(host)
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         return False
+    # An IPv6 address that tunnels to IPv4 (::ffff:169.254.169.254, NAT64...)
+    # is judged by the IPv4 address it reaches.
+    if isinstance(ip, ipaddress.IPv6Address):
+        inner = _embedded_ipv4(ip)
+        if inner is not None and (inner.is_unspecified or any(inner in net for net in _PRIVATE_NETS)):
+            return True
+    if ip.is_unspecified or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+        return True
     return any(ip in net for net in _PRIVATE_NETS)
 
 
