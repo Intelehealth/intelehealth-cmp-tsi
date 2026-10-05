@@ -34,6 +34,21 @@ GUARDIAN_MECHANISMS = {"EXISTING_ACCOUNT", "DIGILOCKER", "AADHAAR_VC", "KYC_PROV
 RETENTION_CESSATION_DAYS = 1095
 
 
+def _purpose_names(policy_content: Any, language: str) -> dict[str, str]:
+    """purpose id (lower-case) -> name, from the policy block for `language`,
+    falling back to English and then to whichever block the policy has."""
+    if not isinstance(policy_content, dict) or not policy_content:
+        return {}
+    block = policy_content.get(language) or policy_content.get("en") or next(iter(policy_content.values()))
+    if not isinstance(block, dict):
+        return {}
+    return {
+        str(p.get("id")).lower(): str(p["name"])
+        for p in block.get("data_processing_purposes") or []
+        if isinstance(p, dict) and p.get("id") and p.get("name")
+    }
+
+
 def _point_granted(point: dict) -> bool:
     """Data points are stored as {data_point_id, consent_granted, consent_expiry}; an expired
     grant no longer counts. 'status' is accepted as an older alias for consent_granted."""
@@ -585,11 +600,14 @@ class ConsentService(Service):
         user_id = require(ctx.payload.get("user_id"), "user_id")
         rows = db.all(
             """
-            SELECT timestamp, policy_id, policy_version, language_selected,
-                   consent_status_general, is_active_consent, data_point_consents
-            FROM consent_records
-            WHERE user_id = %s AND fiduciary_id = %s
-            ORDER BY timestamp DESC
+            SELECT cr.timestamp, cr.policy_id, cr.policy_version, cr.language_selected,
+                   cr.consent_status_general, cr.is_active_consent, cr.data_point_consents,
+                   p.policy_content
+            FROM consent_records cr
+            LEFT JOIN consent_policies p
+                   ON p.id = cr.policy_id AND p.version = cr.policy_version AND p.fiduciary_id = cr.fiduciary_id
+            WHERE cr.user_id = %s AND cr.fiduciary_id = %s
+            ORDER BY cr.timestamp DESC
             """,
             (user_id, fid),
         )
@@ -599,7 +617,8 @@ class ConsentService(Service):
         for row in rows:
             points = row.get("data_point_consents") or []
             purposes = ", ".join(
-                str(p.get("data_point_id") or p.get("id") or "") + ("" if _point_granted(p) else ":withdrawn")
+                str(p.get("data_point_id") or p.get("id") or "")
+                + ("" if _point_granted(p) else ":withdrawn")
                 for p in points
                 if isinstance(p, dict)
             )
@@ -630,21 +649,28 @@ class ConsentService(Service):
         if fmt == "pdf":
             from ..pdfgen import text_pdf
 
-            csv_lines = output.getvalue().splitlines()
-            lines = [
-                f"Principal: {user_id}",
-                f"Generated: {datetime.now(UTC).isoformat()}",
-                f"Records: {len(rows)}",
-                "",
-            ]
-            for entry in csv.reader(csv_lines[1:]):
-                stamp, policy, version, lang, status, active, purposes = entry
+            # UD-04: purposes are named in the language the principal consented
+            # in (or `language`, if asked), so the export reads in their language.
+            language = ctx.payload.get("language")
+            lines = [f"Principal: {user_id}", f"Generated: {datetime.now(UTC).isoformat()}", f"Records: {len(rows)}", ""]
+            for row in rows:
+                lang = str(language or row["language_selected"] or "en")
+                names = _purpose_names(row.get("policy_content"), lang)
+                stamp = row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else row["timestamp"]
                 lines += [
-                    f"{stamp}  {status}  ({'active' if active == 'yes' else 'inactive'})",
-                    f"  Policy {policy} v{version}, language {lang}",
-                    f"  Purposes: {purposes or '-'}",
-                    "",
+                    f"{stamp}  {row['consent_status_general']}  ({'active' if row['is_active_consent'] else 'inactive'})",
+                    f"  Policy {row['policy_id']} v{row['policy_version']}, language {row['language_selected']}",
+                    "  Purposes:",
                 ]
+                points = [p for p in row.get("data_point_consents") or [] if isinstance(p, dict)]
+                for point in points:
+                    pid = str(point.get("data_point_id") or point.get("id") or "")
+                    name = names.get(pid.lower())
+                    label = f"{name} ({pid})" if name and name != pid else pid
+                    lines.append(f"    - {label}: {'granted' if _point_granted(point) else 'withdrawn'}")
+                if not points:
+                    lines.append("    -")
+                lines.append("")
             return text_pdf("Consent history", lines)
         return output.getvalue()
 
@@ -786,9 +812,7 @@ class ConsentService(Service):
             raise ApiError(404, "Not Found", "No active consent found.")
         content = record.get("policy_content") or {}
         block = content.get(language) or content.get("en") or next(iter(content.values()), {})
-        purposes = {
-            str(p.get("id")).lower(): p for p in (block.get("data_processing_purposes") or []) if isinstance(p, dict)
-        }
+        purposes = {str(p.get("id")).lower(): p for p in (block.get("data_processing_purposes") or []) if isinstance(p, dict)}
         wanted = {pid.lower() for pid in _normalise_purpose_ids(ctx.payload)}
         out = []
         for point in record.get("data_point_consents") or []:
@@ -845,11 +869,7 @@ class ConsentService(Service):
                 # active grant; withdrawing something that was never granted is an
                 # error an integrator can act on, not a silent success.
                 if purpose_ids:
-                    granted = {
-                        str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower()
-                        for p in points
-                        if isinstance(p, dict) and _point_granted(p)
-                    }
+                    granted = {str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower() for p in points if isinstance(p, dict) and _point_granted(p)}
                     missing = [pid for pid in purpose_ids if pid.lower() not in granted]
                     if missing:
                         raise ApiError(
@@ -1140,20 +1160,44 @@ class PrincipalService(Service):
         return False
 
 
+# Wallet sync actions and the concrete function each one runs. dispatch()
+# rewrites _func to the target BEFORE authentication, so the API-key scope map,
+# the client allow-list and the admin role gate all judge the real operation -
+# a READ-scoped key that sends action=GRANT_CONSENT is checked as record_consent.
+WALLET_ACTIONS = {
+    "GET_CONSENT_DETAILS": "get_consent_record_details",
+    "REVOKE_PURPOSE": "erasure_request",
+    "GLOBAL_ERASURE": "erasure_request",
+    "GRANT_CONSENT": "record_consent",
+    "GET_POLICY_PURPOSES": "get_active_policy",
+}
+
+
+def resolve_wallet_action(payload: dict) -> None:
+    """Point a wallet call's _func at the function its `action` runs (in place)."""
+    action = payload.get("action")
+    if not action and str(payload.get("_func") or "").upper() in WALLET_ACTIONS:
+        action = payload["_func"]
+    if not action:
+        return
+    target = WALLET_ACTIONS.get(str(action).upper())
+    if not target:
+        raise ApiError(400, "Bad Request", f"Unsupported wallet action: {action}")
+    payload["_func"] = target
+
+
 class WalletService(Service):
     def sync(self, ctx: RequestContext) -> dict:
         return {"success": True}
 
     def handle(self, ctx: RequestContext) -> Any:
-        action = str(ctx.payload.get("action") or ctx.payload.get("_func") or "").upper()
-        if action == "GET_CONSENT_DETAILS":
-            return ConsentService().get_consent_record_details(ctx)
-        if action in {"REVOKE_PURPOSE", "GLOBAL_ERASURE"}:
-            return ConsentService().erasure_request(ctx)
-        if action == "GRANT_CONSENT":
-            return ConsentService().record_consent(ctx)
-        if action == "GET_POLICY_PURPOSES":
+        func = ctx.func
+        if func == "sync":
+            return self.sync(ctx)
+        if func == "get_active_policy":
             from .catalog import PolicyService
 
             return PolicyService().get_active_policy(ctx)
-        return {"success": True}
+        if func in set(WALLET_ACTIONS.values()):
+            return getattr(ConsentService(), func)(ctx)
+        raise ApiError(400, "Bad Request", f"Unsupported function: {func}")
