@@ -81,4 +81,4 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image
-        run: docker build -f python_port/Docn:ci .
+        run: docker build -f python_port/Dockerfile -t tsi-dpdp-cms-python:ci .
