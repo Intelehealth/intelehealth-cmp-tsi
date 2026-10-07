@@ -32,6 +32,12 @@ services:
     build:
       context: .
       dockerfile: python_port/Dockerfile
+    # Optional settings from .env (DIGILOCKER_VERIFY_URL, ATTACHMENT_MAX_BYTES,
+    # SSO_*, ALLOW_DUMMY_OTP...). Keys under `environment:` below take precedence,
+    # so POSTGRES_HOST and TSI_EXPORT_PATH keep their container values.
+    env_file:
+      - path: .env
+        required: false
     image: tsi-dpdp-cms-python:local
     container_name: tsi_dpdp_cms_py_server
     restart: unless-stopped
@@ -43,7 +49,9 @@ services:
       POSTGRES_USER: "${POSTGRES_USER:-tsi_admin}"
       POSTGRES_PASSWD: "${POSTGRES_PASSWD:-secure_dev_password}"
       TSI_DPDP_CMS_ENV: "${TSI_DPDP_CMS_ENV:-local}"
-      TSI_EXPORT_PATH: "${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}"
+      # Fixed in-container path. TSI_EXPORT_PATH in .env (e.g. ./exports) is for
+      # native uvicorn runs only and must not leak into the volume mount.
+      TSI_EXPORT_PATH: "/var/lib/tsi/exports/"
       JWT_SECRET: "${JWT_SECRET:-tsi-dpdp-cms-local-dev-secret-do-not-use-in-production}"
       DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:-local-dev-enc-key-do-not-use-in-production}"
       TSI_LOOKUP_SALT: "${TSI_LOOKUP_SALT:-local-dev-lookup-salt-do-not-use-in-production}"
@@ -51,7 +59,7 @@ services:
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:8091}"
       BRAND_NAME: "${BRAND_NAME:-TSI DPDP CMS}"
     volumes:
-      - tsi_py_reports_data:${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}:rw
+      - tsi_py_reports_data:/var/lib/tsi/exports/:rw
     depends_on:
       postgres_db:
         condition: service_healthy
@@ -64,6 +72,12 @@ services:
     build:
       context: .
       dockerfile: python_port/Dockerfile
+    # Optional settings from .env (DIGILOCKER_VERIFY_URL, ATTACHMENT_MAX_BYTES,
+    # SSO_*, ALLOW_DUMMY_OTP...). Keys under `environment:` below take precedence,
+    # so POSTGRES_HOST and TSI_EXPORT_PATH keep their container values.
+    env_file:
+      - path: .env
+        required: false
     image: tsi-dpdp-cms-python:local
     container_name: tsi_dpdp_cms_py_worker
     restart: unless-stopped
@@ -74,7 +88,9 @@ services:
       POSTGRES_USER: "${POSTGRES_USER:-tsi_admin}"
       POSTGRES_PASSWD: "${POSTGRES_PASSWD:-secure_dev_password}"
       TSI_DPDP_CMS_ENV: "${TSI_DPDP_CMS_ENV:-local}"
-      TSI_EXPORT_PATH: "${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}"
+      # Fixed in-container path. TSI_EXPORT_PATH in .env (e.g. ./exports) is for
+      # native uvicorn runs only and must not leak into the volume mount.
+      TSI_EXPORT_PATH: "/var/lib/tsi/exports/"
       JWT_SECRET: "${JWT_SECRET:-tsi-dpdp-cms-local-dev-secret-do-not-use-in-production}"
       DB_ENCRYPTION_KEY: "${DB_ENCRYPTION_KEY:-local-dev-enc-key-do-not-use-in-production}"
       TSI_LOOKUP_SALT: "${TSI_LOOKUP_SALT:-local-dev-lookup-salt-do-not-use-in-production}"
@@ -92,7 +108,7 @@ services:
       PURGE_NOTICE_HOURS: "${PURGE_NOTICE_HOURS:-48}"
       GRIEVANCE_ESCALATION_HOURS: "${GRIEVANCE_ESCALATION_HOURS:-24}"
     volumes:
-      - tsi_py_reports_data:${TSI_EXPORT_PATH:-/var/lib/tsi/exports/}:rw
+      - tsi_py_reports_data:/var/lib/tsi/exports/:rw
     depends_on:
       postgres_db:
         condition: service_healthy
