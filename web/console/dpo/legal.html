@@ -265,6 +265,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Setup & Connectivity ---
     const API_URL = ENV_SERVER_URL + '/api/v1/admin/legal';
     const AUTH_TOKEN = localStorage.getItem('authToken');
@@ -296,12 +301,12 @@
                 }
                 tbody.innerHTML = list.map(c => `
                     <tr class="hover:bg-teal-50/30 transition-colors group">
-                        <td class="py-4 px-2 font-mono text-[11px] text-slate-500">...${c.id.slice(-12).toUpperCase()}</td>
-                        <td class="py-4 px-2 font-bold text-slate-700 text-xs">${c.principal_id}</td>
-                        <td class="py-4 px-2 text-slate-600 font-medium text-xs underline decoration-dotted">${c.case_ref || 'GENERAL_TRACE'}</td>
-                        <td class="py-4 px-2 text-slate-400 text-[10px] font-bold">${new Date(c.timestamp).toLocaleString()}</td>
+                        <td class="py-4 px-2 font-mono text-[11px] text-slate-500">...${esc(c.id.slice(-12).toUpperCase())}</td>
+                        <td class="py-4 px-2 font-bold text-slate-700 text-xs">${esc(c.principal_id)}</td>
+                        <td class="py-4 px-2 text-slate-600 font-medium text-xs underline decoration-dotted">${esc(c.case_ref || 'GENERAL_TRACE')}</td>
+                        <td class="py-4 px-2 text-slate-400 text-[10px] font-bold">${esc(new Date(c.timestamp).toLocaleString())}</td>
                         <td class="py-4 px-2 text-right">
-                            <button onclick="viewCertificate('${c.id}')" class="bg-slate-100 text-slate-600 px-3 py-1 rounded-lg font-black hover:bg-teal-600 hover:text-white text-[9px] uppercase tracking-tighter transition-all">Open Viewer</button>
+                            <button data-cert-id="${esc(c.id)}" class="bg-slate-100 text-slate-600 px-3 py-1 rounded-lg font-black hover:bg-teal-600 hover:text-white text-[9px] uppercase tracking-tighter transition-all">Open Viewer</button>
                         </td>
                     </tr>
                 `).join('');
@@ -310,6 +315,12 @@
             tbody.innerHTML = '<tr><td colspan="5" class="py-12 text-center text-red-500 font-black">Registry Connection Failed.</td></tr>'; 
         }
     }
+
+    // Viewer buttons use data-cert-id + delegation instead of inline onclick (CF-02).
+    document.getElementById('cert-table-body').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-cert-id]');
+        if (btn) viewCertificate(btn.getAttribute('data-cert-id'));
+    });
 
     /**
      * Retrieves and renders a specific certificate with its hash-chained trail.
@@ -347,9 +358,9 @@
             const trailBody = document.getElementById('view-trail-body');
             trailBody.innerHTML = (data.evidence_trail || []).map(t => `
                 <tr class="hover:bg-slate-50">
-                    <td class="p-2 font-mono text-slate-500">${t.ts}</td>
-                    <td class="p-2 font-black text-slate-800 uppercase tracking-tighter">${t.act}</td>
-                    <td class="p-2 font-mono text-teal-700 break-all border-l border-slate-100">${t.hash}</td>
+                    <td class="p-2 font-mono text-slate-500">${esc(t.ts)}</td>
+                    <td class="p-2 font-black text-slate-800 uppercase tracking-tighter">${esc(t.act)}</td>
+                    <td class="p-2 font-mono text-teal-700 break-all border-l border-slate-100">${esc(t.hash)}</td>
                 </tr>
             `).join('');
 

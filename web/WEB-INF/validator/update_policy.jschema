@@ -46,6 +46,10 @@
                   },
                   "is_mandatory_for_service": {
                     "type": "boolean"
+                  },
+                  "withdrawal_consequence": {
+                    "type": "string",
+                    "description": "CW-04: what the principal loses or what happens to their data if they withdraw this purpose."
                   }
                 },
                 "required": [
@@ -59,7 +63,9 @@
             },
             "data_subject_categories": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "security_measures": {
               "type": "string"
@@ -69,12 +75,24 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "name":    { "type": "string" },
-                  "country": { "type": "string" },
-                  "role":    { "type": "string" },
-                  "contact": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "country": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  },
+                  "contact": {
+                    "type": "string"
+                  }
                 },
-                "required": ["name", "country", "role"]
+                "required": [
+                  "name",
+                  "country",
+                  "role"
+                ]
               }
             },
             "cross_border_transfers": {
@@ -82,11 +100,20 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "destination_country": { "type": "string" },
-                  "safeguard":           { "type": "string" },
-                  "processor":           { "type": "string" }
+                  "destination_country": {
+                    "type": "string"
+                  },
+                  "safeguard": {
+                    "type": "string"
+                  },
+                  "processor": {
+                    "type": "string"
+                  }
                 },
-                "required": ["destination_country", "safeguard"]
+                "required": [
+                  "destination_country",
+                  "safeguard"
+                ]
               }
             }
           },

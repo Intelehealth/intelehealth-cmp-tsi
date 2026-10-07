@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "_func",
+    "id_token"
+  ],
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "id_token": {
+      "type": "string"
+    }
+  }
+}

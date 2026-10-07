@@ -300,6 +300,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Configuration ---
     const API_URL_KEYS = '/api/v1/admin/apikey';
     const API_URL_FIDUCIARIES_LIST = '/api/v1/admin/fiduciary';
@@ -362,7 +367,7 @@
         default:
           colorClass = 'bg-gray-100 text-gray-800';
       }
-      return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+      return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(status)}</span>`;
     }
 
     function getFiduciaryName(id) {
@@ -382,22 +387,24 @@
         
         const actionsHtml = `
             ${showRevoke ?
-                `<button class="text-red-600 hover:text-red-900 font-medium text-sm" onclick="revokeKey('${key.key_id}')">Revoke</button>`
+                `<button class="revoke-key-btn text-red-600 hover:text-red-900 font-medium text-sm" data-key-id="${esc(key.key_id)}">Revoke</button>`
                 : `<span class="text-gray-500 text-xs">Revoked</span>`}
         `;
 
         row.innerHTML = `
-            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">...${keyHashSuffix}</td>
-            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${getFiduciaryName(key.fiduciary_id)}</td>
-            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${targetEntity}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">...${esc(keyHashSuffix)}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${esc(getFiduciaryName(key.fiduciary_id))}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${esc(targetEntity)}</td>
             <td class="px-4 py-3 text-sm text-gray-600">
-                ${key.permissions ? key.permissions.join(', ') : 'None'}
+                ${esc(key.permissions ? key.permissions.join(', ') : 'None')}
             </td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(key.status)}</td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">
                 ${actionsHtml}
             </td>
         `;
+        const revokeBtn = row.querySelector('.revoke-key-btn');
+        if (revokeBtn) revokeBtn.addEventListener('click', () => revokeKey(key.key_id));
         return row;
     }
 

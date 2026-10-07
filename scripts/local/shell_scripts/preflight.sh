@@ -13,7 +13,7 @@ command -v curl >/dev/null 2>&1 && ok 'curl available.' || { fail 'curl not foun
 
 step '.env'
 if [ ! -f "$ENV_FILE" ]; then
-  fail '.env missing. Run scripts/local/init-env.sh'; failed=1
+  fail '.env missing. Run scripts/local/shell_scripts/init-env.sh'; failed=1
 else
   for key in "${REQUIRED_SECRETS[@]}"; do
     value="$(env_get "$key")"

@@ -17,6 +17,18 @@
     },
     "limit": {
       "type": "number"
+    },
+    "purpose_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "start_date": {
+      "type": "string"
+    },
+    "end_date": {
+      "type": "string"
     }
   },
   "required": [

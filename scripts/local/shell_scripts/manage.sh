@@ -25,7 +25,7 @@ case "$action" in
   test)
     cd "$REPO_ROOT/python_port"
     py="$(command -v python3 || command -v python)"
-    "$py" -m pip install -q -r requirements.txt pytest
+    "$py" -m pip install -q -r requirements-dev.txt
     "$py" -m pytest -q tests
     ;;
   reset)

@@ -10,7 +10,13 @@ export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# The repo root is the nearest ancestor holding docker-compose.yml, so the scripts
+# keep working if they are moved to another folder depth.
+REPO_ROOT="$SCRIPT_DIR"
+while [ ! -f "$REPO_ROOT/docker-compose.yml" ] && [ "$REPO_ROOT" != "/" ]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+[ -f "$REPO_ROOT/docker-compose.yml" ] || { echo "docker-compose.yml not found above $SCRIPT_DIR" >&2; exit 1; }
 ENV_FILE="$REPO_ROOT/.env"
 APP_URL="${APP_URL:-http://localhost:8091}"
 

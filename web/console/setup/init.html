@@ -82,6 +82,16 @@
                    class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
         </div>
 
+        <!-- Bootstrap Token -->
+        <div>
+            <label for="bootstrap-token" class="block text-sm font-medium text-gray-700">Bootstrap Token</label>
+            <input type="password" id="bootstrap-token" name="bootstrap_token" required placeholder="Server BOOTSTRAP_TOKEN"
+                   class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+            <p class="mt-1 text-xs text-gray-500">
+                Provided by the server administrator; matches the <code>BOOTSTRAP_TOKEN</code> environment variable.
+            </p>
+        </div>
+
         <!-- Submit Button -->
         <button type="submit" id="setup-btn"
                 class="w-full primary-bg text-white px-4 py-2 mt-4 rounded-md font-semibold hover:bg-primary-dark transition duration-150">
@@ -110,6 +120,7 @@
             const nameInput = document.getElementById('name');
             const passwordInput = document.getElementById('password');
             const passwordConfirmInput = document.getElementById('password-confirm');
+            const bootstrapTokenInput = document.getElementById('bootstrap-token');
 
             function displayMessage(text, isError) {
                 messageArea.textContent = text;
@@ -130,8 +141,15 @@
                 const name = nameInput.value.trim();
                 const password = passwordInput.value;
                 const passwordConfirm = passwordConfirmInput.value;
+                const bootstrapToken = bootstrapTokenInput.value.trim();
 
                 // Client-side Validation Checks
+                if (!bootstrapToken) {
+                    displayMessage("Error: Bootstrap token is required.", true);
+                    setupBtn.disabled = false;
+                    setupBtn.textContent = 'Finalize Setup & Create Admin';
+                    return;
+                }
                 if (password.length < 12) {
                     displayMessage("Error: Password must be at least 12 characters long.", true);
                     setupBtn.disabled = false;
@@ -151,7 +169,8 @@
                         "_func": "initial_setup",
                         "email": email,
                         "name": name,
-                        "password": password
+                        "password": password,
+                        "bootstrap_token": bootstrapToken
                     };
 
                     // 2. Perform API Setup Call

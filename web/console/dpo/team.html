@@ -202,6 +202,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     const API_USERS = '/api/v1/admin/operator';
     const AUTH_TOKEN = localStorage.getItem('authToken');
 
@@ -252,16 +257,16 @@
                     if (isInactive) {
                         actionsHtml = `<span class="text-[9px] font-black text-slate-400 uppercase tracking-tighter italic self-center">Account Locked</span>`;
                     } else {
-                        actionsHtml += `<button onclick="editUser('${u.user_id}')" class="text-indigo-600 font-bold hover:underline text-xs">Edit</button>`;
-                        actionsHtml += `<button onclick="requestRecoveryKey('${u.user_id}')" class="text-amber-600 font-black hover:underline text-[10px] uppercase tracking-tighter">Recovery Key</button>`;
-                        actionsHtml += `<button onclick="deactivateUser('${u.user_id}')" class="text-red-500 font-bold hover:underline text-xs">Deactivate</button>`;
+                        actionsHtml += `<button data-action="edit" data-user-id="${esc(u.user_id)}" class="text-indigo-600 font-bold hover:underline text-xs">Edit</button>`;
+                        actionsHtml += `<button data-action="recovery" data-user-id="${esc(u.user_id)}" class="text-amber-600 font-black hover:underline text-[10px] uppercase tracking-tighter">Recovery Key</button>`;
+                        actionsHtml += `<button data-action="deactivate" data-user-id="${esc(u.user_id)}" class="text-red-500 font-bold hover:underline text-xs">Deactivate</button>`;
                     }
 
                     return `
                     <tr class="hover:bg-slate-50 transition-colors">
-                        <td class="px-4 py-4 font-bold text-slate-700">${u.username}</td>
-                        <td class="px-4 py-4 text-xs text-slate-500">${u.email}</td>
-                        <td class="px-4 py-4"><span class="px-3 py-1 text-[10px] font-black rounded-full ${statusColor} uppercase">${u.status}</span></td>
+                        <td class="px-4 py-4 font-bold text-slate-700">${esc(u.username)}</td>
+                        <td class="px-4 py-4 text-xs text-slate-500">${esc(u.email)}</td>
+                        <td class="px-4 py-4"><span class="px-3 py-1 text-[10px] font-black rounded-full ${statusColor} uppercase">${esc(u.status)}</span></td>
                         <td class="px-4 py-4 flex items-center gap-3">
                             ${actionsHtml}
                         </td>
@@ -373,6 +378,17 @@
         localStorage.clear();
         window.location.href = "../index.html";
     }
+
+    // Row actions use data-* attributes + delegation instead of inline onclick (CF-02).
+    document.getElementById('user-table-body').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-action]');
+        if (!btn) return;
+        const id = btn.getAttribute('data-user-id');
+        const action = btn.getAttribute('data-action');
+        if (action === 'edit') editUser(id);
+        else if (action === 'recovery') requestRecoveryKey(id);
+        else if (action === 'deactivate') deactivateUser(id);
+    });
 
     loadUsers();
 </script>

@@ -300,6 +300,11 @@
 </div>
 
 <script>
+function esc(s) {
+    if (s == null) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+}
+
 const API_URL = '/api/v1/admin/fiduciary';
 const AUTH_TOKEN = localStorage.getItem('authToken');
 const USER_NAME = localStorage.getItem('username');
@@ -373,7 +378,7 @@ function createStatusBadge(status) {
         default:
             colorClass = 'bg-gray-100 text-gray-800';
     }
-    return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+    return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(status)}</span>`;
 }
 
 function createFiduciaryRow(fiduciary) {
@@ -383,22 +388,25 @@ function createFiduciaryRow(fiduciary) {
     const showDeactivate = fiduciary.status === 'ACTIVE' || fiduciary.status === 'PENDING';
 
     const actionsHtml = `
-        <button class="text-indigo-600 hover:text-indigo-900 font-medium text-sm mr-2" onclick="editFiduciary('${fiduciary.fiduciary_id}')">Edit</button>
+        <button class="edit-fiduciary-btn text-indigo-600 hover:text-indigo-900 font-medium text-sm mr-2">Edit</button>
         ${showDeactivate ?
-            `<button class="text-red-600 hover:text-red-900 font-medium text-sm" onclick="deactivateFiduciary('${fiduciary.fiduciary_id}')">Deactivate</button>`
+            `<button class="deactivate-fiduciary-btn text-red-600 hover:text-red-900 font-medium text-sm">Deactivate</button>`
             : `<span class="text-gray-500 text-xs">Access Suspended</span>`}
     `;
 
     row.innerHTML = `
-        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${fiduciary.name || 'N/A'}</td>
-        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${fiduciary.primary_domain || 'N/A'}</td>
-        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${fiduciary.cms_cname || 'N/A'}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${esc(fiduciary.name || 'N/A')}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${esc(fiduciary.primary_domain || 'N/A')}</td>
+        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${esc(fiduciary.cms_cname || 'N/A')}</td>
         <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(fiduciary.status)}</td>
        <!-- <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(fiduciary.domain_validation_status || 'PENDING')}</td> -->
         <td class="px-4 py-3 whitespace-nowrap text-sm">
             ${actionsHtml}
         </td>
     `;
+    row.querySelector('.edit-fiduciary-btn').addEventListener('click', () => editFiduciary(fiduciary.fiduciary_id));
+    const deactivateBtn = row.querySelector('.deactivate-fiduciary-btn');
+    if (deactivateBtn) deactivateBtn.addEventListener('click', () => deactivateFiduciary(fiduciary.fiduciary_id));
     return row;
 }
 

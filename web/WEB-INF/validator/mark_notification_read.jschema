@@ -6,12 +6,29 @@
     "_func": {
       "type": "string"
     },
+    "fiduciary_id": {
+      "type": "string"
+    },
     "id": {
+      "type": "string"
+    },
+    "notification_id": {
       "type": "string"
     }
   },
   "required": [
-    "_func",
-    "id"
+    "_func"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "required": [
+        "notification_id"
+      ]
+    }
   ]
 }
