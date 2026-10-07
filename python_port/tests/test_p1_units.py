@@ -90,11 +90,19 @@ def test_time_bound_without_expiry_rejected():
     with pytest.raises(ApiError):
         validate_duration_flags({"en": {"data_processing_purposes": [{"id": "p1", "duration_type": "TIME_BOUND"}]}})
     with pytest.raises(ApiError):
-        validate_duration_flags({"en": {"data_processing_purposes": [{"id": "p1", "duration_type": "TIME_BOUND", "consent_expiry_days": 0}]}})
+        validate_duration_flags(
+            {
+                "en": {
+                    "data_processing_purposes": [{"id": "p1", "duration_type": "TIME_BOUND", "consent_expiry_days": 0}]
+                }
+            }
+        )
 
 
 def test_time_bound_with_expiry_accepted():
-    validate_duration_flags({"en": {"data_processing_purposes": [{"id": "p1", "duration_type": "TIME_BOUND", "consent_expiry_days": 30}]}})
+    validate_duration_flags(
+        {"en": {"data_processing_purposes": [{"id": "p1", "duration_type": "TIME_BOUND", "consent_expiry_days": 30}]}}
+    )
 
 
 def _principal_ctx(**payload: str) -> RequestContext:

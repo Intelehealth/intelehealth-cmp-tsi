@@ -628,8 +628,7 @@ class ConsentService(Service):
         for row in rows:
             points = row.get("data_point_consents") or []
             purposes = ", ".join(
-                str(p.get("data_point_id") or p.get("id") or "")
-                + ("" if _point_granted(p) else ":withdrawn")
+                str(p.get("data_point_id") or p.get("id") or "") + ("" if _point_granted(p) else ":withdrawn")
                 for p in points
                 if isinstance(p, dict)
             )
@@ -663,7 +662,12 @@ class ConsentService(Service):
             # UD-04: purposes are named in the language the principal consented
             # in (or `language`, if asked), so the export reads in their language.
             language = ctx.payload.get("language")
-            lines = [f"Principal: {user_id}", f"Generated: {datetime.now(UTC).isoformat()}", f"Records: {len(rows)}", ""]
+            lines = [
+                f"Principal: {user_id}",
+                f"Generated: {datetime.now(UTC).isoformat()}",
+                f"Records: {len(rows)}",
+                "",
+            ]
             for row in rows:
                 lang = str(language or row["language_selected"] or "en")
                 names = _purpose_names(row.get("policy_content"), lang)
@@ -844,7 +848,9 @@ class ConsentService(Service):
             content = record.get("policy_content") or {}
             block = content.get(language) or content.get("en") or next(iter(content.values()), {})
             purposes = {
-                str(p.get("id")).lower(): p for p in (block.get("data_processing_purposes") or []) if isinstance(p, dict)
+                str(p.get("id")).lower(): p
+                for p in (block.get("data_processing_purposes") or [])
+                if isinstance(p, dict)
             }
             for point in record.get("data_point_consents") or []:
                 if isinstance(point, dict) and _point_granted(point):
