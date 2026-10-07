@@ -133,6 +133,20 @@ class AuditService(Service):
         require_audit_access(ctx)
         return list_logs(ctx.payload)
 
+    def verify_audit_chain(self, ctx: RequestContext) -> dict:
+        """LG-04: recompute the hash-chained ledger and report any break.
+
+        The chain spans every tenant, so only a global (unscoped) operator may run
+        it; a tenant-scoped auditor would otherwise learn other tenants' row ids."""
+        from ..audit import verify_chain
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        if ctx.fiduciary_id:
+            raise ApiError(403, "Forbidden", "Audit chain verification spans all tenants; a global administrator must run it.")
+        limit = min(max(int(ctx.payload.get("limit") or 100_000), 1), 1_000_000)
+        return verify_chain(limit)
+
     def list_recent_audit_logs(self, ctx: RequestContext) -> list[dict]:
         from .roles import require_audit_access
 
@@ -228,7 +242,9 @@ class NotificationService(Service):
         )
 
     def mark_notification_read(self, ctx: RequestContext) -> dict:
-        nid = require(ctx.payload.get("notification_id"), "notification_id")
+        # NT-05: the schema and the documented sample name the field `id`; older
+        # callers send `notification_id`. Accept either.
+        nid = require(ctx.payload.get("notification_id") or ctx.payload.get("id"), "notification_id")
         where = ["id = %s"]
         params: list = [nid]
         if ctx.fiduciary_id:
@@ -243,7 +259,7 @@ class NotificationService(Service):
         if read:
             row = db.one(
                 "SELECT recipient_id, fiduciary_id FROM notifications WHERE id = %s",
-                (ctx.payload.get("notification_id"),),
+                (nid,),
             )
             if row:
                 log_event(

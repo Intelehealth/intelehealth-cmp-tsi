@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from . import db
 from .context import ADMIN_FIDUCIARY_ID
@@ -13,6 +13,52 @@ from .security import pseudonym
 # same predecessor rather than forking the chain. Held for the length of the
 # transaction (xact lock) and released on commit.
 AUDIT_CHAIN_LOCK = 724521053  # arbitrary constant bigint advisory lock key
+
+# LG-04: version 2 hashes every stored column, exactly as stored, so the chain can
+# be recomputed from the table alone. Version-1 rows (python_port rows written
+# before this change) hashed the raw user_id and only a few columns; for those
+# only the prev/current linkage can be checked.
+HASH_VERSION = 2
+_HASHED_COLUMNS = (
+    "id",
+    "fiduciary_id",
+    "timestamp",
+    "user_id",
+    "service_type",
+    "service_id",
+    "audit_action",
+    "context_details",
+    "purpose_id",
+    "consent_status",
+    "initiator",
+    "source_ip",
+)
+
+
+_UUID_COLUMNS = {"id", "fiduciary_id", "service_id"}
+
+
+def _canonical_value(value, column: str = "") -> str:
+    if value is None:
+        return ""
+    if column in _UUID_COLUMNS:
+        # UUID columns read back lower-case and hyphenated whatever was written.
+        try:
+            return str(uuid.UUID(str(value)))
+        except ValueError:
+            return str(value)
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(UTC).replace(tzinfo=None)
+        return value.isoformat(timespec="microseconds")
+    return str(value)
+
+
+def row_hash(previous_hash: str | None, row: dict) -> str:
+    """The v2 hash of one audit row, from its stored column values."""
+    parts = [previous_hash or ""] + [_canonical_value(row.get(col), col) for col in _HASHED_COLUMNS]
+    # JSON-encode the parts so a '|' inside a value cannot shift field boundaries.
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def log_event(
@@ -30,14 +76,35 @@ def log_event(
 ) -> None:
     context = details if isinstance(details, str) else json.dumps(details or {}, default=str)
     fid = fiduciary_id if fiduciary_id and fiduciary_id != ADMIN_FIDUCIARY_ID else None
-    timestamp = datetime.now(UTC)
+    row = {
+        "id": str(uuid.uuid4()),
+        "fiduciary_id": fid,
+        "user_id": pseudonym(user_id) if user_id else "SYSTEM",
+        "service_type": service_type,
+        "service_id": service_id,
+        "audit_action": action,
+        "context_details": context,
+        "purpose_id": purpose_id,
+        "consent_status": consent_status,
+        "initiator": initiator,
+        "source_ip": source_ip,
+    }
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (AUDIT_CHAIN_LOCK,))
-        cur.execute("SELECT current_log_hash FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
+        cur.execute("SELECT current_log_hash, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
         previous = cur.fetchone()
         previous_hash = previous["current_log_hash"] if previous else ""
-        canonical = "|".join([previous_hash or "", timestamp.isoformat(), user_id or "", service_type, action, context])
-        current_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        # audit_logs.timestamp is TIMESTAMP (no zone): store naive UTC so the value
+        # hashed is the value stored, whatever the session TimeZone. Keep it
+        # strictly increasing so timestamp order is chain order for the verifier.
+        timestamp = datetime.now(UTC).replace(tzinfo=None)
+        last = previous.get("timestamp") if previous else None
+        if last is not None and last.tzinfo is not None:
+            last = last.astimezone(UTC).replace(tzinfo=None)
+        if last is not None and timestamp <= last:
+            timestamp = last + timedelta(microseconds=1)
+        row["timestamp"] = timestamp
+        current_hash = row_hash(previous_hash, row)
         cur.execute(
             """
             INSERT INTO audit_logs
@@ -47,23 +114,64 @@ def log_event(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                str(uuid.uuid4()),
-                fid,
-                timestamp,
-                pseudonym(user_id) if user_id else "SYSTEM",
-                service_type,
-                service_id,
-                action,
-                context,
+                row["id"],
+                row["fiduciary_id"],
+                row["timestamp"],
+                row["user_id"],
+                row["service_type"],
+                row["service_id"],
+                row["audit_action"],
+                row["context_details"],
                 previous_hash,
                 current_hash,
-                db.as_jsonb({"python_port": True}),
-                purpose_id,
-                consent_status,
-                initiator,
-                source_ip,
+                db.as_jsonb({"python_port": True, "hash_v": HASH_VERSION}),
+                row["purpose_id"],
+                row["consent_status"],
+                row["initiator"],
+                row["source_ip"],
             ),
         )
+
+
+def verify_chain(limit: int = 100_000) -> dict:
+    """LG-04: walk the ledger oldest-first and recompute it.
+
+    Every row's prev_log_hash must equal its predecessor's current_log_hash, and a
+    v2 row's current_log_hash must equal row_hash() of its stored columns. Rows
+    from before v2 are checked for linkage only and counted as legacy.
+    """
+    cols = ", ".join(_HASHED_COLUMNS)
+    rows = db.all(
+        f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
+        "ORDER BY timestamp ASC, id ASC LIMIT %s",
+        (limit,),
+    )
+    broken: list[dict] = []
+    legacy = 0
+    previous_hash = None
+    for index, row in enumerate(rows):
+        meta = row.get("system_metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                meta = {}
+        if index > 0 and (row.get("prev_log_hash") or "") != (previous_hash or ""):
+            broken.append({"id": str(row["id"]), "reason": "LINK_MISMATCH"})
+        if meta.get("hash_v") == HASH_VERSION:
+            if row_hash(row.get("prev_log_hash"), row) != row.get("current_log_hash"):
+                broken.append({"id": str(row["id"]), "reason": "CONTENT_MISMATCH"})
+        else:
+            legacy += 1
+        previous_hash = row.get("current_log_hash")
+    return {
+        "intact": not broken,
+        "rows_checked": len(rows),
+        "legacy_rows_linkage_only": legacy,
+        "broken": broken[:100],
+        "broken_count": len(broken),
+        "truncated": len(rows) == limit,
+    }
 
 
 def list_logs(payload: dict) -> list[dict]:

@@ -48,6 +48,7 @@ SERVICE_RESOURCES = {
 READ_PREFIXES = ("list_", "get_", "download_", "export_")
 FUNC_PERMISSIONS = {
     ("admindash", "list_access_logs"): "audit:read",
+    ("audit", "verify_audit_chain"): "audit:read",
     ("ropa", "validate_completeness"): "ropa:read",
     ("retention", "validate_completeness"): "retention:read",
     ("role", "create_role"): "role:manage",
