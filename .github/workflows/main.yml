@@ -57,19 +57,19 @@ jobs:
           cache-dependency-path: python_port/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r python_port/requ
+        run: pip install -r python_port/requirements.txt pytest
 
       # Catches syntax errors and bad import
       - name: Byte-compile sources
-        run: python -m compileall -q python_
+        run: python -m compileall -q python_port/dpdpcms_py
 
       - name: Import smoke test
         working-directory: python_port
-        run: python -c "import dpdpcms_py.ma
+        run: python -c "import dpdpcms_py.main"
 
       # `python -m pytest` puts python_port/rt
       # dpdpcms_py` works with or without pytest.ini. A missing or empty suite
-      # fails the job (pytest exits 5) inste
+      # fails the job (pytest exits 5)  instead of passing green.
       - name: Run pytest
         working-directory: python_port
         run: python -m pytest -q tests
