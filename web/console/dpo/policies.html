@@ -484,6 +484,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Configuration ---
     const API_URL_POLICY = '/api/v1/policy';
     const AUTH_TOKEN = localStorage.getItem('authToken');
@@ -552,7 +557,7 @@
             'DRAFT': 'bg-yellow-100 text-yellow-800',
             'ARCHIVED': 'bg-gray-100 text-gray-800'
         };
-        return `<span class="px-3 py-1 text-[10px] font-black rounded-full uppercase ${colors[status] || 'bg-red-50 text-red-700'}">${status}</span>`;
+        return `<span class="px-3 py-1 text-[10px] font-black rounded-full uppercase ${colors[status] || 'bg-red-50 text-red-700'}">${esc(status)}</span>`;
     }
 
     function createPolicyRow(policy) {
@@ -563,22 +568,32 @@
         const isArchived = policy.status === 'ARCHIVED';
 
         const actionsHtml = `
-            <button class="text-indigo-600 hover:text-indigo-900 font-bold text-xs mr-3" onclick="viewRopa('${policy.id}')">View ROPA</button>
-            ${(isDraft && !IS_OPERATOR) ? `<button class="text-orange-600 hover:text-orange-800 font-bold text-xs mr-3" onclick="editPolicy('${policy.id}', '${policy.fiduciary_id}')">Edit</button>` : ''}
-            ${(isUnderReview && !IS_OPERATOR) ? `<button class="text-blue-600 hover:text-blue-800 font-bold text-xs mr-3" onclick="reviewRopa('${policy.id}')">Review ROPA</button>` : ''}
-            ${(!isArchived && !IS_OPERATOR) ? `<button class="text-red-600 hover:text-red-800 font-bold text-xs" onclick="deletePolicy('${policy.id}', '${policy.fiduciary_id}')">Delete</button>` : ''}
+            <button class="text-indigo-600 hover:text-indigo-900 font-bold text-xs mr-3" data-action="view-ropa">View ROPA</button>
+            ${(isDraft && !IS_OPERATOR) ? `<button class="text-orange-600 hover:text-orange-800 font-bold text-xs mr-3" data-action="edit">Edit</button>` : ''}
+            ${(isUnderReview && !IS_OPERATOR) ? `<button class="text-blue-600 hover:text-blue-800 font-bold text-xs mr-3" data-action="review-ropa">Review ROPA</button>` : ''}
+            ${(!isArchived && !IS_OPERATOR) ? `<button class="text-red-600 hover:text-red-800 font-bold text-xs" data-action="delete">Delete</button>` : ''}
         `;
 
         row.innerHTML = `
-            <td class="px-4 py-4 whitespace-nowrap text-sm font-bold text-slate-800">${policy.id}</td>
-            <td class="px-4 py-4 whitespace-nowrap text-sm text-slate-500">${policy.jurisdiction}</td>
+            <td class="px-4 py-4 whitespace-nowrap text-sm font-bold text-slate-800">${esc(policy.id)}</td>
+            <td class="px-4 py-4 whitespace-nowrap text-sm text-slate-500">${esc(policy.jurisdiction)}</td>
             <td class="px-4 py-4 whitespace-nowrap">
                 ${createStatusBadge(policy.status)}
                 ${isUnderReview ? '<div class="text-[10px] text-blue-500 mt-0.5">Pending DPO ROPA approval</div>' : ''}
             </td>
-            <td class="px-4 py-4 whitespace-nowrap text-xs text-slate-400 font-medium">${new Date(policy.effective_date).toLocaleDateString()}</td>
+            <td class="px-4 py-4 whitespace-nowrap text-xs text-slate-400 font-medium">${esc(new Date(policy.effective_date).toLocaleDateString())}</td>
             <td class="px-4 py-4 whitespace-nowrap">${actionsHtml}</td>
         `;
+        // Row actions bound via addEventListener instead of inline onclick (CF-02).
+        const rowActions = {
+            'view-ropa': () => viewRopa(policy.id),
+            'edit': () => editPolicy(policy.id, policy.fiduciary_id),
+            'review-ropa': () => reviewRopa(policy.id),
+            'delete': () => deletePolicy(policy.id, policy.fiduciary_id)
+        };
+        row.querySelectorAll('button[data-action]').forEach(btn => {
+            btn.addEventListener('click', rowActions[btn.getAttribute('data-action')]);
+        });
         return row;
     }
 
@@ -810,21 +825,21 @@
 
         const purposes = block.data_processing_purposes || [];
         document.getElementById('preview-purposes').innerHTML =
-            `<p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">${purposes.length} Processing Purpose(s)</p>` +
+            `<p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">${esc(purposes.length)} Processing Purpose(s)</p>` +
             purposes.map(p => {
                 const rtpHtml = (p.recipients_or_third_parties || []).map(name => {
-                    const matched = registeredNames.size === 0 || registeredNames.has(name.toLowerCase());
+                    const matched = registeredNames.size === 0 || registeredNames.has(String(name).toLowerCase());
                     return matched
-                        ? `<span class="text-teal-600 text-[10px] font-mono bg-teal-50 px-1.5 py-0.5 rounded">${name}</span>`
-                        : `<span class="text-amber-700 text-[10px] font-mono bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded" title="No App registered with this name">⚠ ${name}</span>`;
+                        ? `<span class="text-teal-600 text-[10px] font-mono bg-teal-50 px-1.5 py-0.5 rounded">${esc(name)}</span>`
+                        : `<span class="text-amber-700 text-[10px] font-mono bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded" title="No App registered with this name">⚠ ${esc(name)}</span>`;
                 }).join(' ');
                 return `
                 <div class="flex flex-wrap gap-2 text-xs items-center py-0.5">
-                    <span class="font-semibold text-slate-700">${p.name || p.id}</span>
+                    <span class="font-semibold text-slate-700">${esc(p.name || p.id)}</span>
                     <span class="text-slate-300">·</span>
-                    <span class="text-slate-500 capitalize">${(p.legal_basis || '').replace(/_/g,' ')}</span>
+                    <span class="text-slate-500 capitalize">${esc((p.legal_basis || '').replace(/_/g,' '))}</span>
                     <span class="text-slate-300">·</span>
-                    <span class="text-slate-400">${(p.data_categories_involved || []).length} data cat(s)</span>
+                    <span class="text-slate-400">${esc((p.data_categories_involved || []).length)} data cat(s)</span>
                     ${rtpHtml ? `<span class="text-slate-300">·</span>${rtpHtml}` : ''}
                 </div>`;
             }).join('');
@@ -892,25 +907,28 @@
         tr.className = 'hover:bg-slate-50/50 transition-colors';
         const canPublish = e.status === 'draft' || e.status === 'under_review';
         const retention = e.retention_period_days
-            ? `${e.retention_period_days}d (${e.retention_start_event || '—'})`
+            ? esc(`${e.retention_period_days}d (${e.retention_start_event || '—'})`)
             : '<span class="text-red-400 text-[10px] font-bold">NOT SET</span>';
         const statusColors = { draft: 'bg-yellow-100 text-yellow-800', active: 'bg-green-100 text-green-800', under_review: 'bg-blue-100 text-blue-800' };
-        const badge = `<span class="px-2 py-0.5 text-[10px] font-black rounded-full uppercase ${statusColors[e.status] || 'bg-gray-100 text-gray-600'}">${e.status}</span>`;
-        const escapedName = e.activity_name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const badge = `<span class="px-2 py-0.5 text-[10px] font-black rounded-full uppercase ${statusColors[e.status] || 'bg-gray-100 text-gray-600'}">${esc(e.status)}</span>`;
         const actions = `
-            <button class="text-teal-700 hover:text-teal-900 font-bold text-xs mr-2" onclick="viewRopaEntryInline('${e.id}')">View</button>
-            ${canPublish ? `<button class="text-green-600 hover:text-green-800 font-bold text-xs" onclick="publishRopaEntry('${e.id}', '${escapedName}')">Publish</button>` : '<span class="text-green-600 font-bold text-xs">Active</span>'}
+            <button class="text-teal-700 hover:text-teal-900 font-bold text-xs mr-2" data-action="view">View</button>
+            ${canPublish ? `<button class="text-green-600 hover:text-green-800 font-bold text-xs" data-action="publish">Publish</button>` : '<span class="text-green-600 font-bold text-xs">Active</span>'}
         `;
         tr.innerHTML = `
             <td class="px-4 py-3 text-sm font-bold text-slate-800 max-w-[240px]">
-                <div class="truncate" title="${e.activity_name}">${e.activity_name}</div>
-                <div class="text-[10px] font-mono text-slate-400 mt-0.5">${e.id.slice(0,8)}…</div>
+                <div class="truncate" title="${esc(e.activity_name)}">${esc(e.activity_name)}</div>
+                <div class="text-[10px] font-mono text-slate-400 mt-0.5">${esc(e.id.slice(0,8))}…</div>
             </td>
-            <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap capitalize">${(e.legal_basis||'').replace(/_/g,' ')}</td>
+            <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap capitalize">${esc((e.legal_basis||'').replace(/_/g,' '))}</td>
             <td class="px-4 py-3 whitespace-nowrap">${badge}</td>
             <td class="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">${retention}</td>
             <td class="px-4 py-3 whitespace-nowrap">${actions}</td>
         `;
+        // Bound via addEventListener (CF-02): the activity name never passes through an inline JS string.
+        tr.querySelector('button[data-action="view"]').addEventListener('click', () => viewRopaEntryInline(e.id));
+        const publishBtn = tr.querySelector('button[data-action="publish"]');
+        if (publishBtn) publishBtn.addEventListener('click', () => publishRopaEntry(e.id, e.activity_name));
         return tr;
     }
 
@@ -959,7 +977,7 @@
             const ok = !Array.from(missing).some(m => m.startsWith(f));
             const label = f.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
             return `<div style="display:flex;align-items:center;gap:8px;font-size:0.8rem;padding:4px 0;color:${ok?'#16a34a':'#dc2626'}">
-                <span>${ok ? '✓' : '✗'}</span><span>${label}</span>
+                <span>${ok ? '✓' : '✗'}</span><span>${esc(label)}</span>
             </div>`;
         }).join('');
         const nonDpoMissing = missingArr.filter(f => !f.startsWith('dpo_id'));

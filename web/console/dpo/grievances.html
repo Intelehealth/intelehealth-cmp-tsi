@@ -277,6 +277,18 @@
         <h3 class="font-semibold text-lg mt-4 border-b pb-1">Description:</h3>
         <p id="detail-description" class="p-2 bg-gray-50 rounded-md text-gray-700"></p>
 
+        <div id="attachments-section" class="mt-4">
+            <h3 class="font-semibold text-lg border-b pb-1">Attachments</h3>
+            <ul id="attachment-list" class="mt-2 space-y-2 text-sm"></ul>
+            <div class="flex items-end gap-3 mt-3">
+                <div class="flex-1">
+                    <label for="attachment-file-input" class="block text-sm font-medium text-gray-700">Add Attachment (PDF, PNG, JPEG or plain text)</label>
+                    <input type="file" id="attachment-file-input" accept="application/pdf,image/png,image/jpeg,text/plain" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm">
+                </div>
+                <button type="button" id="upload-attachment-btn" class="bg-slate-700 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-slate-800">Upload</button>
+            </div>
+        </div>
+
         <div id="assignment-section" class="mt-4">
             <h3 class="font-semibold text-lg border-b pb-1">Delegate to Operator</h3>
             <div class="flex items-end gap-3 mt-3">
@@ -319,6 +331,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Configuration ---
     const API_URL_GRIEVANCE = '/api/v1/grievance'; // Endpoint for Grievance CRUD
     const API_URL_FIDUCIARIES_LIST = '/api/v1/admin/fiduciary';
@@ -383,7 +400,7 @@
             case 'ESCALATED': colorClass = 'bg-red-100 text-red-800'; break;
             default: colorClass = 'bg-gray-100 text-gray-800';
         }
-        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status.replace(/_/g, ' ')}</span>`;
+        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(String(status || '').replace(/_/g, ' '))}</span>`;
     }
 
     function calculateDeadlineDisplay(deadline,status) {
@@ -405,17 +422,18 @@
         const status = isOverdue ? 'OVERDUE' : grievance.status;
 
         row.innerHTML = `
-            <td class="px-4 py-3 text-sm text-gray-600">...${grievance.grievance_id.slice(-8)}</td>
-            <td class="px-4 py-3 text-sm font-medium text-gray-900">${grievance.type.replace(/_/g, ' ')}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${grievance.subject || 'N/A'}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${new Date(grievance.submission_timestamp).toLocaleDateString()}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">...${esc(grievance.grievance_id.slice(-8))}</td>
+            <td class="px-4 py-3 text-sm font-medium text-gray-900">${esc(grievance.type.replace(/_/g, ' '))}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(grievance.subject || 'N/A')}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(new Date(grievance.submission_timestamp).toLocaleDateString())}</td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(status)}</td>
             <td class="px-4 py-3 text-sm font-semibold">${calculateDeadlineDisplay(grievance.due_date,status)}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${OperatorMap[grievance.assigned_dpo_user_id] || 'Unassigned'}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(OperatorMap[grievance.assigned_dpo_user_id] || 'Unassigned')}</td>
             <td class="px-4 py-3 text-sm">
-                <button class="text-indigo-600 hover:text-indigo-900 font-medium text-sm" onclick="viewGrievance('${grievance.grievance_id}')">View/Manage</button>
+                <button class="view-grievance-btn text-indigo-600 hover:text-indigo-900 font-medium text-sm" data-grievance-id="${esc(grievance.grievance_id)}">View/Manage</button>
             </td>
         `;
+        row.querySelector('.view-grievance-btn').addEventListener('click', () => viewGrievance(grievance.grievance_id));
         return row;
     }
 
@@ -566,9 +584,141 @@
         if (!IS_OPERATOR) {
             const assignSelect = document.getElementById('assign-operator-select');
             assignSelect.innerHTML = '<option value="">Unassigned</option>' +
-                Object.entries(OperatorMap).map(([id, name]) => `<option value="${id}">${name}</option>`).join('');
+                Object.entries(OperatorMap).map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('');
             assignSelect.value = grievance.assigned_dpo_user_id || '';
             document.getElementById('assign-operator-btn').setAttribute('data-grievance-id', grievance.grievance_id);
+        }
+
+        // Attachments (GR-04)
+        document.getElementById('upload-attachment-btn').setAttribute('data-grievance-id', grievance.grievance_id);
+        document.getElementById('attachment-file-input').value = '';
+        renderAttachments(grievance.attachments);
+    }
+
+    // --- Grievance Attachments (GR-04 / D15) ---
+    const ATTACHMENT_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'text/plain'];
+
+    function parseAttachments(raw) {
+        if (!raw) return [];
+        if (typeof raw === 'string') {
+            try { raw = JSON.parse(raw); } catch (e) { return []; }
+        }
+        return Array.isArray(raw) ? raw : [];
+    }
+
+    function formatBytes(n) {
+        const b = Number(n) || 0;
+        if (b < 1024) return `${b} B`;
+        if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+        return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function renderAttachments(raw) {
+        const list = document.getElementById('attachment-list');
+        const attachments = parseAttachments(raw);
+        if (attachments.length === 0) {
+            list.innerHTML = '<li class="text-gray-500">No attachments.</li>';
+            return;
+        }
+        list.innerHTML = attachments.map(a => `
+            <li class="flex items-center justify-between gap-3 p-2 bg-gray-50 rounded-md">
+                <span class="truncate" title="SHA-256: ${esc(a.sha256)}">${esc(a.file_name)} <span class="text-gray-500">(${esc(formatBytes(a.size_bytes))})</span></span>
+                <button type="button" class="download-attachment-btn text-indigo-600 hover:text-indigo-900 font-medium text-sm" data-attachment-id="${esc(a.attachment_id)}">Download</button>
+            </li>
+        `).join('');
+        list.querySelectorAll('.download-attachment-btn').forEach(btn => {
+            btn.addEventListener('click', () => downloadAttachment(btn.getAttribute('data-attachment-id'), btn));
+        });
+    }
+
+    async function downloadAttachment(attachmentId, btn) {
+        btn.disabled = true;
+        try {
+            const response = await fetch(API_URL_GRIEVANCE, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "get_grievance_attachment", "attachment_id": attachmentId })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.content_base64) {
+                throw new Error(data.message || `Status: ${response.status}`);
+            }
+            const binary = atob(data.content_base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const blob = new Blob([bytes], { type: data.content_type || 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = data.file_name || 'attachment';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (error) {
+            console.error("Error downloading attachment:", error);
+            alert(`Failed to download attachment: ${error.message}`);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function readFileAsBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const result = String(reader.result || '');
+                const comma = result.indexOf(',');
+                resolve(comma >= 0 ? result.slice(comma + 1) : result);
+            };
+            reader.onerror = () => reject(reader.error || new Error('Could not read file.'));
+            reader.readAsDataURL(file);
+        });
+    }
+
+    async function uploadAttachment() {
+        const btn = document.getElementById('upload-attachment-btn');
+        const input = document.getElementById('attachment-file-input');
+        const grievanceId = btn.getAttribute('data-grievance-id');
+        const file = input.files && input.files[0];
+        if (!grievanceId) return;
+        if (!file) {
+            alert("Choose a file to upload.");
+            return;
+        }
+        if (!ATTACHMENT_TYPES.includes(file.type)) {
+            alert("Only PDF, PNG, JPEG or plain text files can be attached.");
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = 'Uploading...';
+        try {
+            const contentBase64 = await readFileAsBase64(file);
+            const response = await fetch(API_URL_GRIEVANCE, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({
+                    "_func": "upload_grievance_attachment",
+                    "grievance_id": grievanceId,
+                    "file_name": file.name.slice(0, 255),
+                    "content_type": file.type,
+                    "content_base64": contentBase64
+                })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.message || `Status: ${response.status}`);
+            }
+            input.value = '';
+            const refreshed = await fetchGrievanceDetails(grievanceId);
+            if (refreshed) renderAttachments(refreshed.attachments);
+        } catch (error) {
+            console.error("Error uploading attachment:", error);
+            alert(`Failed to upload attachment: ${error.message}`);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Upload';
         }
     }
 
@@ -632,6 +782,9 @@
 
     // Modal Close
     document.getElementById('close-modal-btn-inner').addEventListener('click', closeModal);
+
+    // Attachment Upload
+    document.getElementById('upload-attachment-btn').addEventListener('click', uploadAttachment);
 
     // Handle Operator Assignment (DPO/ADMIN only)
     if (!IS_OPERATOR) {

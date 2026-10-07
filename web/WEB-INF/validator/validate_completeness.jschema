@@ -1,10 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ROPA Validate Completeness",
+  "title": "ROPA / Retention Validate Completeness",
   "type": "object",
   "properties": {
     "_func": { "type": "string" },
-    "id":    { "type": "string" }
+    "id":    { "type": "string" },
+    "policy_id": { "type": "string" }
   },
-  "required": ["_func", "id"]
+  "required": ["_func"]
 }

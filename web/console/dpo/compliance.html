@@ -370,6 +370,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Configuration ---
     const API_URL_PURGE = '/api/v1/admin/compliance';
     const API_URL_JOBS = '/api/v1/admin/job';
@@ -430,24 +435,25 @@
             case 'LEGAL_HOLD_APPLIED': colorClass = 'bg-orange-100 text-orange-800'; break;
             default: colorClass = 'bg-gray-100 text-gray-800';
         }
-        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status.replace(/_/g, ' ')}</span>`;
+        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(String(status || '').replace(/_/g, ' '))}</span>`;
     }
 
     function createRequestRow(req) {
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td class="px-2 py-2 font-mono text-gray-600 truncate" title="${req.id}">...${req.id.slice(-8)}</td>
-            <td class="px-2 py-2 text-gray-800 truncate" title="${req.user_id}">${req.user_id}</td>
-            <td class="px-2 py-2 text-gray-800 truncate" title="${req.purpose_id}">${req.purpose_id}</td>
-            <td class="px-2 py-2 text-gray-600 truncate" title="${req.trigger_event}">${req.trigger_event}</td>
-            <td class="px-2 py-2 text-gray-600 truncate" title="${req.app_name}">${req.app_name}</td>
-            <td class="px-2 py-2 text-gray-600 truncate">${new Date(req.initiated_at).toLocaleDateString()}</td>
+            <td class="px-2 py-2 font-mono text-gray-600 truncate" title="${esc(req.id)}">...${esc(String(req.id).slice(-8))}</td>
+            <td class="px-2 py-2 text-gray-800 truncate" title="${esc(req.user_id)}">${esc(req.user_id)}</td>
+            <td class="px-2 py-2 text-gray-800 truncate" title="${esc(req.purpose_id)}">${esc(req.purpose_id)}</td>
+            <td class="px-2 py-2 text-gray-600 truncate" title="${esc(req.trigger_event)}">${esc(req.trigger_event)}</td>
+            <td class="px-2 py-2 text-gray-600 truncate" title="${esc(req.app_name)}">${esc(req.app_name)}</td>
+            <td class="px-2 py-2 text-gray-600 truncate">${esc(new Date(req.initiated_at).toLocaleDateString())}</td>
             <td class="px-2 py-2 truncate">${createStatusBadge(req.status)}</td>
-            <td class="px-2 py-2 text-gray-600 truncate">${OperatorMap[req.assigned_operator_id] || 'Unassigned'}</td>
+            <td class="px-2 py-2 text-gray-600 truncate">${esc(OperatorMap[req.assigned_operator_id] || 'Unassigned')}</td>
             <td class="px-2 py-2">
-                <button class="text-indigo-600 hover:text-indigo-900 font-medium" onclick="viewPurgeRequest('${req.id}')">Manage</button>
+                <button class="manage-purge-btn text-indigo-600 hover:text-indigo-900 font-medium" data-id="${esc(req.id)}">Manage</button>
             </td>
         `;
+        row.querySelector('.manage-purge-btn').addEventListener('click', () => viewPurgeRequest(req.id));
         return row;
     }
 
@@ -513,7 +519,7 @@
             if (!IS_OPERATOR) {
                 const assignSelect = document.getElementById('assign-operator-select');
                 assignSelect.innerHTML = '<option value="">Unassigned</option>' +
-                    Object.entries(OperatorMap).map(([opId, name]) => `<option value="${opId}">${name}</option>`).join('');
+                    Object.entries(OperatorMap).map(([opId, name]) => `<option value="${esc(opId)}">${esc(name)}</option>`).join('');
                 assignSelect.value = req.assigned_operator_id || '';
                 document.getElementById('assign-operator-btn').setAttribute('data-id', id);
             }
@@ -562,11 +568,11 @@
                      const statusColor = job.status === 'PURGE_COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600';
                      tbody.innerHTML += `
                         <tr class="hover:bg-slate-50 border-b border-slate-50">
-                            <td class="p-3 font-mono text-[11px] text-slate-500">...${job.id.slice(-8)}</td>
-                            <td class="p-3 font-bold text-xs text-slate-700">${job.job_type}</td>
-                            <td class="p-3 text-xs text-slate-600">${job.subtype || 'FULL_RUN'}</td>
-                            <td class="p-3 text-xs text-slate-500">${new Date(job.created_at).toLocaleString()}</td>
-                            <td class="p-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${statusColor}">${job.status}</span></td>
+                            <td class="p-3 font-mono text-[11px] text-slate-500">...${esc(String(job.id).slice(-8))}</td>
+                            <td class="p-3 font-bold text-xs text-slate-700">${esc(job.job_type)}</td>
+                            <td class="p-3 text-xs text-slate-600">${esc(job.subtype || 'FULL_RUN')}</td>
+                            <td class="p-3 text-xs text-slate-500">${esc(new Date(job.created_at).toLocaleString())}</td>
+                            <td class="p-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${statusColor}">${esc(job.status)}</span></td>
                         </tr>
                      `;
                 });

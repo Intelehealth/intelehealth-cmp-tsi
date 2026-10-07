@@ -299,6 +299,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     const API_URL_BREACH = '/api/v1/admin/breach';
     const API_URL_POLICY = '/api/v1/admin/policy';
     const API_URL_NOTIFICATION = '/api/v1/admin/notification';
@@ -337,7 +342,7 @@
             case 'RESOLVED': colorClass = 'bg-green-100 text-green-800'; break;
             default: colorClass = 'bg-gray-100 text-gray-800';
         }
-        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(status)}</span>`;
     }
 
     function createSeverityBadge(severity) {
@@ -349,25 +354,28 @@
             case 'CRITICAL': colorClass = 'bg-red-100 text-red-800'; break;
             default: colorClass = 'bg-gray-100 text-gray-800';
         }
-        return `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full uppercase ${colorClass}">${severity}</span>`;
+        return `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full uppercase ${colorClass}">${esc(severity)}</span>`;
     }
 
     function createBreachRow(b) {
         const row = document.createElement('tr');
         const reportAvailable = b.status === 'CONTAINED' || b.status === 'RESOLVED';
         const downloadButton = reportAvailable
-            ? `<button class="text-slate-600 hover:text-slate-900 font-medium ml-3" onclick="downloadReport('${b.id}')">Download PDF</button>`
+            ? `<button class="download-report-row-btn text-slate-600 hover:text-slate-900 font-medium ml-3" data-id="${esc(b.id)}">Download PDF</button>`
             : '';
         row.innerHTML = `
-            <td class="px-4 py-3 text-sm font-medium text-gray-800">${b.title}</td>
+            <td class="px-4 py-3 text-sm font-medium text-gray-800">${esc(b.title)}</td>
             <td class="px-4 py-3 text-sm">${createSeverityBadge(b.severity)}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${b.affected_principal_count}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${new Date(b.reported_at).toLocaleDateString()}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(b.affected_principal_count)}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(new Date(b.reported_at).toLocaleDateString())}</td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(b.status)}</td>
             <td class="px-4 py-3 text-sm">
-                <button class="text-indigo-600 hover:text-indigo-900 font-medium" onclick="viewBreach('${b.id}')">Manage</button>${downloadButton}
+                <button class="view-breach-btn text-indigo-600 hover:text-indigo-900 font-medium" data-id="${esc(b.id)}">Manage</button>${downloadButton}
             </td>
         `;
+        row.querySelector('.view-breach-btn').addEventListener('click', () => viewBreach(b.id));
+        const dlBtn = row.querySelector('.download-report-row-btn');
+        if (dlBtn) dlBtn.addEventListener('click', () => downloadReport(b.id));
         return row;
     }
 

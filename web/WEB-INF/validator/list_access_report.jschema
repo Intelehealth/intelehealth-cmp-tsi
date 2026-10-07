@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "_func"
+  ],
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "start_date": {
+      "type": "string"
+    },
+    "end_date": {
+      "type": "string"
+    },
+    "limit": {
+      "type": [
+        "integer",
+        "string"
+      ]
+    }
+  }
+}

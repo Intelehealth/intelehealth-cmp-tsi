@@ -13,7 +13,15 @@
       "type": "string"
     },
     "type": {
-      "type": "string"
+      "type": "string",
+      "enum": [
+        "GENERAL_COMPLAINT",
+        "ERASURE_REQUEST",
+        "DATA_ACCESS_REQUEST",
+        "CORRECTION_REQUEST",
+        "CONSENT_COMPLAINT",
+        "DATA_HANDLING_COMPLAINT"
+      ]
     },
     "subject": {
       "type": "string"
@@ -26,6 +34,12 @@
       "items": {}
     },
     "language": {
+      "type": "string"
+    },
+    "consent_record_id": {
+      "type": "string"
+    },
+    "reference_number": {
       "type": "string"
     }
   },

@@ -238,6 +238,11 @@
 </main>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     const API_URL_NOTIFICATION = '/api/v1/admin/notification';
     const API_URL_POLICY = '/api/v1/admin/policy';
     if (localStorage.getItem('role') === 'OPERATOR') {
@@ -263,7 +268,7 @@
         { type: 'GRIEVANCE_ESCALATED_NOTIFICATION', label: 'Grievance Escalated' }
     ];
 
-    const LANGUAGE_NAMES = { en: 'English', hi: 'Hindi', ta: 'Tamil', te: 'Telugu', bn: 'Bengali', mr: 'Marathi', gu: 'Gujarati', kn: 'Kannada' };
+    const LANGUAGE_NAMES = { en: 'English', as: 'Assamese', bn: 'Bengali', brx: 'Bodo', doi: 'Dogri', gu: 'Gujarati', hi: 'Hindi', kn: 'Kannada', ks: 'Kashmiri', kok: 'Konkani', mai: 'Maithili', ml: 'Malayalam', mni: 'Manipuri', mr: 'Marathi', ne: 'Nepali', or: 'Odia', pa: 'Punjabi', sa: 'Sanskrit', sat: 'Santali', sd: 'Sindhi', ta: 'Tamil', te: 'Telugu', ur: 'Urdu' };
     const BREACH_TYPE_PREFIX = 'BREACH_NOTIFICATION_';
     const WEBHOOK_CATEGORIES = [
         { category: 'NOTIFICATION', label: 'Notification Webhook', description: 'Fires for every notification (consent, withdrawal, purge, breach, etc.) as it\'s created.' },
@@ -323,19 +328,20 @@
 
         const langInputs = languages.map(lang => `
             <div class="mb-2">
-                <label class="block text-xs font-bold text-slate-500 uppercase mb-1">${LANGUAGE_NAMES[lang] || lang}</label>
-                <input type="text" data-lang="${lang}" value="${(existing[lang] || '').replace(/"/g, '&quot;')}"
-                       class="w-full p-2 border border-gray-300 rounded-md text-sm" placeholder="Message shown to the Data Principal in ${LANGUAGE_NAMES[lang] || lang}">
+                <label class="block text-xs font-bold text-slate-500 uppercase mb-1">${esc(LANGUAGE_NAMES[lang] || lang)}</label>
+                <input type="text" data-lang="${esc(lang)}" value="${esc(existing[lang] || '')}"
+                       class="w-full p-2 border border-gray-300 rounded-md text-sm" placeholder="Message shown to the Data Principal in ${esc(LANGUAGE_NAMES[lang] || lang)}">
             </div>
         `).join('');
 
         card.innerHTML = `
-            <h2 class="text-md font-bold text-slate-700 mb-3 tracking-tight">${label}</h2>
-            <div class="messages-form" data-type="${type}">${langInputs}</div>
+            <h2 class="text-md font-bold text-slate-700 mb-3 tracking-tight">${esc(label)}</h2>
+            <div class="messages-form" data-type="${esc(type)}">${langInputs}</div>
             <div class="flex justify-end mt-2">
-                <button class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90" onclick="saveMessage('${type}')">Save</button>
+                <button class="save-message-btn primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Save</button>
             </div>
         `;
+        card.querySelector('.save-message-btn').addEventListener('click', () => saveMessage(type));
         return card;
     }
 
@@ -373,7 +379,7 @@
     }
 
     async function saveMessage(type) {
-        const formDiv = document.querySelector(`.messages-form[data-type="${type}"]`);
+        const formDiv = document.querySelector(`.messages-form[data-type="${CSS.escape(type)}"]`);
         const messages = {};
         formDiv.querySelectorAll('input[data-lang]').forEach(input => {
             if (input.value.trim()) messages[input.dataset.lang] = input.value.trim();
@@ -433,14 +439,14 @@
             card.className = 'card';
             card.innerHTML = `
                 <div class="flex justify-between items-start mb-1">
-                    <h2 class="text-md font-bold text-slate-700 tracking-tight">${label}</h2>
+                    <h2 class="text-md font-bold text-slate-700 tracking-tight">${esc(label)}</h2>
                     ${statusBadge}
                 </div>
-                <p class="text-xs text-slate-500 mb-3">${description}</p>
-                <div class="webhook-form" data-category="${category}">
+                <p class="text-xs text-slate-500 mb-3">${esc(description)}</p>
+                <div class="webhook-form" data-category="${esc(category)}">
                     <div class="mb-2">
                         <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Webhook URL</label>
-                        <input type="text" data-field="webhook_url" value="${(existing.webhook_url || '').replace(/"/g, '&quot;')}"
+                        <input type="text" data-field="webhook_url" value="${esc(existing.webhook_url || '')}"
                                class="w-full p-2 border border-gray-300 rounded-md text-sm" placeholder="https://your-system.example.com/webhook">
                     </div>
                     <div class="mb-2">
@@ -452,10 +458,13 @@
                     </div>
                 </div>
                 <div class="flex justify-end gap-2">
-                    ${isConfigured ? `<button class="px-4 py-2 rounded-md text-sm font-medium border ${isEnabled ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-green-200 text-green-700 hover:bg-green-50'}" onclick="toggleWebhookEnabled('${category}', ${isEnabled})">${isEnabled ? 'Deactivate' : 'Activate'}</button>` : ''}
-                    <button class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90" onclick="saveWebhookConfig('${category}', ${isEnabled})">Save</button>
+                    ${isConfigured ? `<button class="px-4 py-2 rounded-md text-sm font-medium border ${isEnabled ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-green-200 text-green-700 hover:bg-green-50'}" data-webhook-action="toggle">${isEnabled ? 'Deactivate' : 'Activate'}</button>` : ''}
+                    <button class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90" data-webhook-action="save">Save</button>
                 </div>
             `;
+            const toggleBtn = card.querySelector('[data-webhook-action="toggle"]');
+            if (toggleBtn) toggleBtn.addEventListener('click', () => toggleWebhookEnabled(category, isEnabled));
+            card.querySelector('[data-webhook-action="save"]').addEventListener('click', () => saveWebhookConfig(category, isEnabled));
             container.appendChild(card);
         });
     }
@@ -541,7 +550,7 @@
             <div id="rights-otp-webhook-fields" class="${mode === 'DUMMY_OTP' ? 'hidden' : ''} space-y-3 mb-4 pl-3 border-l-2 border-slate-100">
                 <div>
                     <label class="block text-xs font-bold text-slate-500 uppercase mb-1">OTP Delivery Webhook URL</label>
-                    <input type="text" id="rights-otp-webhook-url" value="${(existing.webhook_url || '').replace(/"/g, '&quot;')}"
+                    <input type="text" id="rights-otp-webhook-url" value="${esc(existing.webhook_url || '')}"
                            class="w-full p-2 border border-gray-300 rounded-md text-sm" placeholder="https://your-system.example.com/otp-webhook">
                 </div>
                 <div>
@@ -553,7 +562,7 @@
                 </div>
                 <div>
                     <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Message Template</label>
-                    <textarea id="rights-otp-message" rows="2" class="w-full p-2 border border-gray-300 rounded-md text-sm" placeholder="Your verification code is {{otp}}">${(config.otp_message_template || '').replace(/</g, '&lt;')}</textarea>
+                    <textarea id="rights-otp-message" rows="2" class="w-full p-2 border border-gray-300 rounded-md text-sm" placeholder="Your verification code is {{otp}}">${esc(config.otp_message_template || '')}</textarea>
                     <p class="text-xs text-slate-400 mt-1">Use <code>{{otp}}</code> as a placeholder for the generated code. Your webhook receiver is responsible for actually sending the email/SMS.</p>
                 </div>
             </div>

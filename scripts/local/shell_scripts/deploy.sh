@@ -47,14 +47,14 @@ if [ "$existing" -eq 1 ] || [ "$force_migrate" -eq 1 ]; then
   wait_healthy 120 || { fail 'API unhealthy after restart.'; exit 1; }
 else
   triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'trg_audit_logs_%'")"
-  [ "$triggers" = "2" ] || warn "audit_logs triggers: $triggers (expected 2). Run scripts/local/migrate.sh 19_audit_ledger_integrity.sql"
+  [ "$triggers" = "2" ] || warn "audit_logs triggers: $triggers (expected 2). Run scripts/local/shell_scripts/migrate.sh 19_audit_ledger_integrity.sql"
 fi
 
 admins="$(psql_q "SELECT count(*) FROM operators WHERE role = 'ADMIN'")"
 printf '\n%sStack is up.%s\n' "$C_GREEN" "$C_OFF"
 printf '  Console:       %s/\n  Rights portal: %s/rights/\n  Postgres:      127.0.0.1:5434 (from the host)\n' "$APP_URL" "$APP_URL"
 if [ "$admins" = "0" ]; then
-  printf '\n%sNext: create the Super-Admin ->  scripts/local/bootstrap-admin.sh <email>%s\n' "$C_YELLOW" "$C_OFF"
+  printf '\n%sNext: create the Super-Admin ->  scripts/local/shell_scripts/bootstrap-admin.sh <email>%s\n' "$C_YELLOW" "$C_OFF"
 else
-  printf '\n%sNext: verify ->  scripts/local/smoke-test.sh <admin email>%s\n' "$C_YELLOW" "$C_OFF"
+  printf '\n%sNext: verify ->  scripts/local/shell_scripts/smoke-test.sh <admin email>%s\n' "$C_YELLOW" "$C_OFF"
 fi

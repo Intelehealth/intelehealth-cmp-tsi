@@ -96,6 +96,10 @@
                 },
                 "deprecated": {
                   "type": "boolean"
+                },
+                "withdrawal_consequence": {
+                  "type": "string",
+                  "description": "CW-04: what the principal loses or what happens to their data if they withdraw this purpose."
                 }
               },
               "required": [
@@ -211,9 +215,15 @@
               "sd",
               "ks",
               "sa",
-              "ur"
+              "ur",
+              "brx",
+              "doi",
+              "kok",
+              "mai",
+              "mni",
+              "sat"
             ],
-            "description": "Mandatory ISO 639-1 language code for the policy content (lowercase, e.g. 'en', 'ta')."
+            "description": "ISO 639 language code: English plus the 22 Eighth Schedule languages (lowercase, e.g. 'en', 'ta', 'kok')."
           }
         },
         "required": [

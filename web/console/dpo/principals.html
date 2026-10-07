@@ -358,7 +358,7 @@
         } else if (isActive === false) {
              colorClass = 'bg-gray-200 text-gray-600'; // Archived/Inactive
         }
-        return `<span class="px-3 py-1 text-xs font-bold rounded-full uppercase ${colorClass}">${s.replace(/_/g, ' ')}</span>`;
+        return `<span class="px-3 py-1 text-xs font-bold rounded-full uppercase ${colorClass}">${esc(s.replace(/_/g, ' '))}</span>`;
     }
 
     function createHistoryRow(record, userId) {
@@ -457,7 +457,7 @@
                 const latest = records[0];
                 overallStatusBadge.innerHTML = createStatusBadge(latest.consent_status_general, latest.is_active_consent);
 
-                if (latest.consent_mechanism !== 'ERASURE_REQUEST') {
+                if (latest.consent_mechanism !== 'ERASURE_REQUEST' && latest.consent_status_general !== 'ERASURE_REQUESTED') {
                     mainInitiateErasureBtn.classList.remove('hidden');
                     mainInitiateErasureBtn.onclick = () => initiateErasurePurge(principalIdentifier);
                 } else {

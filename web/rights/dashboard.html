@@ -365,6 +365,16 @@
         renderPreferenceCenter(area, policyMap, prefs);
     }
 
+    // A record's kind comes from its status (the CMS sets consent_mechanism to how
+    // the consent arrived, e.g. PRINCIPAL_PORTAL); older records carried it in the mechanism.
+    function recordKind(rec) {
+        const status = (rec && rec.consent_status_general) || '';
+        const mech = (rec && rec.consent_mechanism) || '';
+        if (status === 'ERASURE_REQUESTED' || mech === 'ERASURE_REQUEST') return 'ERASURE_REQUEST';
+        if (status === 'WITHDRAWN' || status === 'PARTIAL_WITHDRAWAL' || mech === 'CONSENT_WITHDRAWN') return 'CONSENT_WITHDRAWN';
+        return mech;
+    }
+
     function getCurrentToggles() {
         const prefs = {};
         (currentLangContent.data_processing_purposes || []).forEach(p => {
@@ -379,7 +389,7 @@
         const purposes = currentLangContent.data_processing_purposes || [];
         const dataPointConsents = purposes.map(p => ({
             data_point_id: p.id,
-            consent_granted: prefs[p.id] !== undefined ? prefs[p.id] : p.is_mandatory_for_service,
+            consent_granted: Boolean(prefs[p.id] !== undefined ? prefs[p.id] : p.is_mandatory_for_service),
             purpose_agreed_to: p.name,
             timestamp_updated: new Date().toISOString()
         }));
@@ -389,7 +399,6 @@
             fiduciary_id: SESSION.fiduciaryId,
             policy_id: activePolicyEntry ? activePolicyEntry.policy_id : currentPolicy.policy_id,
             language_selected: currentLang,
-            consent_mechanism: 'save_preferences_center',
             data_point_consents: dataPointConsents
         });
 
@@ -484,7 +493,7 @@
             const policyTitle = getPolicyTitle(policyId) || policyId;
             // Find the most-recent active record for this policy to determine eligibility
             const latestActive = records.find(r => r.is_active_consent) || records[0];
-            const mechanism = latestActive.consent_mechanism || '';
+            const mechanism = recordKind(latestActive);
             // canWithdraw: record must be active and not a full erasure
             const canWithdraw = latestActive.is_active_consent === true && mechanism !== 'ERASURE_REQUEST';
             const canErasure  = mechanism !== 'ERASURE_REQUEST';
@@ -492,7 +501,7 @@
             const btnId = 'pid-' + policyId.replace(/[^a-zA-Z0-9]/g, '_');
 
             let rows = records.map(rec => {
-                const mech = rec.consent_mechanism || '';
+                const mech = recordKind(rec);
                 let displayStatus;
                 if (mech === 'ERASURE_REQUEST') {
                     displayStatus = 'ERASURE_REQUEST';
@@ -612,8 +621,8 @@
         if (!rec || !rec.id) return;
 
         document.getElementById('modal-record-ref').textContent = 'Record: ' + rec.id;
-        const isWithdrawal = rec.consent_mechanism === 'CONSENT_WITHDRAWN';
-        const isErasure    = rec.consent_mechanism === 'ERASURE_REQUEST';
+        const isWithdrawal = recordKind(rec) === 'CONSENT_WITHDRAWN';
+        const isErasure    = recordKind(rec) === 'ERASURE_REQUEST';
 
         const dpc = rec.data_point_consents || {};
         let purposeHtml = '';

@@ -9,7 +9,7 @@ No database: the db helpers are monkeypatched.
 
 import inspect
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -207,7 +207,7 @@ def test_uuid_case_does_not_change_the_hash(monkeypatch):
 
 
 def test_timestamps_strictly_increase(monkeypatch):
-    future = datetime.utcnow() + timedelta(hours=1)
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
     row = _write(monkeypatch, {"current_log_hash": "abc", "timestamp": future})
     assert row["timestamp"] > future
     assert row["prev_log_hash"] == "abc"

@@ -294,6 +294,11 @@
 </div>
 
 <script>
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Configuration ---
     // Assuming API structure based on FiduciaryService and convention
     const API_URL_APPS = '/api/v1/admin/app';
@@ -342,7 +347,7 @@
             case 'REVOKED': colorClass = 'bg-red-100 text-red-800'; break;
             default: colorClass = 'bg-gray-100 text-gray-800';
         }
-        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${status}</span>`;
+        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(status)}</span>`;
     }
 
     // Function to get Fiduciary Name from ID (for display purposes)
@@ -357,20 +362,24 @@
 
         const actionsHtml = `
             ${showDeactivate ?
-                `<button class="text-indigo-600 hover:text-indigo-900 font-medium text-sm mr-2" onclick="editApp('${app.app_id}', '${app.fiduciary_id}')">Edit</button><button class="text-red-600 hover:text-red-900 font-medium text-sm" onclick="deactivateApp('${app.app_id}', '${app.fiduciary_id}')">Deactivate</button>`
+                `<button class="edit-app-btn text-indigo-600 hover:text-indigo-900 font-medium text-sm mr-2">Edit</button><button class="deactivate-app-btn text-red-600 hover:text-red-900 font-medium text-sm">Deactivate</button>`
                 : `<span class="text-gray-500 text-xs">Access Suspended</span>`}
         `;
 
         row.innerHTML = `
-            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${app.name || 'N/A'}</td>
-            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${getFiduciaryName(app.fiduciary_id)}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${app.processing_purpose || 'N/A'}</td>
-            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${app.dpa_reference || 'N/A'}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${esc(app.name || 'N/A')}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${esc(getFiduciaryName(app.fiduciary_id))}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(app.processing_purpose || 'N/A')}</td>
+            <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">${esc(app.dpa_reference || 'N/A')}</td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(app.status)}</td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">
                 ${actionsHtml}
             </td>
         `;
+        const editBtn = row.querySelector('.edit-app-btn');
+        if (editBtn) editBtn.addEventListener('click', () => editApp(app.app_id, app.fiduciary_id));
+        const deactivateBtn = row.querySelector('.deactivate-app-btn');
+        if (deactivateBtn) deactivateBtn.addEventListener('click', () => deactivateApp(app.app_id, app.fiduciary_id));
         return row;
     }
 

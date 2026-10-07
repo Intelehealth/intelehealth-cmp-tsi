@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Update Correction Status",
+  "type": "object",
+  "properties": {
+    "_func":           { "type": "string" },
+    "id":              { "type": "string" },
+    "status":          { "type": "string", "enum": ["PENDING", "IN_PROGRESS", "APPROVED", "REJECTED"] },
+    "resolution_note": { "type": "string" }
+  },
+  "required": ["_func", "id", "status"]
+}

@@ -384,7 +384,7 @@
         } else if (isActive === false) {
             colorClass = 'bg-gray-200 text-gray-600'; // Archived/Inactive
         }
-        return `<span class="px-3 py-1 text-xs font-bold rounded-full uppercase ${colorClass}">${s.replace(/_/g, ' ')}</span>`;
+        return `<span class="px-3 py-1 text-xs font-bold rounded-full uppercase ${colorClass}">${esc(s.replace(/_/g, ' '))}</span>`;
     }
 
     function createConsentRow(record) {
@@ -396,7 +396,7 @@
             <td class="px-4 py-3 text-sm text-gray-600">${esc(record.policy_id)}${versionLabel}</td>
             <td class="px-4 py-3 text-sm">${createStatusBadge(record.consent_status_general, record.is_active_consent)}</td>
             <td class="px-4 py-3 text-sm font-bold text-slate-500">${record.is_active_consent ? 'Yes' : 'No'}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${record.purposes_granted} / ${record.purposes_total}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${esc(record.purposes_granted)} / ${esc(record.purposes_total)}</td>
             <td class="px-4 py-3 text-sm text-gray-600">${esc(new Date(record.timestamp).toLocaleString())}</td>
             <td class="px-4 py-3 text-sm">
                 <button class="view-record-btn text-indigo-600 hover:text-indigo-900 font-bold text-sm">View Details</button>

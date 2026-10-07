@@ -17,13 +17,17 @@
     },
     "channel": {
       "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
     }
   },
   "required": [
     "_func",
     "grievance_id",
-    "message",
-    "sender",
-    "channel"
+    "message"
   ]
 }

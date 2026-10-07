@@ -27,7 +27,6 @@
     "policy_id",
     "name",
     "retention_duration_value",
-    "retention_duration_unit",
-    "status"
+    "retention_duration_unit"
   ]
 }
