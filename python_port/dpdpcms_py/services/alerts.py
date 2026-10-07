@@ -97,7 +97,7 @@ class AlertService(Service):
             f"""
             UPDATE alerts SET status = 'ACKNOWLEDGED', acknowledged_at = NOW(),
                               acknowledged_by = %s, last_dispatched_at = NOW()
-            WHERE {' AND '.join(where)}
+            WHERE {" AND ".join(where)}
             """,
             [acknowledged_by, *params],
         )

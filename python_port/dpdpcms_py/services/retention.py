@@ -107,7 +107,9 @@ class RetentionService(Service):
         value = int(require(payload.get("retention_duration_value"), "retention_duration_value"))
         unit = str(payload.get("retention_duration_unit") or "DAYS").upper()
         days = retention_duration_days(value, unit)
-        start_event = str(payload.get("retention_start_event") or "CESSATION").replace("_", " ").upper().replace(" ", "_")
+        start_event = (
+            str(payload.get("retention_start_event") or "CESSATION").replace("_", " ").upper().replace(" ", "_")
+        )
         if start_event not in VALID_START_EVENTS:
             raise ApiError(400, "Bad Request", f"retention_start_event must be one of {sorted(VALID_START_EVENTS)}.")
         action = str(payload.get("action_at_expiry") or "ERASE").replace("-", "_").upper()
@@ -124,7 +126,9 @@ class RetentionService(Service):
             )
         legal_reference = payload.get("legal_reference")
         if not legal_reference and action != "ERASE":
-            raise ApiError(400, "Bad Request", "action_at_expiry other than ERASE requires a legal_reference exemption.")
+            raise ApiError(
+                400, "Bad Request", "action_at_expiry other than ERASE requires a legal_reference exemption."
+            )
         if policy_id:
             db.execute(
                 """
@@ -266,7 +270,9 @@ class RetentionService(Service):
             missing.append("name")
         if not row.get("applicable_data_categories") and not row.get("applicable_purposes"):
             missing.append("applicable_purposes/applicable_data_categories")
-        complete = not missing and meets_statutory_floor(row["retention_duration_value"], row["retention_duration_unit"])
+        complete = not missing and meets_statutory_floor(
+            row["retention_duration_value"], row["retention_duration_unit"]
+        )
         return {
             "is_complete": complete,
             "complete": complete,

@@ -143,7 +143,9 @@ class AuditService(Service):
 
         require_audit_access(ctx)
         if ctx.fiduciary_id:
-            raise ApiError(403, "Forbidden", "Audit chain verification spans all tenants; a global administrator must run it.")
+            raise ApiError(
+                403, "Forbidden", "Audit chain verification spans all tenants; a global administrator must run it."
+            )
         limit = min(max(int(ctx.payload.get("limit") or 100_000), 1), 1_000_000)
         return verify_chain(limit)
 
