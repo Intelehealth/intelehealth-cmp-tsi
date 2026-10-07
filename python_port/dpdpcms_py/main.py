@@ -293,6 +293,9 @@ def authenticate(ctx: RequestContext) -> None:
             # A principal token is scoped to its own fiduciary: never trust a
             # fiduciary_id supplied in the request body.
             ctx.payload["fiduciary_id"] = ctx.fiduciary_id
+            # The token names the principal; bind it so schema validation and the
+            # service see the same user_id the caller is authorised for.
+            ctx.payload["user_id"] = ctx.principal_user_id
             return
         ok, fid, scopes = api_key_valid(
             ctx.headers.get("x-api-key") or ctx.headers.get("X-API-Key"),
@@ -315,13 +318,14 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
         payload = await payload_from(request)
         if func and not payload.get("_func"):
             payload["_func"] = func
+        # P4-02: normalise once so schema lookup, scope resolution and dispatch
+        # all see the same function name.
+        payload["_func"] = str(payload.get("_func") or "").strip().lower()
         if service == "wallet":
             # D14: authorise the operation the wallet action runs, not "sync".
             resolve_wallet_action(payload)
-        if request.method == "POST":
-            errors = validate_payload(payload)
-            if errors:
-                raise ApiError(400, "Bad Request", "; ".join(errors))
+        if not payload["_func"]:
+            raise ApiError(400, "Bad Request", "_func missing")
         ctx = RequestContext(
             path=path,
             category=category,
@@ -335,6 +339,13 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
         if not service_cls:
             raise ApiError(404, "Not Found", f"API endpoint not found: {path}")
         authenticate(ctx)
+        # P4-01: validate only once authenticate() has bound the token-derived
+        # fields (fiduciary_id, a principal's user_id); a wallet call is checked
+        # against the schema of the function its action resolved to.
+        if request.method == "POST":
+            errors = validate_payload(ctx.payload)
+            if errors:
+                raise ApiError(400, "Bad Request", "; ".join(errors))
         result = service_cls().handle(ctx)
         status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_", "submit_")) else 200
         return _json_response(result, status=status)
@@ -368,6 +379,13 @@ async def categorized_api_func(request: Request, category: str, service: str, fu
 
 @app.get("/{full_path:path}")
 async def static_or_index(full_path: str):
+    # CF-01: WEB-INF (validator schemas, server config) is never served, matching
+    # the servlet container the Java original ran in. Checked per path segment,
+    # case-insensitively and ignoring trailing dots (WEB-INF. resolves to WEB-INF on Windows).
+    if any(
+        part.strip().rstrip(". ").lower() in {"web-inf", "meta-inf"} for part in full_path.replace("\\", "/").split("/")
+    ):
+        return JSONResponse(error_body(404, "Not Found", "Not Found", f"/{full_path}"), status_code=404)
     rel = full_path or "index.html"
     path = (WEB_ROOT / rel).resolve()
     # A directory request (/rights, /console/dpo) serves that directory's own

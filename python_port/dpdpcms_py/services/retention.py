@@ -15,7 +15,10 @@ VALID_ACTIONS = {"ERASE", "DE_IDENTIFY"}
 # SA-12: a regulatory floor no schedule may undercut. Seven years is the
 # statutory minimum for clinical/medical records by sectoral rules (and what the
 # ROPA declares for NAS healthcare); shorter periods are rejected outright.
-STATUTORY_FLOOR_DAYS = 2557  # 7 years
+STATUTORY_FLOOR_YEARS = 7
+# In days, on the same 365-day year retention_duration_days() and the worker use.
+# (It was 2557, so a policy entered as 7 YEARS = 2555 days was rejected.)
+STATUTORY_FLOOR_DAYS = STATUTORY_FLOOR_YEARS * 365
 
 
 def retention_duration_days(value: int | None, unit: str | None) -> int:
@@ -31,6 +34,18 @@ def retention_duration_days(value: int | None, unit: str | None) -> int:
         raise ApiError(400, "Bad Request", "retention_duration_value must be positive.")
     multiplier = {"DAYS": 1, "MONTHS": 30, "YEARS": 365}[unit]
     return value * multiplier
+
+
+def meets_statutory_floor(value: int | None, unit: str | None) -> bool:
+    """SA-12: is (value, unit) at least seven years? Judged in the policy's own
+    unit, so 7 YEARS and 84 MONTHS qualify even though 84 x 30 days < 2555."""
+    days = retention_duration_days(value, unit)
+    unit = str(unit or "DAYS").upper()
+    if unit == "YEARS":
+        return int(value) >= STATUTORY_FLOOR_YEARS
+    if unit == "MONTHS":
+        return int(value) >= STATUTORY_FLOOR_YEARS * 12
+    return days >= STATUTORY_FLOOR_DAYS
 
 
 def applicable_policy(fiduciary_id: str, purpose_id: str | None) -> dict | None:
@@ -92,9 +107,7 @@ class RetentionService(Service):
         value = int(require(payload.get("retention_duration_value"), "retention_duration_value"))
         unit = str(payload.get("retention_duration_unit") or "DAYS").upper()
         days = retention_duration_days(value, unit)
-        start_event = (
-            str(payload.get("retention_start_event") or "CESSATION").replace("_", " ").upper().replace(" ", "_")
-        )
+        start_event = str(payload.get("retention_start_event") or "CESSATION").replace("_", " ").upper().replace(" ", "_")
         if start_event not in VALID_START_EVENTS:
             raise ApiError(400, "Bad Request", f"retention_start_event must be one of {sorted(VALID_START_EVENTS)}.")
         action = str(payload.get("action_at_expiry") or "ERASE").replace("-", "_").upper()
@@ -102,7 +115,7 @@ class RetentionService(Service):
             raise ApiError(400, "Bad Request", f"action_at_expiry must be one of {sorted(VALID_ACTIONS)}.")
         # SA-12: never admit a schedule beneath the statutory floor for clinical
         # records. An exemption (SA-10) must cite the retention rule relied on.
-        if days < STATUTORY_FLOOR_DAYS:
+        if not meets_statutory_floor(value, unit):
             raise ApiError(
                 400,
                 "Bad Request",
@@ -111,9 +124,7 @@ class RetentionService(Service):
             )
         legal_reference = payload.get("legal_reference")
         if not legal_reference and action != "ERASE":
-            raise ApiError(
-                400, "Bad Request", "action_at_expiry other than ERASE requires a legal_reference exemption."
-            )
+            raise ApiError(400, "Bad Request", "action_at_expiry other than ERASE requires a legal_reference exemption.")
         if policy_id:
             db.execute(
                 """
@@ -255,7 +266,7 @@ class RetentionService(Service):
             missing.append("name")
         if not row.get("applicable_data_categories") and not row.get("applicable_purposes"):
             missing.append("applicable_purposes/applicable_data_categories")
-        complete = not missing and days >= STATUTORY_FLOOR_DAYS
+        complete = not missing and meets_statutory_floor(row["retention_duration_value"], row["retention_duration_unit"])
         return {
             "is_complete": complete,
             "complete": complete,

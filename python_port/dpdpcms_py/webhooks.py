@@ -17,9 +17,7 @@ SIGNATURE_HEADER = "X-TSI-Signature"
 DEFAULT_CATEGORY = "NOTIFICATION"
 
 
-def queue_webhook(
-    fiduciary_id: str, event_type: str, payload: dict[str, Any], category: str = DEFAULT_CATEGORY
-) -> None:
+def queue_webhook(fiduciary_id: str, event_type: str, payload: dict[str, Any], category: str = DEFAULT_CATEGORY) -> None:
     """Record an outbound webhook event for the dispatcher worker to deliver.
 
     The event is queued here (inline on the request thread) and delivered
@@ -74,7 +72,14 @@ def _send(delivery: dict[str, Any], config: dict[str, Any]) -> tuple[int | None,
     headers: dict[str, str] = {"X-TSI-Event-Id": str(delivery["id"])}
     if config["secret"]:
         headers[SIGNATURE_HEADER] = _sign(config["secret"], body)
-    status, response = post_json(url, json.loads(body), headers, timeout=15)
+    try:
+        status, response = post_json(url, json.loads(body), headers, timeout=15)
+    except (ValueError, OSError) as exc:
+        # CC-09/CU-08: the send-time SSRF/DNS check raises before any connection
+        # is made. That is a failed attempt for this config, never a reason to
+        # abort the sweep and strand the delivery in PROCESSING.
+        log.warning("Webhook %s to %s refused: %s", delivery["id"], url, exc)
+        return None, f"refused: {exc}"
     if status is None:
         return None, response
     if status >= 400:

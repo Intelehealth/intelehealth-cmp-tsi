@@ -105,9 +105,7 @@ def derive_ropa_entries(fiduciary_id: str, policy_id: str, policy_content: Any) 
         )
 
 
-def queue_policy_change_notices(
-    fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None
-) -> dict[str, int]:
+def queue_policy_change_notices(fiduciary_id: str, policy_id: str, new_version: str, reason: str | None = None) -> dict[str, int]:
     """CU-02/CU-03: notify principals on a materially changed policy and require fresh consent.
 
     Finds every principal holding active consent on an earlier version of this
