@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from . import db
 from .context import ADMIN_FIDUCIARY_ID
@@ -133,22 +135,47 @@ def log_event(
         )
 
 
-def verify_chain(limit: int = 100_000) -> dict:
-    """LG-04: walk the ledger oldest-first and recompute it.
+def certificate_signature(data: dict) -> str:
+    """HMAC-SHA256 over the canonical JSON of an evidence certificate (SEC-10).
 
-    Every row's prev_log_hash must equal its predecessor's current_log_hash, and a
-    v2 row's current_log_hash must equal row_hash() of its stored columns. Rows
-    from before v2 are checked for linkage only and counted as legacy.
+    Canonicalisation is `json.dumps(sort_keys=True, ensure_ascii=False)` over
+    every field except ``signature``, which is computed afterwards so the digest
+    never covers itself. Generation and verification both call this function so
+    the rule lives in exactly one place and a future verifier does not have to
+    rediscover it.
+    """
+    from .config import settings
+
+    payload = {key: value for key, value in data.items() if key != "signature"}
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hmac.new(
+        settings.certificate_signing_key.encode("utf-8"), canonical, hashlib.sha256
+    ).hexdigest()
+
+
+def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
+    """LG-04: walk the ledger and recompute it.
+
+    The walk is NEWEST-first and stops at `limit` rows, so the most recent
+    activity — where tampering would actually be attempted and noticed — is
+    always inside the checked window (SEC-10). Everything a v2 row links to and
+    every v2 row's own hash are verified; rows from before v2 are checked for
+    linkage only and counted as legacy.
+
+    When `fiduciary_id` is given, only that tenant's rows are checked, so a
+    tenant-scoped DPO can verify its own ledger without learning other tenants'
+    row ids.
     """
     cols = ", ".join(_HASHED_COLUMNS)
+    where = "WHERE fiduciary_id = %s" if fiduciary_id else ""
+    params: list[Any] = [fiduciary_id] if fiduciary_id else []
     rows = db.all(
-        f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
-        "ORDER BY timestamp ASC, id ASC LIMIT %s",
-        (limit,),
+        f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs {where} "
+        "ORDER BY timestamp DESC, id DESC LIMIT %s",
+        (*params, limit),
     )
     broken: list[dict] = []
     legacy = 0
-    previous_hash = None
     for index, row in enumerate(rows):
         meta = row.get("system_metadata") or {}
         if isinstance(meta, str):
@@ -156,14 +183,15 @@ def verify_chain(limit: int = 100_000) -> dict:
                 meta = json.loads(meta)
             except ValueError:
                 meta = {}
-        if index > 0 and (row.get("prev_log_hash") or "") != (previous_hash or ""):
-            broken.append({"id": str(row["id"]), "reason": "LINK_MISMATCH"})
+        # `row` is older than `rows[index - 1]` (we walk newest first): the
+        # newer row's prev_log_hash must equal this row's current_log_hash.
+        if index > 0 and (rows[index - 1].get("prev_log_hash") or "") != (row.get("current_log_hash") or ""):
+            broken.append({"id": str(rows[index - 1]["id"]), "reason": "LINK_MISMATCH"})
         if meta.get("hash_v") == HASH_VERSION:
             if row_hash(row.get("prev_log_hash"), row) != row.get("current_log_hash"):
                 broken.append({"id": str(row["id"]), "reason": "CONTENT_MISMATCH"})
         else:
             legacy += 1
-        previous_hash = row.get("current_log_hash")
     return {
         "intact": not broken,
         "rows_checked": len(rows),

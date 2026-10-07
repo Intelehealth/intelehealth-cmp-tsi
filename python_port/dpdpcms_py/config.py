@@ -76,10 +76,18 @@ class Settings:
     sso_jwks_url: str = ""
     # GR-04: grievance attachment limits.
     attachment_max_bytes: int = 5 * 1024 * 1024
+    # P5-07: Rule 6(1)(e) log-retention floor for webhook_deliveries (the
+    # channel of record for consent events and OTP dispatch), in days.
+    webhook_delivery_retention_days: int = 365
     # SA-14: key that signs evidence certificates. Defaults to the DB encryption
     # key so nothing new needs provisioning; a deployment may set its own
     # CERTIFICATE_SIGNING_KEY (still a server secret, never a client one).
     certificate_signing_key: str = ""
+    # P5-02: IPs of reverse proxies in front of the API. X-Forwarded-For is only
+    # honoured when the immediate peer is one of these, so a direct caller cannot
+    # self-declare its identity and every operator behind the proxy no longer
+    # shares one throttle bucket. Empty = no proxy, the socket peer is trusted.
+    trusted_proxy_ips: tuple[str, ...] = ()
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -142,6 +150,10 @@ class Settings:
             sso_jwks_url=os.getenv("SSO_JWKS_URL", ""),
             attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
             certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
+            webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
+            trusted_proxy_ips=tuple(
+                ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()
+            ),
         )
 
 

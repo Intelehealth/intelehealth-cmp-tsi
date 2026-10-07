@@ -10,6 +10,7 @@ import types
 
 import jwt as pyjwt
 import pytest
+from dpdpcms_py import throttle
 from dpdpcms_py.context import RequestContext
 from dpdpcms_py.errors import ApiError
 from dpdpcms_py.services import admin, compliance, consent, governance, rights, roles
@@ -66,7 +67,9 @@ def test_recovery_verify_throttled_and_audited(monkeypatch):
     with pytest.raises(ApiError) as exc:
         admin.OperatorService().verify_recovery_key(ctx)
     assert exc.value.status == 401
-    assert ("recovery:email", "x@y.z") in called["throttle"]
+    # SEC-01/P5-03: the account throttle key is the email HMAC, never the raw
+    # address; the per-IP key is unchanged.
+    assert ("recovery:email", throttle.email_key("x@y.z")) in called["throttle"]
     assert ("recovery:ip", "9.9.9.9") in called["throttle"]
     assert any(a[4] == "RECOVERY_KEY_FAILURE" for a in called["log"])
 
@@ -129,7 +132,9 @@ def test_login_throttled_before_credential_check(monkeypatch):
     ctx = _ctx(service="operator", func="login", payload={"identifier": "u1", "password": "x"})
     with pytest.raises(ApiError):
         admin.OperatorService().login(ctx)
-    assert ("login:identifier", "u1") in checks
+    # SEC-03/P5-03: the account key is the identifier's email-style HMAC so the
+    # throttle table never holds raw addresses.
+    assert ("login:identifier", throttle.email_key("u1")) in checks
 
 
 def test_login_success_writes_last_login_at(monkeypatch):
@@ -168,9 +173,10 @@ def test_login_success_writes_last_login_at(monkeypatch):
 
 # ── SEC-04 purge confirmation is bound to the authenticated key ─────────────
 class _PurgeDb:
-    def __init__(self, app_id=None, status="PENDING"):
+    def __init__(self, app_id=None, status="PENDING", assigned_operator_id=None):
         self.app_id = app_id
         self.status = status
+        self.assigned_operator_id = assigned_operator_id
 
     def one(self, sql, params=()):
         if "FROM purge_requests" in sql and "app_id" in sql:
@@ -183,7 +189,7 @@ class _PurgeDb:
                 "status": self.status,
                 "hold_until": None,
                 "app_id": self.app_id,
-                "assigned_operator_id": None,
+                "assigned_operator_id": self.assigned_operator_id,
             }
         if "LEGAL_HOLD_APPLIED" in sql:
             return None
@@ -602,6 +608,13 @@ def test_generate_certificate_emits_signature_and_metadata(monkeypatch):
             return None
 
     captured = {}
+    # SEC-10: generation first verifies the chain it embeds; a tampered ledger
+    # refuses to sign. The intact branch is exercised by the test below.
+    monkeypatch.setattr(
+        governance,
+        "verify_chain",
+        lambda *a, **k: {"intact": True, "rows_checked": 2, "legacy_rows_linkage_only": 0, "truncated": False},
+    )
 
     def fake_list_logs(payload):
         return [{"timestamp": datetime(2026, 1, 1), "audit_action": "CONSENT_GIVEN", "current_log_hash": "abc"}]
@@ -628,6 +641,50 @@ def test_generate_certificate_emits_signature_and_metadata(monkeypatch):
     assert data["signature_algorithm"] == "HMAC-SHA256"
     assert "environment" in data
     assert data["evidence_trail"][0]["act"] == "CONSENT_GIVEN"
+    assert data["system_metadata"]["summary"]["rows_checked"] == 2
+
+
+def test_generate_certificate_refuses_to_sign_a_tampered_chain(monkeypatch):
+    monkeypatch.setattr(
+        governance,
+        "verify_chain",
+        lambda *a, **k: {"intact": False, "rows_checked": 1, "legacy_rows_linkage_only": 0, "truncated": False},
+    )
+    monkeypatch.setattr(governance, "list_logs", lambda payload: [])
+    monkeypatch.setattr(governance, "log_event", lambda *a, **k: None)
+    ctx = _ctx(
+        service="legal",
+        func="generate_certificate",
+        payload={"fiduciary_id": FID, "subject_principal_id": "u", "case_ref_id": "c1"},
+        operator_id="op-1",
+    )
+    with pytest.raises(ApiError) as exc:
+        governance.LegalService().generate_certificate(ctx)
+    assert exc.value.status == 409
+
+
+def test_verify_certificate_detects_signature_tampering(monkeypatch):
+    from dpdpcms_py.audit import certificate_signature
+
+    data = {"principal_id": "u", "fiduciary_id": FID, "timestamp": "2026-01-01T00:00:00+00:00"}
+    data["signature"] = certificate_signature(data)
+
+    def one(sql, params=()):
+        assert "FROM evidence_certificates" in sql
+        return {"certificate_data": data}
+
+    monkeypatch.setattr(governance.db, "one", one)
+    monkeypatch.setattr(governance, "log_event", lambda *a, **k: None)
+    ctx = _ctx(service="legal", func="verify_certificate", payload={"id": "cert-1"}, fiduciary_id=FID)
+    assert governance.LegalService().verify_certificate(ctx)["valid"] is True
+
+    tampered = {**data, "principal_id": "another-principal"}
+    monkeypatch.setattr(
+        governance.db,
+        "one",
+        lambda sql, params=(): {"certificate_data": tampered},
+    )
+    assert governance.LegalService().verify_certificate(ctx)["valid"] is False
 
 
 def test_generate_certificate_requires_subject_principal_id():
@@ -649,3 +706,369 @@ def test_console_pages_escape_interpolations():
         if "function esc(s)" not in text:
             bad.append(page.name)
     assert bad == []
+
+
+# ── SEC-11 residual: every tour page that renders API data escapes it ──────
+def test_tour_pages_escape_api_interpolations():
+    from dpdpcms_py.config import WEB_ROOT
+
+    bad = []
+    for page in (WEB_ROOT / "tour").glob("*.html"):
+        text = page.read_text(encoding="utf-8", errors="ignore")
+        if "innerHTML" not in text:
+            continue
+        if "function esc(s)" not in text:
+            bad.append(page.name)
+    assert bad == []
+
+
+# ── P5-01 the grievance statements run before the generic erasure loop ─────
+class _ErasureCursor:
+    def __init__(self):
+        self.sql = []
+        self._rows = []
+        self.rowcount = 1
+
+    def execute(self, sql, params=()):
+        self.sql.append(sql)
+        self._rows = [{"storage_path": "p1"}] if "RETURNING storage_path" in sql else []
+        self.rowcount = 1
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_erasure_orders_grievance_statements_before_the_loop(monkeypatch, tmp_path):
+    cursor = _ErasureCursor()
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(compliance.db, "connection", fake_connection)
+    monkeypatch.setattr(compliance.db, "one", lambda sql, params=(): None)
+    compliance.erase_cms_copy(FID, "asha")
+    # The dedicated grievance DELETE and the text-blanking UPDATE come first,
+    # before any statement of the generic loop, so their WHERE clauses still
+    # match the ORIGINAL user_id.
+    del_idx = next(i for i, s in enumerate(cursor.sql) if "DELETE FROM grievance_attachments" in s)
+    upd_idx = next(i for i, s in enumerate(cursor.sql) if "attachments = '[]'::jsonb" in s)
+    generic_idx = next(
+        i for i, s in enumerate(cursor.sql) if s.lstrip().startswith("UPDATE") and "grievances" not in s
+    )
+    assert del_idx < generic_idx and upd_idx < generic_idx
+    # The generic loop no longer re-keys grievances a second time.
+    grievance_updates = [s for s in cursor.sql if s.lstrip().startswith("UPDATE grievances")]
+    assert len(grievance_updates) == 1
+    # SEC-15 survivors are scrubbed too.
+    assert any("UPDATE evidence_certificates" in s for s in cursor.sql)
+    assert any("SET guardian_id" in s for s in cursor.sql)
+    assert any("SET ip_address = '0.0.0.0'" in s for s in cursor.sql)
+    assert any("UPDATE webhook_deliveries" in s for s in cursor.sql)
+
+
+# ── P5-02 the throttle counter resets when a lapsed lock is observed ────────
+def test_throttle_lapsed_lock_starts_a_fresh_window(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    lapsed = now - timedelta(minutes=5)
+    captured = {}
+
+    class _Cursor:
+        def __init__(self):
+            self.phase = 0
+
+        def execute(self, sql, params=()):
+            if self.phase == 1 and "INSERT INTO auth_throttles" in sql:
+                captured["params"] = params
+            self.phase += 1
+
+        def fetchone(self):
+            return {"failures": 5, "locked_until": lapsed, "lockout_minutes": 30}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(throttle.db, "connection", fake_connection)
+    throttle.record_failure("login:ip", "1.2.3.4")
+    # P5-02: after a lapsed lock the counter restarts at 1 (not 6) and no lock
+    # is set, so one attempt every 15 minutes can no longer lock the key for
+    # ever. The single failure is a fresh window, not a re-lock.
+    assert captured["params"][2] == 1
+    assert captured["params"][3] is None
+
+
+def test_throttle_lock_escalates_geometrically(monkeypatch):
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    captured = {}
+
+    class _Cursor:
+        def __init__(self):
+            self.phase = 0
+
+        def execute(self, sql, params=()):
+            if self.phase == 1 and "INSERT INTO auth_throttles" in sql:
+                captured["params"] = params
+            self.phase += 1
+
+        def fetchone(self):
+            # Four prior failures, the last lock 30 minutes long and lapsed.
+            return {"failures": 4, "locked_until": None, "lockout_minutes": 30}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(throttle.db, "connection", fake_connection)
+    throttle.record_failure("login:ip", "1.2.3.4")
+    # The 5th failure sets a lock whose duration doubles the previous one
+    # (30 -> 60 minutes, capped at MAX_LOCKOUT_MINUTES).
+    assert captured["params"][2] == 5
+    assert captured["params"][4] == 60
+    assert captured["params"][3] > now
+
+
+def test_throttle_email_key_normaliases_and_stores_no_address():
+    assert throttle.email_key(" A@X.Y ") == throttle.email_key("a@x.y")
+    assert "a@x.y" not in throttle.email_key("a@x.y")
+    assert throttle.email_key("x").startswith("hmac:")
+
+
+# ── SEC-18 non-ADMIN operators must belong to a fiduciary ───────────────────
+def test_create_user_refuses_non_admin_without_fiduciary(monkeypatch):
+    monkeypatch.setattr(admin, "verified_role", lambda ctx: "ADMIN")
+    monkeypatch.setattr(admin, "authenticated_user_id", lambda ctx: "admin-1")
+    monkeypatch.setattr(admin.db, "one", lambda sql, params=(): {"x": 1})
+    ctx = _ctx(
+        service="operator",
+        func="create_user",
+        payload={"username": "op", "email": "op@x.y", "password": "longenough12", "role": "OPERATOR"},
+    )
+    with pytest.raises(ApiError) as exc:
+        admin.OperatorService().create_user(ctx)
+    assert exc.value.status == 400
+    assert "fiduciary_id" in str(exc.value.message)
+
+
+# ── SEC-05 the s.9 gate reads the stored age_category ───────────────────────
+def test_record_consent_stored_minor_without_guardian_is_rejected(monkeypatch):
+    from dpdpcms_py.services import consent as consent_mod
+
+    payload = {
+        "user_id": "asha",
+        "policy_id": "p1",
+        "data_point_consents": [{"data_point_id": "care", "consent_granted": True}],
+        "jurisdiction": "IN",
+        "language_selected": "en",
+    }
+    ctx = _ctx(
+        category="client",
+        service="consent",
+        func="record_consent",
+        payload=payload,
+        fiduciary_id=FID,
+        source_ip="1.2.3.4",
+        headers={"user-agent": "test-agent"},
+    )
+    policy_content = {"en": {"title": "P", "data_processing_purposes": [{"id": "care", "name": "Care"}]}}
+
+    def one(sql, params=()):
+        if "SELECT version, policy_content FROM consent_policies" in sql:
+            return {"version": "v1", "policy_content": policy_content}
+        if "SELECT policy_content FROM consent_policies" in sql:
+            return {"policy_content": policy_content}
+        if "SELECT age_category FROM data_principal" in sql:
+            return {"age_category": "MINOR"}
+        return None  # no verified guardian log for the stored minor
+
+    monkeypatch.setattr(consent_mod.db, "one", one)
+    monkeypatch.setattr(consent_mod.db, "all", lambda sql, params=(): [])
+    with pytest.raises(ApiError) as exc:
+        consent_mod.ConsentService().record_consent(ctx)
+    assert exc.value.status == 403
+    assert "guardian" in str(exc.value.message).lower()
+
+
+def test_record_consent_cannot_flip_stored_minor_to_adult(monkeypatch):
+    from dpdpcms_py.services import consent as consent_mod
+
+    payload = {
+        "user_id": "asha",
+        "policy_id": "p1",
+        "data_point_consents": [{"data_point_id": "care", "consent_granted": True}],
+        "age_category": "ADULT",
+        "jurisdiction": "IN",
+        "language_selected": "en",
+    }
+    ctx = _ctx(
+        category="client",
+        service="consent",
+        func="record_consent",
+        payload=payload,
+        fiduciary_id=FID,
+    )
+    policy_content = {"en": {"title": "P", "data_processing_purposes": [{"id": "care", "name": "Care"}]}}
+
+    def one(sql, params=()):
+        if "SELECT version, policy_content FROM consent_policies" in sql:
+            return {"version": "v1", "policy_content": policy_content}
+        if "SELECT policy_content FROM consent_policies" in sql:
+            return {"policy_content": policy_content}
+        if "SELECT age_category FROM data_principal" in sql:
+            return {"age_category": "MINOR"}
+        return None
+
+    monkeypatch.setattr(consent_mod.db, "one", one)
+    monkeypatch.setattr(consent_mod.db, "all", lambda sql, params=(): [])
+    with pytest.raises(ApiError) as exc:
+        consent_mod.ConsentService().record_consent(ctx)
+    assert exc.value.status == 403
+    assert "minor" in str(exc.value.message).lower()
+
+
+# ── SEC-12 rowcount is honoured by update_user too ─────────────────────────
+def test_update_user_404_when_no_row(monkeypatch):
+    monkeypatch.setattr(admin.db, "execute", lambda *a, **k: 0)
+    monkeypatch.setattr(admin, "verified_role", lambda ctx: "ADMIN")
+    ctx = _ctx(service="operator", func="update_user", payload={"user_id": "missing", "username": "x"})
+    with pytest.raises(ApiError) as exc:
+        admin.OperatorService().update_user(ctx)
+    assert exc.value.status == 404
+
+
+# ── P5-06 create_nomination lets DEFAULT NOW() set valid_from ───────────────
+def test_create_nomination_defaults_valid_from(monkeypatch):
+    executed = []
+
+    def fake_insert(sql, params=()):
+        executed.append(sql)
+        return {"id": "n-1"}
+
+    monkeypatch.setattr(rights.db, "insert_returning", fake_insert)
+    monkeypatch.setattr(rights, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(rights, "resolve_fiduciary", lambda ctx: FID)
+    ctx = _ctx(
+        category="client",
+        service="rights",
+        func="create_nomination",
+        payload={"nominating_principal_id": "a", "nominated_principal_id": "b"},
+        fiduciary_id=FID,
+    )
+    rights.RightsService().create_nomination(ctx)
+    insert = next(s for s in executed if "INSERT INTO nominations" in s)
+    assert "valid_from" not in insert, "valid_from must be omitted so the DEFAULT NOW() applies"
+    assert "valid_until" in insert
+
+
+# ── P5-04 / SEC-04 purge binding falls back to the assigned party ───────────
+def test_confirm_purge_key_allowed_for_null_app_undesignated_request(monkeypatch):
+    capture = _PurgeDb(app_id=None, assigned_operator_id=None)
+    executed = []
+    monkeypatch.setattr(compliance.db, "one", capture.one)
+    monkeypatch.setattr(compliance.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
+    monkeypatch.setattr(compliance, "erase_cms_copy", lambda *a, **k: {})
+    monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
+    ctx = _confirm_ctx(app_id=APP_ID, permissions={"PURGE"})
+    out = compliance.ComplianceService().confirm_purge_status(ctx)
+    assert out["success"] is True
+
+
+def test_confirm_purge_delegated_request_is_bound_to_the_assignee(monkeypatch):
+    capture = _PurgeDb(app_id=None, assigned_operator_id="op-1")
+    executed = []
+    monkeypatch.setattr(compliance.db, "one", capture.one)
+    monkeypatch.setattr(compliance.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
+    monkeypatch.setattr(compliance, "erase_cms_copy", lambda *a, **k: {})
+    monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
+    # An API key may not close a request delegated to a specific operator...
+    ctx = _confirm_ctx(app_id=APP_ID, permissions={"PURGE"})
+    with pytest.raises(ApiError) as exc:
+        compliance.ComplianceService().confirm_purge_status(ctx)
+    assert exc.value.status == 403
+    # ...but the assignee operator may.
+    ctx2 = _confirm_ctx(operator_id="op-1", auth_token={"email": "dpo@x.y", "role": "DPO"})
+    out = compliance.ComplianceService().confirm_purge_status(ctx2)
+    assert out["success"] is True
+
+
+# ── SEC-17 GET validation and the death of ?auth= ───────────────────────────
+def test_get_on_a_write_function_is_405():
+    from dpdpcms_py import main as main_mod
+    from fastapi.testclient import TestClient
+
+    response = TestClient(main_mod.app).get(
+        "/api/v1/operator",
+        params={
+            "_func": "reset_password_via_recovery",
+            "email": "a@b.c",
+            "passphrase": "p",
+            "new_password": "longenough12",
+        },
+    )
+    assert response.status_code == 405, response.text
+
+
+def test_auth_query_parameter_no_longer_authenticates():
+    from dpdpcms_py import main as main_mod
+    from fastapi.testclient import TestClient
+
+    response = TestClient(main_mod.app).get("/api/v1/operator", params={"_func": "list_users", "auth": "forged"})
+    assert response.status_code == 401, response.text
+
+
+def test_get_read_dispatch_validates_and_reaches_the_handler(monkeypatch):
+    from dpdpcms_py import main as main_mod
+    from dpdpcms_py.services import consent as consent_mod
+    from fastapi.testclient import TestClient
+
+    called = []
+
+    def fake_handle(self, ctx):
+        called.append((ctx.func, dict(ctx.payload)))
+        return {"success": True}
+
+    monkeypatch.setattr(consent_mod.ConsentService, "handle", fake_handle)
+    monkeypatch.setattr(
+        main_mod,
+        "decode_token",
+        lambda raw: {"typ": "principal", "fid": FID, "sub": "asha", "jti": "j1"},
+    )
+    response = TestClient(main_mod.app).get(
+        "/api/v1/client/consent", params={"_func": "get_active_consent", "user_id": "asha"}
+    )
+    assert response.status_code == 200, response.text
+    assert called and called[0][0] == "get_active_consent"

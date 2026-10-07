@@ -305,7 +305,26 @@ class ConsentService(Service):
         age_category = str(payload["age_category"]).upper() if payload.get("age_category") else None
         guardian_id = payload.get("guardian_id")
         verification_log_id = payload.get("verification_log_id")
-        if age_category == "MINOR":
+        # SEC-05 (residual): the s.9 gate keys off the STORED record, not the
+        # body. A principal the CMS already classified as MINOR stays a minor
+        # when the request omits age_category (the old code skipped the gate)
+        # and cannot be flipped to ADULT over the wire, since nothing downstream
+        # compares the two values.
+        stored = db.one(
+            "SELECT age_category FROM data_principal WHERE user_id = %s AND fiduciary_id = %s",
+            (user_id, fid),
+        )
+        stored_age = (
+            str(stored["age_category"]).strip().upper() if stored and stored.get("age_category") else None
+        )
+        if stored_age == "MINOR" and age_category == "ADULT":
+            raise ApiError(
+                403,
+                "Forbidden",
+                "This principal is recorded as a minor; consent can only be recorded with a verified guardian.",
+            )
+        effective_age = "MINOR" if stored_age == "MINOR" else age_category
+        if effective_age == "MINOR":
             # CC-05: a minor's consent always rests on a VERIFIED guardian log;
             # naming a guardian_id alone is an assertion, not a verification.
             where = "child_principal_id = %s AND fiduciary_id = %s AND verification_status = 'VERIFIED'"
@@ -381,9 +400,9 @@ class ConsentService(Service):
                     user_id,
                     fid,
                     observed["mechanism"],
-                    age_category,
+                    effective_age,
                     guardian_id,
-                    "GUARDIAN_VERIFIED" if age_category == "MINOR" else None,
+                    "GUARDIAN_VERIFIED" if effective_age == "MINOR" else None,
                 ),
             )
         _notify_principal(user_id, fid, NOTIF_CONSENT_GIVEN)
@@ -510,16 +529,58 @@ class ConsentService(Service):
         return _consent_row(row)
 
     def get_consent_record_details(self, ctx: RequestContext) -> dict:
-        where = ["id = %s"]
-        params: list[Any] = [require(ctx.payload.get("record_id"), "record_id")]
+        # P4-01: the wallet's GET_CONSENT_DETAILS sends policy_id, not record_id.
+        # Accept either: record_id reads one record; policy_id reads the
+        # principal's active record for that policy.
+        where: list[str] = []
+        params: list[Any] = []
+        record_id = ctx.payload.get("record_id")
+        policy_id = ctx.payload.get("policy_id")
+        if record_id:
+            where.append("id = %s")
+            params.append(record_id)
+        elif policy_id:
+            where.append("policy_id = %s")
+            where.append("is_active_consent IS TRUE")
+            params.append(policy_id)
+        else:
+            raise ApiError(400, "Bad Request", "'record_id' or 'policy_id' is required.")
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
-        row = db.one(f"SELECT * FROM consent_records WHERE {' AND '.join(where)}", params)
+        row = db.one(
+            f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT 1", params
+        )
         if not row:
             raise ApiError(404, "Not Found", "Consent record not found.")
         ensure_principal_owns(ctx, row.get("user_id"), label="Consent record")
-        return _consent_row(row)
+        out = _consent_row(row)
+        # P4-01: give the wallet the policy title and persona labels alongside
+        # the record, mirroring what GET_POLICY_PURPOSES returns.
+        if out is not None:
+            policy = db.one(
+                "SELECT policy_content FROM consent_policies WHERE id = %s AND fiduciary_id = %s",
+                (row["policy_id"], row["fiduciary_id"]),
+            )
+            content = (policy or {}).get("policy_content") or {}
+            lang_block = next(iter(content.values()), {})
+            out["policy_title"] = (
+                lang_block.get("title") if isinstance(lang_block, dict) else None
+            ) or str(row["policy_id"])
+            out["personas"] = db.to_jsonable(
+                db.all(
+                    """
+                    SELECT DISTINCT lower(replace(trim(cat), ' ', '_')) AS id, trim(cat) AS label
+                    FROM ropa_entries e,
+                         LATERAL jsonb_array_elements_text(e.data_subject_categories) AS cat
+                    WHERE e.fiduciary_id = %s AND e.linked_policy_ids @> %s AND e.status = 'active'
+                      AND trim(cat) <> ''
+                    ORDER BY label LIMIT 100
+                    """,
+                    (str(row["fiduciary_id"]), db.as_jsonb([str(row["policy_id"])])),
+                )
+            )
+        return out
 
     def list_consent_history(self, ctx: RequestContext) -> list[dict]:
         bind_principal_field(ctx, "user_id")

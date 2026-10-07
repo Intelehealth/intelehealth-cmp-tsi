@@ -23,8 +23,10 @@ backups/
 
 # Local BRD / analysis artifacts (not for the repo)
 DPDP_Python_Port_Findings.docx
-MeitY_BRD_API_Traceability_v2.xlsx
-MeitY_BRD_API_Traceability_v3.xlsx
+# P5-05: a workbook describing open security findings must never be committed;
+# security workbooks live outside the repository.
+*.xlsx
+*.xlsm
 
 # Editors and OS
 .idea/

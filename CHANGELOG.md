@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (173 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, and the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`).
+- Unit tests under `python_port/tests/` (205 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, and the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -160,10 +160,72 @@ All notable changes in this branch are documented here for reviewers and operato
 - **Out of scope:** BRD 4.2 Cookie Consent (CK-01..10), by decision.
 - DB script: `18_brd_traceability.sql`. Dependency: `PyJWT[crypto]`.
 
+### Fixed (Security workbook v2, defect-remediation round 2, branch `p6_defect_fixes`)
+
+- **P5-01 / SEC-15** Erasure ordering fixed in `erase_cms_copy`: the grievance
+  attachment DELETE and the text-blanking UPDATE run before the generic
+  `ERASURE_TARGETS` loop (whose re-keying once made both predicates match
+  nothing), grievances are skipped inside the loop, and `resolution_details` is
+  blanked too. The remaining SEC-15 survivors are now scrubbed:
+  `evidence_certificates.subject_principal_id`, `data_principal.guardian_id` on
+  other principals' rows, `consent_records` session metadata, and the raw
+  `user_id` inside `alerts.payload` and `webhook_deliveries.payload`. The
+  tautological coverage test was replaced with one that executes
+  `erase_cms_copy` and asserts the statement ordering.
+- **SEC-17** Schema validation now runs on GET as well as POST, and GET is
+  restricted to read-classified functions (405 for a write over GET). The admin
+  auth path no longer reads `?auth=` from the query string, so a credential can
+  never sit in a URL, browser history or proxy log.
+- **SEC-05** The s.9 gate reads the *stored* `age_category` in
+  `record_consent`: a stored MINOR stays a minor when the body is silent,
+  declaring ADULT for a stored MINOR is refused, and a VERIFIED guardian log is
+  required whenever the effective age is MINOR.
+- **P5-02** The throttle counter decays: observing a lapsed lock (or a
+  saturated counter) starts a fresh window, and locks escalate geometrically
+  (15m → 30m → 60m cap). X-Forwarded-For is honoured only behind a configured
+  `TRUSTED_PROXY_IPS`, so reverse-proxied operators each get their own bucket.
+- **P5-03 / SEC-01** Account throttle keys are the deployment-key HMAC of
+  `lower(trim(email))` (`throttle.email_key`), never the raw address; the
+  normalisation variants share one bucket.
+- **P5-04 / SEC-04** The purge app-binding falls back when a request has no
+  initiating app (closure/sweep/console/principal erasures can again be closed
+  by the tenant's processor), and a request delegated to a specific operator is
+  bound to that operator, for API keys and console callers alike.
+- **SEC-18** `create_user` refuses a non-ADMIN role without a `fiduciary_id`,
+  closing the NULL-fiduciary account shape that defeated tenancy checks.
+- **P5-06** `create_nomination` omits `valid_from` so the `DEFAULT NOW()`
+  applies; omitting the field no longer 500s.
+- **P5-07** `webhook_deliveries` is treated as a Rule 6(1)(e) access log: the
+  terminal-row retain floor is 365 days (`WEBHOOK_DELIVERY_RETENTION_DAYS`),
+  not a hard-coded 30. See design decision DD-05.
+- **SEC-13** `db/21` adds a one-off DELETE of pre-encryption webhook rows whose
+  payload still carries the plaintext `otp`, so the raised retention floor does
+  not preserve codes from before the fix.
+- **SEC-10** Generation and verification share `audit.certificate_signature`;
+  `generate_certificate` verifies the chain it embeds and refuses (409) to sign
+  a tampered ledger; new `verify_certificate` recomputes the HMAC;
+  `verify_chain` walks newest-first (recent tampering cannot hide outside the
+  limit) and accepts a tenant scope, so a tenant-scoped DPO verifies its own
+  ledger.
+- **SEC-12** `update_user` now honours the rowcount pattern (404 on zero).
+- **CF-02 / SEC-11** `tour/consent-verifier.html` and
+  `tour/parent-consent.html` carry the `esc()` helper and escape all API data.
+- **P4-01** The wallet's `GET_POLICY_PURPOSES` (accepts `policy_id`, serves
+  `purposes`/`policy_title`/`personas`) and `GET_CONSENT_DETAILS` (accepts
+  `policy_id`, resolves the principal's active record) no longer 400 on the
+  fields the client actually sends.
+- **CF-03 / CF-04** CHANGELOG test count corrected to 205; the README upgrade
+  loop and table list `db/20` and `db/21` (`13`–`21`).
+- **CF-05** Cookie/tracker consent decided: only strictly-necessary cookies are
+  set; BRD 4.2 is read Not applicable via DD-04.
+- **P5-05** The security findings workbook was removed from the repository,
+  `*.xlsx` is gitignored, and the file was purged from local history.
+- New `db/21_defect_remediation_p6.sql`.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/20` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Existing database:** Run `db/13` through `db/21` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
 - **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

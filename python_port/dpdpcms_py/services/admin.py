@@ -87,7 +87,10 @@ class OperatorService(Service):
         password = require(ctx.payload.get("password"), "password")
         ip = ctx.source_ip or "unknown"
         # SEC-03: a password spray must be throttled at the account and the IP.
-        throttle.require_allowed("login:identifier", identifier)
+        # SEC-01/P5-03: the account key is the email HMAC, never the raw
+        # identifier, so case/whitespace variants share one bucket and the
+        # throttle table never stores addresses in clear.
+        throttle.require_allowed("login:identifier", throttle.email_key(identifier))
         throttle.require_allowed("login:ip", ip)
         row = db.one(
             f"""
@@ -99,7 +102,7 @@ class OperatorService(Service):
             (*db.bind_key(), identifier, *db.bind_hmac(identifier)),
         )
         if not row or row["status"] != "ACTIVE" or not verify_password(password, row["password_hash"]):
-            throttle.record_failure("login:identifier", identifier)
+            throttle.record_failure("login:identifier", throttle.email_key(identifier))
             throttle.record_failure("login:ip", ip)
             log_event(
                 identifier,
@@ -113,7 +116,7 @@ class OperatorService(Service):
             raise ApiError(401, "Unauthorized", "Invalid credentials or account inactive.")
         # SEC-03: a successful login clears the throttle and writes the signal
         # a reviewer can spot from (last_login_at was never being written).
-        throttle.record_success("login:identifier", identifier)
+        throttle.record_success("login:identifier", throttle.email_key(identifier))
         throttle.record_success("login:ip", ip)
         db.execute("UPDATE operators SET last_login_at = NOW() WHERE id = %s", (row["id"],))
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ADMIN_FIDUCIARY_ID
@@ -444,6 +447,13 @@ class OperatorService(Service):
             fid = operator_fiduciary_id(login_uid)
         else:
             fid = payload.get("fiduciary_id") or None
+        # SEC-18: a non-ADMIN operator with a NULL fiduciary_id defeats every
+        # tenancy check in the system, so that account shape is refused at
+        # creation instead of patching each caller. Only a global ADMIN may hold
+        # no tenant. This also means the reverse: any tenant-scoped caller is
+        # guaranteed a fiduciary_id below.
+        if role != "ADMIN" and not fid:
+            raise ApiError(400, "Bad Request", "Non-ADMIN operators must belong to a fiduciary_id.")
         username = require(payload.get("username"), "username")
         email = require(payload.get("email"), "email")
         password = require(payload.get("password"), "password")
@@ -474,7 +484,11 @@ class OperatorService(Service):
             params.append(ctx.payload.get("fiduciary_id") or None)
         scope, scope_params = tenant_filter(ctx)
         params.extend([uid, *scope_params])
-        db.execute(f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'{scope}", params)
+        updated = db.execute(f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'{scope}", params)
+        # SEC-12: an update that did not happen (unknown id, ADMIN target, or a
+        # cross-tenant id) is not logged or reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "User not found.")
         log_event(
             ctx.actor_email or "ADMIN",
             ctx.fiduciary_id or ADMIN_FIDUCIARY_ID,
@@ -529,15 +543,17 @@ class OperatorService(Service):
         ip = ctx.source_ip or "unknown"
         # SEC-01: the recovery passphrase is a bearer token; throttle both the
         # account and the source IP so it cannot be guessed or replayed, and
-        # audit the attempt so a takeover leaves a trace.
-        throttle.require_allowed("recovery:email", email)
+        # audit the attempt so a takeover leaves a trace. The account key is
+        # the email HMAC (SEC-01/P5-03) so raw addresses never rest in
+        # auth_throttles.key and normalisation variants share one bucket.
+        throttle.require_allowed("recovery:email", throttle.email_key(email))
         throttle.require_allowed("recovery:ip", ip)
         row = db.one(
             f"SELECT recovery_key_hash FROM operators WHERE email_hmac = {db.hmac_expr()} AND status = 'ACTIVE'",
             db.bind_hmac(email),
         )
         if not row or not verify_password(phrase, row["recovery_key_hash"]):
-            throttle.record_failure("recovery:email", email)
+            throttle.record_failure("recovery:email", throttle.email_key(email))
             throttle.record_failure("recovery:ip", ip)
             log_event(
                 email,
@@ -549,7 +565,7 @@ class OperatorService(Service):
                 source_ip=ctx.source_ip,
             )
             raise ApiError(401, "Unauthorized", "Invalid verification key.")
-        throttle.record_success("recovery:email", email)
+        throttle.record_success("recovery:email", throttle.email_key(email))
         throttle.record_success("recovery:ip", ip)
         log_event(
             email,

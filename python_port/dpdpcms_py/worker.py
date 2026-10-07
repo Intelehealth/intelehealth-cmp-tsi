@@ -62,7 +62,7 @@ def list_sweeps() -> list[str]:
         "jobs.expire_lapsed_api_keys              (SEC-07 expiry enforcement)",
         "throttle.prune_expired                   (SEC-01/03 throttle table)",
         "jobs.prune_sso_nonces                    (SEC-14 one-time SSO nonces)",
-        "jobs.prune_old_webhook_deliveries          (SEC-13 webhook retention)",
+        "jobs.prune_old_webhook_deliveries          (SEC-13/P5-07 webhook retention)",
     ]
 
 

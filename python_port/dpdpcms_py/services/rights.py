@@ -25,8 +25,8 @@ class RightsService(Service):
             """
             INSERT INTO nominations
                 (id, fiduciary_id, nominating_principal_id, nominated_principal_id,
-                 relationship, valid_from, valid_until, status, created_at, last_updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, 'ACTIVE', NOW(), NOW())
+                 relationship, valid_until, status, created_at, last_updated_at)
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, 'ACTIVE', NOW(), NOW())
             RETURNING id
             """,
             (
@@ -34,7 +34,6 @@ class RightsService(Service):
                 nominator,
                 nominated,
                 ctx.payload.get("relationship"),
-                ctx.payload.get("valid_from") or None,
                 ctx.payload.get("valid_until") or None,
             ),
         )

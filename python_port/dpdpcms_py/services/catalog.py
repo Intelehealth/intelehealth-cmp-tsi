@@ -446,14 +446,53 @@ class PolicyService(Service):
 
     def get_active_policy(self, ctx: RequestContext) -> dict:
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
-        jurisdiction = require(ctx.payload.get("jurisdiction"), "jurisdiction")
-        row = db.one(
-            "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE fiduciary_id = %s AND jurisdiction = %s AND status = 'ACTIVE' AND effective_date <= NOW() ORDER BY effective_date DESC LIMIT 1",
-            (fid, jurisdiction),
-        )
+        # P4-01: the wallet's GET_POLICY_PURPOSES sends policy_id, not
+        # jurisdiction; prefer the named policy and fall back to the active
+        # policy for the jurisdiction (defaulting to the system's IN default).
+        policy_id = ctx.payload.get("policy_id")
+        if policy_id:
+            row = db.one(
+                "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE' AND effective_date <= NOW() ORDER BY effective_date DESC LIMIT 1",
+                (policy_id, fid),
+            )
+        else:
+            jurisdiction = str(ctx.payload.get("jurisdiction") or "IN").upper()
+            row = db.one(
+                "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE fiduciary_id = %s AND jurisdiction = %s AND status = 'ACTIVE' AND effective_date <= NOW() ORDER BY effective_date DESC LIMIT 1",
+                (fid, jurisdiction),
+            )
         if not row:
             raise ApiError(404, "Not Found", "No active policy found.")
-        return db.to_jsonable(row)
+        out = db.to_jsonable(row)
+        # The wallet's GET_POLICY_PURPOSES consumes a purpose/persona view of
+        # the policy; serve it from the same content the ROPA derivation used.
+        content = row.get("policy_content") or {}
+        out["purposes"] = [
+            {
+                "id": str(purpose.get("id")),
+                "name": purpose.get("name"),
+                "description": purpose.get("description"),
+                "is_mandatory_for_service": bool(purpose.get("is_mandatory_for_service")),
+            }
+            for purpose in _policy_purposes(content)
+            if purpose.get("id")
+        ]
+        lang_block = next(iter(content.values()), {})
+        out["policy_title"] = (lang_block.get("title") if isinstance(lang_block, dict) else None) or out["policy_id"]
+        out["personas"] = db.to_jsonable(
+            db.all(
+                """
+                SELECT DISTINCT lower(replace(trim(cat), ' ', '_')) AS id, trim(cat) AS label
+                FROM ropa_entries e,
+                     LATERAL jsonb_array_elements_text(e.data_subject_categories) AS cat
+                WHERE e.fiduciary_id = %s AND e.linked_policy_ids @> %s AND e.status = 'active'
+                  AND trim(cat) <> ''
+                ORDER BY label LIMIT 100
+                """,
+                (fid, db.as_jsonb([out["policy_id"]])),
+            )
+        )
+        return out
 
     def create_policy(self, ctx: RequestContext) -> dict:
         reject_operator(ctx)

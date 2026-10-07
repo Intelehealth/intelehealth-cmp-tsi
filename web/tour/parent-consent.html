@@ -191,6 +191,13 @@
     let X_API_SECRET = null;
     let POLICY_ID = null;
 
+    // CF-02/SEC-11: policy contents come from the API and are caller-controllable;
+    // escape every interpolated value before it reaches innerHTML.
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     let currentPolicy = null;
     let verificationLogId = null;
     let learnerChoices = {};
@@ -269,14 +276,14 @@
             div.innerHTML = `
                 <div class="flex justify-between items-start mb-2">
                     <div class="max-w-[85%]">
-                        <p class="font-bold text-slate-800 text-sm">${p.name}</p>
-                        <p class="text-[10px] text-slate-500 mt-1">${p.description}</p>
+                        <p class="font-bold text-slate-800 text-sm">${esc(p.name)}</p>
+                        <p class="text-[10px] text-slate-500 mt-1">${esc(p.description)}</p>
                     </div>
-                    <input type="checkbox" id="check-${p.id}" ${p.is_mandatory_for_service ? 'checked disabled' : 'checked'}
+                    <input type="checkbox" id="check-${esc(p.id)}" ${p.is_mandatory_for_service ? 'checked disabled' : 'checked'}
                         class="w-5 h-5 rounded border-slate-300 text-teal-600 focus:ring-teal-500">
                 </div>
                 <div class="flex gap-2 mt-3">
-                    <span class="text-[8px] font-black uppercase bg-white border px-1.5 py-0.5 rounded text-slate-400">Retention: ${p.retention_duration_value} ${p.retention_duration_unit}</span>
+                    <span class="text-[8px] font-black uppercase bg-white border px-1.5 py-0.5 rounded text-slate-400">Retention: ${esc(p.retention_duration_value)} ${esc(p.retention_duration_unit)}</span>
                     ${requiresVPC ? '<span class="text-[8px] font-black uppercase bg-amber-50 text-amber-600 border border-amber-100 px-1.5 py-0.5 rounded">VPC REQUIRED</span>' : ''}
                 </div>
             `;

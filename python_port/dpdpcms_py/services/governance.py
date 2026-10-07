@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 
 from .. import db
-from ..audit import get_log, list_logs, log_event
+from ..audit import certificate_signature, get_log, list_logs, log_event, verify_chain
 from ..config import settings
 from ..context import RequestContext
 from ..errors import ApiError
@@ -139,18 +139,16 @@ class AuditService(Service):
     def verify_audit_chain(self, ctx: RequestContext) -> dict:
         """LG-04: recompute the hash-chained ledger and report any break.
 
-        The chain spans every tenant, so only a global (unscoped) operator may run
-        it; a tenant-scoped auditor would otherwise learn other tenants' row ids."""
-        from ..audit import verify_chain
+        SEC-10: a tenant-scoped DPO or auditor may verify its own tenant's
+        rows (fiduciary_id is passed as a scope), while a global operator keeps
+        the platform-wide view. Neither learns other tenants' row ids. The walk
+        is newest-first so recent tampering cannot hide outside the limit.
+        """
         from .roles import require_audit_access
 
         require_audit_access(ctx)
-        if ctx.fiduciary_id:
-            raise ApiError(
-                403, "Forbidden", "Audit chain verification spans all tenants; a global administrator must run it."
-            )
         limit = min(max(int(ctx.payload.get("limit") or 100_000), 1), 1_000_000)
-        return verify_chain(limit)
+        return verify_chain(limit, fiduciary_id=ctx.fiduciary_id)
 
     def list_recent_audit_logs(self, ctx: RequestContext) -> list[dict]:
         from .roles import require_audit_access
@@ -599,15 +597,23 @@ class LegalService(Service):
         environment metadata and an HMAC signature over that payload. The signing
         key is a deployment secret (`certificate_signing_key`), not a client
         secret the CMS serves; the algorithm and metadata are recorded so the
-        certificate is verifiable rather than a bare log dump.
+        certificate is verifiable rather than a bare log dump. SEC-10: the chain
+        the certificate embeds is itself verified first — a certificate over a
+        tampered ledger is refused rather than signed without complaint.
         """
-        import hashlib
-        import hmac as hmac_lib
-
         principal = require(ctx.payload.get("subject_principal_id"), "subject_principal_id")
         fiduciary_id = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         case_ref = ctx.payload.get("case_ref_id")
         logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": 500})
+        # SEC-10: never sign a ledger that does not verify. The chain check is
+        # scoped to this fiduciary so a DPO needs no global access to issue.
+        chain = verify_chain(limit=2_000_000, fiduciary_id=fiduciary_id)
+        if not chain["intact"]:
+            raise ApiError(
+                409,
+                "Conflict",
+                "The audit chain for this fiduciary does not verify; a certificate cannot be issued over tampered evidence.",
+            )
         fiduciary = db.one("SELECT name FROM fiduciaries WHERE id = %s", (fiduciary_id,))
         generated_at = datetime.now(UTC)
         evidence_trail = [
@@ -629,14 +635,14 @@ class LegalService(Service):
                 "environment": settings.environment,
                 "generated_by": "TSI DPDP CMS",
                 "node": "python_port",
+                "chain_verified_at": generated_at.isoformat(),
+                "summary": {key: chain[key] for key in ("rows_checked", "legacy_rows_linkage_only", "truncated")},
             },
             "evidence_trail": evidence_trail,
             "signature_algorithm": "HMAC-SHA256",
         }
-        canonical = json.dumps(data, sort_keys=True, ensure_ascii=False)
-        data["signature"] = hmac_lib.new(
-            settings.certificate_signing_key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
+        # SEC-10: generation and verification share one canonicalisation rule.
+        data["signature"] = certificate_signature(data)
         row = db.insert_returning(
             "INSERT INTO evidence_certificates (id, fiduciary_id, subject_principal_id, certifying_officer_id, case_ref_id, certificate_data, attestation_text) VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s) RETURNING id",
             (
@@ -687,3 +693,41 @@ class LegalService(Service):
         out["data"] = data
         out["attestation"] = out.get("attestation_text")
         return out
+
+    def verify_certificate(self, ctx: RequestContext) -> dict:
+        """SEC-10: verify an evidence certificate's HMAC signature.
+
+        Not a trust assertion about the ledger — that is verify_audit_chain's
+        job — but the missing counterpart to generation: recompute the signature
+        over the canonical JSON (the exact function generate_certificate used)
+        and report whether the certificate is internally authentic and unchanged.
+        """
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT certificate_data FROM evidence_certificates WHERE id = %s{scope}",
+            (require(ctx.payload.get("id"), "id"), *scope_params),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "Certificate not found.")
+        data = row.get("certificate_data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (ValueError, TypeError):
+                data = {}
+        if not isinstance(data, dict) or "signature" not in data:
+            return {"valid": False, "reason": "Certificate carries no signature."}
+        expected = data.get("signature")
+        recomputed = certificate_signature(data)
+        if expected != recomputed:
+            return {"valid": False, "reason": "Signature mismatch — the certificate has been altered."}
+        log_event(
+            ctx.actor_email or "DPO",
+            ctx.fiduciary_id,
+            "DPO_CONSOLE",
+            None,
+            "EVIDENCE_CERTIFICATE_VERIFIED",
+            {"certificate_id": str(require(ctx.payload.get("id"), "id"))},
+            source_ip=ctx.source_ip,
+        )
+        return {"valid": True, "signature_algorithm": data.get("signature_algorithm"), "signature": expected}

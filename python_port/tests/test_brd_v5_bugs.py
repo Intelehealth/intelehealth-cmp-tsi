@@ -225,37 +225,50 @@ def _chain(monkeypatch, n=3):
 
 def test_verify_chain_intact_and_detects_tampering(monkeypatch):
     rows = _chain(monkeypatch)
-    monkeypatch.setattr(audit.db, "all", lambda *a, **k: rows)
+    # SEC-10: the walk is NEWEST-first, so the query returns rows in DESC order.
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: list(reversed(rows)))
     assert audit.verify_chain()["intact"] is True
 
     edited = [dict(r) for r in rows]
     edited[1]["context_details"] = '{"k": "edited"}'
-    monkeypatch.setattr(audit.db, "all", lambda *a, **k: edited)
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: list(reversed(edited)))
     result = audit.verify_chain()
     assert not result["intact"]
     assert result["broken"] == [{"id": str(rows[1]["id"]), "reason": "CONTENT_MISMATCH"}]
 
     deleted = [rows[0], rows[2]]
-    monkeypatch.setattr(audit.db, "all", lambda *a, **k: deleted)
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: list(reversed(deleted)))
     assert audit.verify_chain()["broken"][0]["reason"] == "LINK_MISMATCH"
 
 
 def test_legacy_rows_checked_for_linkage_only(monkeypatch):
     rows = _chain(monkeypatch, 2)
     rows[0] = {**rows[0], "system_metadata": {"python_port": True}, "context_details": "anything"}
-    monkeypatch.setattr(audit.db, "all", lambda *a, **k: rows)
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: list(reversed(rows)))
     result = audit.verify_chain()
     assert result["intact"] and result["legacy_rows_linkage_only"] == 1
 
 
-def test_chain_verification_is_global_admin_only():
+def test_chain_verification_scopes_to_the_callers_tenant(monkeypatch):
+    """SEC-10: a tenant-scoped DPO/AUDITOR may verify its own ledger rows; the
+    fiduciary_id is passed as the scope so neither it nor a global operator
+    reads other tenants' row ids."""
     assert roles.required_permission("audit", "verify_audit_chain") == "audit:read"
+    seen = {}
+    from dpdpcms_py.services import governance as gov_mod
+
+    def fake_verify(limit, fiduciary_id=None):
+        seen["limit"] = limit
+        seen["fiduciary_id"] = fiduciary_id
+        return {"intact": True, "rows_checked": 5, "legacy_rows_linkage_only": 0, "truncated": False}
+
+    monkeypatch.setattr(gov_mod, "verify_chain", fake_verify)
     ctx = _ctx("audit", "verify_audit_chain", category="admin", fiduciary_id=FID)
     ctx.auth_token = {"role": "ADMIN", "mfa": True, "email": "a@b"}
     ctx.permissions = {"*"}
-    with pytest.raises(ApiError) as exc:
-        governance.AuditService().verify_audit_chain(ctx)
-    assert exc.value.status == 403
+    out = gov_mod.AuditService().verify_audit_chain(ctx)
+    assert out["intact"] is True
+    assert seen["fiduciary_id"] == FID
 
 
 def test_audit_logs_append_only_migration():

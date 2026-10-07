@@ -9,12 +9,14 @@
     "record_id": {
       "type": "string"
     },
+    "policy_id": {
+      "type": "string"
+    },
     "fiduciary_id": {
       "type": "string"
     }
   },
   "required": [
-    "_func",
-    "record_id"
+    "_func"
   ]
 }

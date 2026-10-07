@@ -265,12 +265,18 @@ def prune_sso_nonces() -> dict[str, int]:
     return {"pruned": db.execute("DELETE FROM sso_login_nonces WHERE expires_at < NOW()") or 0}
 
 
-def prune_old_webhook_deliveries(days: int = 30) -> dict[str, int]:
-    """SEC-13: retention on webhook_deliveries. Terminal rows (dispatched,
-    failed after the retry limit, or skipped with no configured webhook) are
-    removed once they are older than `days`, so even an encrypted OTP payload
-    does not accumulate forever. The audit trail of the event still leads to
-    the delivery via its own webhook_deliveries status history."""
+def prune_old_webhook_deliveries(days: int | None = None) -> dict[str, int]:
+    """SEC-13 / P5-07: retention on webhook_deliveries.
+
+    Terminal rows (dispatched, failed after the retry limit, or skipped with no
+    configured webhook) are removed once they are older than `days`. SEC-13 made
+    the queue stop holding plaintext OTP codes (rows are payload->>'otp
+    encrypted), so a long retention no longer preserves secrets in the clear.
+    P5-07: the delivery table is the channel of record for consent events and
+    OTP dispatch, so the default honours the Rule 6(1)(e) one-year floor
+    (WEBHOOK_DELIVERY_RETENTION_DAYS) rather than a hard-coded 30.
+    """
+    days = days or settings.webhook_delivery_retention_days
     pruned = (
         db.execute(
             "DELETE FROM webhook_deliveries WHERE status IN ('DISPATCHED', 'FAILED', 'SKIPPED')"

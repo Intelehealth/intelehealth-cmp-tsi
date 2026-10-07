@@ -131,6 +131,13 @@
 </div>
 
 <script>
+    // CF-02/SEC-11: every value drawn from the API or user input is escaped
+    // before it reaches innerHTML; no caller-controlled string is trusted.
+    function esc(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+    }
+
     // --- Configuration ---
     const API_BASE_URL = (typeof config !== 'undefined' && config.tsi_dpdp_cms_apibaseurl)
         ? config.tsi_dpdp_cms_apibaseurl
@@ -156,8 +163,8 @@
         if (type === 'success') colorClass = 'log-success';
 
         entry.innerHTML = `
-            <span class="log-time">${new Date().toLocaleTimeString()}</span>
-            <span class="${colorClass}">${message}</span>
+            <span class="log-time">${esc(new Date().toLocaleTimeString())}</span>
+            <span class="${colorClass}">${esc(message)}</span>
         `;
         logOutput.prepend(entry);
     }

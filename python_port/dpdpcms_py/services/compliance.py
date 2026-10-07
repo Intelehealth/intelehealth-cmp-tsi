@@ -75,7 +75,40 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
     token = f"erased:{pseudonym(f'{fiduciary_id}:{user_id}')}"
     counts: dict[str, int] = {}
     with db.connection() as conn, conn.cursor() as cur:
+        # P5-01: grievance handling runs BEFORE the generic loop below. The
+        # generic loop re-keys grievances.user_id to the pseudonym; the DELETE
+        # and UPDATE here both predicate on the ORIGINAL user_id, so running
+        # them after the loop would match nothing and the evidence would survive
+        # erasure. This ordering regressed in the SEC-15 fix; it is fixed here.
+        cur.execute(
+            """
+            DELETE FROM grievance_attachments
+            WHERE grievance_id IN (SELECT id FROM grievances WHERE fiduciary_id = %s AND user_id = %s)
+            RETURNING storage_path
+            """,
+            (fiduciary_id, user_id),
+        )
+        attachment_paths = {row["storage_path"] for row in cur.fetchall()}
+        counts["grievance_attachments"] = len(attachment_paths)
+        # SEC-15: resolution_details is free-text PII written by the DPO;
+        # blank it alongside the other grievance text.
+        cur.execute(
+            """
+            UPDATE grievances SET user_id = %s, subject = '[erased]', description = '[erased]',
+                   resolution_details = NULL,
+                   communication_log = '[]'::jsonb, feedback_comment = NULL, attachments = '[]'::jsonb
+            WHERE fiduciary_id = %s AND user_id = %s
+            """,
+            (token, fiduciary_id, user_id),
+        )
+        counts["grievances"] = cur.rowcount
+
         for table, column in ERASURE_TARGETS:
+            if table == "grievances":
+                # P5-01: covered by the dedicated block above, which runs before
+                # the generic loop precisely so its WHERE clauses still match the
+                # original user_id. Skipped here so the row is not double-keyed.
+                continue
             if table == "notification_deliveries":
                 # There is no principal key on the row; the recipient (a resolved
                 # address or device id) is reached through its notification.
@@ -104,10 +137,14 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
                 counts[table] = cur.rowcount
                 continue
             if table == "alerts":
+                # SEC-15: besides re-keying principal-keyed rows, scrub the raw
+                # user_id JSON field the consent-alert payload carries.
                 cur.execute(
-                    "UPDATE alerts SET recipient_id = %s"
+                    "UPDATE alerts SET recipient_id = %s,"
+                    " payload = CASE WHEN payload ? 'user_id'"
+                    "             THEN jsonb_set(payload, '{user_id}', to_jsonb(%s::text)) ELSE payload END"
                     " WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL' AND recipient_id = %s",
-                    (token, fiduciary_id, user_id),
+                    (token, token, fiduciary_id, user_id),
                 )
                 counts[table] = cur.rowcount
                 continue
@@ -116,27 +153,38 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
                 (token, fiduciary_id, user_id),
             )
             counts[table] = cur.rowcount
-        # Uploaded evidence goes with the grievance text: rows first (inside the
-        # transaction), files after commit.
+        # SEC-15: identifiers that survive the covered set above.
+        # evidence_certificates.subject_principal_id stores a principal id.
         cur.execute(
-            """
-            DELETE FROM grievance_attachments
-            WHERE grievance_id IN (SELECT id FROM grievances WHERE fiduciary_id = %s AND user_id = %s)
-            RETURNING storage_path
-            """,
-            (fiduciary_id, user_id),
-        )
-        attachment_paths = {row["storage_path"] for row in cur.fetchall()}
-        counts["grievance_attachments"] = len(attachment_paths)
-        cur.execute(
-            """
-            UPDATE grievances SET user_id = %s, subject = '[erased]', description = '[erased]',
-                   communication_log = '[]'::jsonb, feedback_comment = NULL, attachments = '[]'::jsonb
-            WHERE fiduciary_id = %s AND user_id = %s
-            """,
+            "UPDATE evidence_certificates SET subject_principal_id = %s WHERE fiduciary_id = %s AND subject_principal_id = %s",
             (token, fiduciary_id, user_id),
         )
-        counts["grievances"] = cur.rowcount
+        counts["evidence_certificates"] = cur.rowcount
+        # data_principal.guardian_id on ANOTHER principal's row: the erased
+        # principal is re-keyed so the child's row no longer names the original id.
+        cur.execute(
+            "UPDATE data_principal SET guardian_id = %s WHERE fiduciary_id = %s AND guardian_id = %s",
+            (token, fiduciary_id, user_id),
+        )
+        counts["data_principal.guardian_id"] = cur.rowcount
+        # consent_records.ip_address / user_agent fingerprint the principal's
+        # session; ip_address is NOT NULL so it is zeroed, not nulled.
+        cur.execute(
+            "UPDATE consent_records SET ip_address = '0.0.0.0', user_agent = NULL"
+            " WHERE fiduciary_id = %s AND user_id = %s",
+            (fiduciary_id, user_id),
+        )
+        counts["consent_records.metadata"] = cur.rowcount
+        # webhook_deliveries.payload carries a raw user_id for consent events;
+        # re-key it so the queued event no longer names the principal.
+        cur.execute(
+            "UPDATE webhook_deliveries SET payload = CASE WHEN payload ? 'user_id'"
+            "    THEN jsonb_set(payload, '{user_id}', to_jsonb(%s::text)) ELSE payload END"
+            " WHERE fiduciary_id = %s AND payload ->> 'user_id' = %s",
+            (token, fiduciary_id, user_id),
+        )
+        counts["webhook_deliveries"] = cur.rowcount
+
         cur.execute("DELETE FROM data_principal WHERE fiduciary_id = %s AND user_id = %s", (fiduciary_id, user_id))
         counts["data_principal"] = cur.rowcount
         cur.execute(
@@ -150,6 +198,10 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
 # SEC-15: every table whose rows carry a principal identifier, mapped to the
 # column storing it. extend these in one place; the regression test enumerates
 # the schema files against this set so a new table cannot be forgotten.
+# `grievances` is listed for coverage but is handled by the dedicated statement
+# at the top of erase_cms_copy (P5-01); identifiers reaching the additional
+# tables below (evidence_certificates, data_principal.guardian_id,
+# consent_records metadata, alerts/webhook payloads) are scrubbed there too.
 ERASURE_TARGETS: tuple[tuple[str, str], ...] = (
     ("consent_records", "user_id"),
     ("notifications", "recipient_id"),
@@ -277,10 +329,28 @@ class ComplianceService(Service):
             raise ApiError(404, "Not Found", "Purge request not found.")
         # SEC-04: an API key may only confirm or update a purge request that is
         # assigned to its own app. A key confirmed_by_entity_id is not checked;
-        # the app binding is. Console operators are already tenant-scoped above.
+        # the app binding is. Console operators are tenant-scoped above, and a
+        # request delegated to a specific operator is that operator's to close.
         if ctx.permissions:
-            if not ctx.app_id or str(current.get("app_id") or "") != ctx.app_id:
-                raise ApiError(403, "Forbidden", "This API key is not assigned to the purge request.")
+            # P5-04: rows raised by purpose closure, the retention sweep, or a
+            # console/principal erasure carry NO app_id; refusing every such row
+            # to every key made the processor flow fail-closed. When there is no
+            # initiating app the binding falls back to requiring the request is
+            # not delegated to a specific operator, so the tenant's processor can
+            # close it. An app-initiated row stays bound to that app.
+            request_app = str(current.get("app_id") or "") if current.get("app_id") else None
+            if request_app:
+                if not ctx.app_id or request_app != ctx.app_id:
+                    raise ApiError(403, "Forbidden", "This API key is not assigned to the purge request.")
+            elif current.get("assigned_operator_id"):
+                raise ApiError(
+                    403, "Forbidden", "This purge request is assigned to an operator; it cannot be closed by an API key."
+                )
+        elif ctx.operator_id and current.get("assigned_operator_id"):
+            # SEC-04: the delegation binds the console too — an operator other
+            # than the assignee may not update or confirm the request.
+            if str(current["assigned_operator_id"]) != ctx.operator_id:
+                raise ApiError(403, "Forbidden", "This purge request is assigned to another operator.")
         # CW-11: data under an unexpired legal hold may not be reported deleted.
         if (
             current["status"] == "LEGAL_HOLD_APPLIED"

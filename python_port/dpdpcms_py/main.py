@@ -15,7 +15,7 @@ from .errors import ApiError, error_body
 from .security import api_key_valid, bearer_token, decode_token
 from .services import SERVICE_REGISTRY
 from .services.consent import resolve_wallet_action
-from .services.roles import MFA_EXEMPT_FUNCS, enforce_role_permission
+from .services.roles import FUNC_PERMISSIONS, MFA_EXEMPT_FUNCS, READ_PREFIXES, enforce_role_permission
 from .validators import validate_payload
 
 log = logging.getLogger("dpdpcms")
@@ -200,6 +200,41 @@ async def payload_from(request: Request) -> dict:
         return dict(form)
 
 
+def _is_read_classified(service: str, func: str) -> bool:
+    """SEC-17: a function may run over GET only when it is classified as a read.
+
+    The same rule the role gate uses: side-effect-free prefixes, or an explicit
+    `:read` entry in FUNC_PERMISSIONS. Everything else (a write, a
+    `validate_*`, an MFA round-trip, logout) must be a POST.
+    """
+    if func in MFA_EXEMPT_FUNCS:
+        return False
+    if func.startswith(READ_PREFIXES):
+        return True
+    permission = FUNC_PERMISSIONS.get((service, func))
+    return bool(permission and permission.endswith(":read"))
+
+
+def client_ip(request: Request) -> str | None:
+    """The caller's IP, used for audit and throttle buckets.
+
+    P5-02: when the API sits behind a reverse proxy, every request arrives from
+    the proxy and `request.client.host` is the proxy's address — so all
+    operators would share one IP throttle bucket. X-Forwarded-For is honoured
+    only when the immediate peer is a configured trusted proxy (TRUSTED_PROXY_IPS);
+    a direct caller can never self-declare its identity.
+    """
+    if request.client is None:
+        return None
+    peer = request.client.host
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded and peer in settings.trusted_proxy_ips:
+        chain = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+        if chain and chain[0] not in settings.trusted_proxy_ips:
+            return chain[0]
+    return peer
+
+
 def _bootstrap_authorized(ctx: RequestContext) -> bool:
     supplied = (
         ctx.headers.get("x-bootstrap-token")
@@ -226,7 +261,10 @@ def authenticate(ctx: RequestContext) -> None:
     if ctx.category == "admin":
         if func in ADMIN_NOAUTH_FUNCS:
             return
-        raw = bearer_token(ctx.headers) or ctx.payload.get("auth")
+        # SEC-17: a credential never comes from a ?auth= query parameter. The
+        # query string is the only thing GET carries, so dropping the parameter
+        # closes the "re-send a POST as GET to skip auth" vector twice over.
+        raw = bearer_token(ctx.headers)
         token = decode_token(raw)
         if not token:
             raise ApiError(401, "Unauthorized", "Authentication failed.")
@@ -334,7 +372,7 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
             payload=payload,
             headers={k: v for k, v in request.headers.items()},
             method=request.method,
-            source_ip=request.client.host if request.client else None,
+            source_ip=client_ip(request),
         )
         service_cls = SERVICE_REGISTRY.get(service)
         if not service_cls:
@@ -343,10 +381,15 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
         # P4-01: validate only once authenticate() has bound the token-derived
         # fields (fiduciary_id, a principal's user_id); a wallet call is checked
         # against the schema of the function its action resolved to.
-        if request.method == "POST":
-            errors = validate_payload(ctx.payload)
-            if errors:
-                raise ApiError(400, "Bad Request", "; ".join(errors))
+        # SEC-17: validation runs on GET too. The advisory-lock-free re-send of a
+        # POST as a GET is exactly how a caller skipped every one of the 142
+        # schemas; `payload_from` still loads query parameters, so a GET body is
+        # validated like any other.
+        if request.method == "GET" and not _is_read_classified(service, ctx.func):
+            raise ApiError(405, "Method Not Allowed", f"{ctx.func} is not a read and cannot be called with GET.")
+        errors = validate_payload(ctx.payload)
+        if errors:
+            raise ApiError(400, "Bad Request", "; ".join(errors))
         result = service_cls().handle(ctx)
         status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_", "submit_")) else 200
         return _json_response(result, status=status)
