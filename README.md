@@ -18,6 +18,8 @@ This repository does **not** include the original Java servlet sources.
 
 ## Quick start (Docker)
 
+On Windows, `scripts\local\deploy.ps1` does all of the steps below, including migrating an existing database, with a backup taken first. See [docs/LOCAL_DEPLOYMENT.md](docs/LOCAL_DEPLOYMENT.md) for the full plan: preflight, first admin, smoke test, rollback.
+
 Docker Compose uses **local-only** default passwords and keys if you have no `.env`. That is convenient for a laptop. It is not safe on a shared or public machine.
 
 ```bash
@@ -99,7 +101,7 @@ More detail: [python_port/README.md](python_port/README.md).
 
 ## Database upgrades
 
-Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `16_p2_roles_mfa_retention.sql`).
+Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `19_audit_ledger_integrity.sql`).
 
 | Script | Purpose |
 | --- | --- |
@@ -107,12 +109,17 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `14_nomination_data_correction.sql` | Nominations and data-correction request tables |
 | `15_p1_consent_lifecycle_alerts.sql` | Purpose lifecycle, alerts, re-consent, delivery/webhook queues |
 | `16_p2_roles_mfa_retention.sql` | Roles, operator MFA columns, retention policies, grievance references |
+| `17_defect_fixes.sql` | Principal OTP store, per-tenant roles + extended built-in permissions, TOTP replay/lockout columns, purge status CHECK |
+| `18_brd_traceability.sql` | Append-only consent metadata, guardian verification status, purge action/legal hold/evidence, grievance feedback and attachments, token revocation |
+| `19_audit_ledger_integrity.sql` | Trigger that makes `audit_logs` append-only (UPDATE, DELETE and TRUNCATE fail) |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`16` manually (each script is idempotent). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`19` manually (each script is idempotent). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \
-         db/15_p1_consent_lifecycle_alerts.sql db/16_p2_roles_mfa_retention.sql; do
+         db/15_p1_consent_lifecycle_alerts.sql db/16_p2_roles_mfa_retention.sql \
+         db/17_defect_fixes.sql db/18_brd_traceability.sql \
+         db/19_audit_ledger_integrity.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```
@@ -173,7 +180,7 @@ Admin and bootstrap routes use operator JWT or `BOOTSTRAP_TOKEN` respectively. S
 1. Copy `.env.example` → `.env` and set unique secrets (`openssl rand -hex 32` for each).
 2. Set `TSI_DPDP_CMS_ENV` to anything **other than** `local` (disables `/docs`, prefers SSL to Postgres).
 3. Set `ALLOWED_ORIGINS` to your real console origins.
-4. Run DB migrations `13`–`16` on existing databases (see [Database upgrades](#database-upgrades)).
+4. Run DB migrations `13`–`19` on existing databases (see [Database upgrades](#database-upgrades)).
 5. Run **two processes**: `uvicorn dpdpcms_py.main:app` and `python -m dpdpcms_py.worker` (or Compose `python_app` + `python_worker`).
 6. Configure SMTP and/or SMS/push gateway URLs if off-channel notification delivery is required.
 7. Do **not** rotate `DB_ENCRYPTION_KEY` after encrypted data exists.
