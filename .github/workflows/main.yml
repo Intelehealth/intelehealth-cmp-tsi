@@ -1,11 +1,11 @@
 name: Main
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {} 
   push:
-    branches: [p5_changes]
+    branches: [main]
   pull_request:
-    branches: [p5_changes]
+    branches: [main]
 
 permissions:
   contents: read
@@ -60,7 +60,6 @@ jobs:
           JWT_SECRET: ci-only-jwt-secret-not-real-1234567890abcd
           DB_ENCRYPTION_KEY: ci-only-enc-key-not-real-1234567890abcdef
           TSI_LOOKUP_SALT: ci-only-salt-not-real-1234567890abcdefgh
-          BOOTSTRAP_TOKEN: ci-only-bootstrap-token-not-real-1234567890ab
           TSI_DPDP_CMS_ENV: local
         run: python -c "import dpdpcms_py.main"
 
@@ -74,11 +73,10 @@ jobs:
           JWT_SECRET: ci-only-jwt-secret-not-real-1234567890abcd
           DB_ENCRYPTION_KEY: ci-only-enc-key-not-real-1234567890abcdef
           TSI_LOOKUP_SALT: ci-only-salt-not-real-1234567890abcdefgh
-          BOOTSTRAP_TOKEN: ci-only-bootstrap-token-not-real-1234567890ab
           TSI_DPDP_CMS_ENV: local
         run: |
           if [ -d tests ] || ls -1 **/test_*.py >/dev/null 2>&1; then
-            pytest -q
+            pytest -q -m pytest
           else
             echo "No tests yet - skipping. Add a tests/ directory to enable."
           fi
