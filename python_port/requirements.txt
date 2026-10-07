@@ -8,3 +8,10 @@ python-dotenv>=1.0
 fpdf2>=2.8  # UD-04 consent-history PDF
 uharfbuzz>=0.39  # text shaping for Indic and Perso-Arabic scripts in that PDF
 fonttools>=4.34  # font coverage lookup (also an fpdf2 dependency)
+pytest>=8
+# FastAPI's TestClient: Starlette 1.x requires httpx2 (older Starlette used httpx).
+httpx2>=2.0
+# Extracts text from generated PDFs in test_brd_traceability.py (UD-04). Without it
+# that test is skipped. AGPL-licensed, so it stays test-only.
+pymupdf>=1.24
+
