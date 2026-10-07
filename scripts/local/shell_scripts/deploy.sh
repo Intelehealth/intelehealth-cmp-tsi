@@ -22,7 +22,7 @@ if db_volume_exists; then
   existing=1
   warn 'Existing Postgres volume found - init scripts will NOT re-run; upgrade migrations will be applied.'
 else
-  ok 'No volume yet - Postgres will run every db/*.sql (01-19) on first start.'
+  ok 'No volume yet - Postgres will run every db/*.sql (01-20) on first start.'
 fi
 
 if [ "$skip_build" -eq 0 ]; then step 'Building image'; compose build; fi

@@ -3,13 +3,17 @@
   "type": "object",
   "required": [
     "_func",
-    "id_token"
+    "id_token",
+    "nonce"
   ],
   "properties": {
     "_func": {
       "type": "string"
     },
     "id_token": {
+      "type": "string"
+    },
+    "nonce": {
       "type": "string"
     }
   }

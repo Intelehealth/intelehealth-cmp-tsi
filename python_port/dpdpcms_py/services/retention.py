@@ -248,10 +248,13 @@ class RetentionService(Service):
     def delete_retention_policy(self, ctx: RequestContext) -> dict:
         fid = self._fid(ctx)
         policy_id = require(ctx.payload.get("policy_id"), "policy_id")
-        db.execute(
+        updated = db.execute(
             "UPDATE retention_policies SET status = 'INACTIVE', updated_at = NOW() WHERE id = %s AND fiduciary_id = %s",
             (policy_id, fid),
         )
+        # SEC-12: a delete that did not happen is not reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Retention policy not found.")
         return {"success": True, "policy_id": policy_id}
 
     def validate_completeness(self, ctx: RequestContext) -> dict:

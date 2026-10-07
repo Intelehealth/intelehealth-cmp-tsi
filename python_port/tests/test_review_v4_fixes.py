@@ -135,7 +135,7 @@ def test_wallet_unknown_action_rejected():
 
 @pytest.mark.parametrize("action", ["GRANT_CONSENT", "GLOBAL_ERASURE"])
 def test_read_scoped_key_cannot_write_through_wallet(monkeypatch, action):
-    monkeypatch.setattr(main, "api_key_valid", lambda *a: (True, FID, {"READ"}))
+    monkeypatch.setattr(main, "api_key_valid", lambda *a: (True, FID, {"READ"}, None))
     payload = {"_func": "sync", "action": action}
     consent.resolve_wallet_action(payload)
     ctx = _ctx(service="wallet", func=payload.pop("_func"), payload=payload)
@@ -145,7 +145,7 @@ def test_read_scoped_key_cannot_write_through_wallet(monkeypatch, action):
 
 
 def test_read_scoped_key_can_still_read_through_wallet(monkeypatch):
-    monkeypatch.setattr(main, "api_key_valid", lambda *a: (True, FID, {"READ"}))
+    monkeypatch.setattr(main, "api_key_valid", lambda *a: (True, FID, {"READ"}, None))
     payload = {"_func": "sync", "action": "GET_CONSENT_DETAILS"}
     consent.resolve_wallet_action(payload)
     ctx = _ctx(service="wallet", func=payload.pop("_func"), payload=payload)

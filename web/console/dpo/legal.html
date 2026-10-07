@@ -385,9 +385,10 @@
 
         const payload = {
             "_func": "generate_certificate",
-            "user_id": userIdInput.value.trim(),
+            "subject_principal_id": userIdInput.value.trim(),
             "fiduciary_id": FIDUCIARY_ID,
-            "case_ref_id": caseRefInput.value.trim()
+            "case_ref_id": caseRefInput.value.trim(),
+            "attestation_text": document.getElementById('attestation-text') ? document.getElementById('attestation-text').value.trim() : undefined
         };
 
         try {
