@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
-from .. import db
+from .. import db, throttle
 from ..audit import log_event
 from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..errors import ApiError
 from ..security import hash_password, passphrase, token, verify_password
 from .base import Service, require, tenant_filter
 
-# SA-06: consecutive bad authenticator codes before the account's MFA step is
-# locked, and for how long.
+# SA-06 / SEC-14: one PyJWKClient per configured JWKS URL, so each login does
+# not re-fetch the provider's key set (fetching per call is both slow and a
+# small denial-of-service surface). Keys rotate; the client re-fetches on a
+# KeyError from PyJWT's get_signing_key_from_jwt.
 MFA_MAX_FAILURES = 5
 MFA_LOCKOUT_MINUTES = 15
+
+
+@lru_cache(maxsize=4)
+def _jwks_client(jwks_url: str) -> Any:
+    import jwt
+
+    return jwt.PyJWKClient(jwks_url)
 
 
 def authenticated_user_id(ctx: RequestContext) -> str | None:
@@ -75,6 +85,10 @@ class OperatorService(Service):
     def login(self, ctx: RequestContext) -> dict:
         identifier = require(ctx.payload.get("identifier"), "identifier")
         password = require(ctx.payload.get("password"), "password")
+        ip = ctx.source_ip or "unknown"
+        # SEC-03: a password spray must be throttled at the account and the IP.
+        throttle.require_allowed("login:identifier", identifier)
+        throttle.require_allowed("login:ip", ip)
         row = db.one(
             f"""
             SELECT o.id, o.name, {db.decrypt_col("o.email_enc")} AS email, o.password_hash,
@@ -85,6 +99,8 @@ class OperatorService(Service):
             (*db.bind_key(), identifier, *db.bind_hmac(identifier)),
         )
         if not row or row["status"] != "ACTIVE" or not verify_password(password, row["password_hash"]):
+            throttle.record_failure("login:identifier", identifier)
+            throttle.record_failure("login:ip", ip)
             log_event(
                 identifier,
                 ADMIN_FIDUCIARY_ID,
@@ -95,6 +111,11 @@ class OperatorService(Service):
                 source_ip=ctx.source_ip,
             )
             raise ApiError(401, "Unauthorized", "Invalid credentials or account inactive.")
+        # SEC-03: a successful login clears the throttle and writes the signal
+        # a reviewer can spot from (last_login_at was never being written).
+        throttle.record_success("login:identifier", identifier)
+        throttle.record_success("login:ip", ip)
+        db.execute("UPDATE operators SET last_login_at = NOW() WHERE id = %s", (row["id"],))
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ADMIN_FIDUCIARY_ID
         mfa_row = db.one("SELECT mfa_enabled FROM operators WHERE id = %s", (row["id"],))
         mfa_enabled = bool(mfa_row and mfa_row["mfa_enabled"])
@@ -140,15 +161,16 @@ class OperatorService(Service):
         if not (settings.sso_issuer and settings.sso_audience and settings.sso_jwks_url):
             raise ApiError(404, "Not Found", "Single sign-on is not configured.")
         raw = require(ctx.payload.get("id_token"), "id_token")
+        nonce = ctx.payload.get("nonce")
         try:
-            signing_key = jwt.PyJWKClient(settings.sso_jwks_url).get_signing_key_from_jwt(raw)
+            signing_key = _jwks_client(settings.sso_jwks_url).get_signing_key_from_jwt(raw)
             claims = jwt.decode(
                 raw,
                 signing_key.key,
                 algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
                 audience=settings.sso_audience,
                 issuer=settings.sso_issuer,
-                options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+                options={"require": ["exp", "iat", "iss", "aud", "sub", "nonce"]},
             )
         except Exception:
             log_event(
@@ -161,6 +183,18 @@ class OperatorService(Service):
                 source_ip=ctx.source_ip,
             )
             raise ApiError(401, "Unauthorized", "Single sign-on failed.") from None
+        # SEC-14: the id_token's nonce must be the one this deployment's console
+        # sent with the authorize request, and it is single-use. A captured
+        # token replayed with its original nonce loses the INSERT ... ON CONFLICT.
+        if not nonce or str(nonce) != claims.get("nonce"):
+            raise ApiError(401, "Unauthorized", "SSO nonce mismatch.")
+        consumed = db.execute(
+            "INSERT INTO sso_login_nonces (nonce, expires_at) VALUES (%s, NOW() + make_interval(mins => %s))"
+            " ON CONFLICT (nonce) DO NOTHING",
+            (str(nonce), settings.token_ttl_minutes),
+        )
+        if not consumed:
+            raise ApiError(401, "Unauthorized", "SSO nonce has already been used.")
         email = claims.get("email")
         if not email or claims.get("email_verified") is False:
             raise ApiError(401, "Unauthorized", "The identity provider did not supply a verified email.")
@@ -455,10 +489,13 @@ class OperatorService(Service):
     def deactivate_user(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
         scope, scope_params = tenant_filter(ctx)
-        db.execute(
+        updated = db.execute(
             f"UPDATE operators SET status = 'INACTIVE', tokens_valid_after = NOW(), last_updated_at = NOW() WHERE id = %s AND role != 'ADMIN'{scope}",
             (uid, *scope_params),
         )
+        # SEC-12: a deactivation that did not happen is not logged as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "User not found.")
         log_event(
             ctx.actor_email or "ADMIN",
             ctx.fiduciary_id or ADMIN_FIDUCIARY_ID,
@@ -489,20 +526,62 @@ class OperatorService(Service):
     def verify_recovery_key(self, ctx: RequestContext) -> dict:
         email = require(ctx.payload.get("email"), "email")
         phrase = require(ctx.payload.get("passphrase"), "passphrase")
+        ip = ctx.source_ip or "unknown"
+        # SEC-01: the recovery passphrase is a bearer token; throttle both the
+        # account and the source IP so it cannot be guessed or replayed, and
+        # audit the attempt so a takeover leaves a trace.
+        throttle.require_allowed("recovery:email", email)
+        throttle.require_allowed("recovery:ip", ip)
         row = db.one(
             f"SELECT recovery_key_hash FROM operators WHERE email_hmac = {db.hmac_expr()} AND status = 'ACTIVE'",
             db.bind_hmac(email),
         )
         if not row or not verify_password(phrase, row["recovery_key_hash"]):
+            throttle.record_failure("recovery:email", email)
+            throttle.record_failure("recovery:ip", ip)
+            log_event(
+                email,
+                ADMIN_FIDUCIARY_ID,
+                "ADMIN_CONSOLE",
+                None,
+                "RECOVERY_KEY_FAILURE",
+                "Invalid recovery key.",
+                source_ip=ctx.source_ip,
+            )
             raise ApiError(401, "Unauthorized", "Invalid verification key.")
+        throttle.record_success("recovery:email", email)
+        throttle.record_success("recovery:ip", ip)
+        log_event(
+            email,
+            ADMIN_FIDUCIARY_ID,
+            "ADMIN_CONSOLE",
+            None,
+            "RECOVERY_KEY_VERIFIED",
+            "Recovery key verified.",
+            source_ip=ctx.source_ip,
+        )
         return {"success": True}
 
     def reset_password_via_recovery(self, ctx: RequestContext) -> dict:
         self.verify_recovery_key(ctx)
         email = ctx.payload["email"]
+        new_password = require(ctx.payload.get("new_password"), "new_password")
+        # SEC-01: the same 12-character floor initial_setup enforces, so a
+        # successful takeover cannot silently downgrade the account's password.
+        if len(new_password) < 12:
+            raise ApiError(400, "Bad Request", "Password must be at least 12 characters.")
         db.execute(
-            f"UPDATE operators SET password_hash = %s, recovery_key_hash = NULL, tokens_valid_after = NOW(), last_updated_at = NOW() WHERE email_hmac = {db.hmac_expr()}",
-            (hash_password(require(ctx.payload.get("new_password"), "new_password")), *db.bind_hmac(email)),
+            f"UPDATE operators SET password_hash = %s, recovery_key_hash = NULL, tokens_valid_after = NOW(), last_login_at = NULL, last_updated_at = NOW() WHERE email_hmac = {db.hmac_expr()}",
+            (hash_password(new_password), *db.bind_hmac(email)),
+        )
+        log_event(
+            email,
+            ADMIN_FIDUCIARY_ID,
+            "ADMIN_CONSOLE",
+            None,
+            "PASSWORD_RESET_VIA_RECOVERY",
+            "Password reset via recovery key.",
+            source_ip=ctx.source_ip,
         )
         return {"success": True}
 
@@ -514,15 +593,32 @@ def _count(sql: str, params: tuple = ()) -> int:
 
 class AdminDashService(Service):
     def get_admin_metrics(self, ctx: RequestContext) -> dict:
-        # The console reads data.metrics.<name>; keep the envelope and names identical to AdminDash.java.
+        # SEC-06: the console reads data.metrics.<name>; keep the envelope and
+        # names identical to AdminDash.java. dashboard:read is held by DPO,
+        # OPERATOR and AUDITOR, so the counts are scoped to the caller's tenant
+        # exactly like get_dpo_metrics; only a global ADMIN sees platform-wide
+        # totals. A tenant-scoped caller gets its own fiduciary counted once.
+        def masked(sql: str, column: str, params: tuple = ()) -> int:
+            if ctx.fiduciary_id:
+                sql += f" AND {column} = %s"
+                params = (*params, str(ctx.fiduciary_id))
+            return _count(sql, params)
+
         return {
             "success": True,
             "metrics": {
-                "active_fiduciaries": _count(
-                    "SELECT COUNT(*) AS count FROM fiduciaries WHERE status IN ('ACTIVE', 'PENDING')"
+                "active_fiduciaries": masked(
+                    "SELECT COUNT(*) AS count FROM fiduciaries WHERE status IN ('ACTIVE', 'PENDING')",
+                    "id",
                 ),
-                "active_processors": _count("SELECT COUNT(*) AS count FROM apps WHERE status = 'ACTIVE'"),
-                "failed_purges": _count("SELECT COUNT(*) AS count FROM purge_requests WHERE status = 'FAILED'"),
+                "active_processors": masked(
+                    "SELECT COUNT(*) AS count FROM apps WHERE status = 'ACTIVE'",
+                    "fiduciary_id",
+                ),
+                "failed_purges": masked(
+                    "SELECT COUNT(*) AS count FROM purge_requests WHERE status = 'FAILED'",
+                    "fiduciary_id",
+                ),
             },
         }
 

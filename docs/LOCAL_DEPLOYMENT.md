@@ -42,7 +42,7 @@ The examples below use PowerShell; swap in the bash equivalent from the table.
 
 ## 3. Phase 0 — clear conflicts on this machine (one-time)
 
-Run `.\scripts\local\preflight.ps1`. It checks Docker, `.env`, ports, the font files and migration 19,
+Run `.\scripts\local\preflight.ps1`. It checks Docker, `.env`, ports, the font files and migration 20,
 and also checks container names. Compose gives each container a fixed `container_name`, so a stopped
 container with the same name from **another checkout** blocks `docker compose up` here.
 
@@ -85,19 +85,19 @@ Steps:
 
 1. Runs preflight and stops on any failure.
 2. Checks whether the database volume already exists.
-   - **Fresh volume:** Postgres runs `01` to `19` itself on first start.
+   - **Fresh volume:** Postgres runs `01` to `20` itself on first start.
    - **Existing volume:** the init scripts will **not** run again, so the upgrade path below is used.
 3. Builds the image (`-SkipBuild` reuses the last one), runs `docker compose up -d`, and waits for
    `/healthz`.
 4. Existing volume only:
    1. `manage.ps1 backup` writes `backups\tsi_cms-<timestamp>.dump`. If the backup fails, nothing is migrated.
-   2. `migrate.ps1` applies `13` to `19` in order (each is idempotent) and confirms that both
+   2. `migrate.ps1` applies `13` to `20` in order (each is idempotent) and confirms that both
       `audit_logs` triggers exist.
    3. The app and worker restart on the migrated schema.
 5. Prints the URLs and the next step.
 
 To run the migrations on their own: `.\scripts\local\migrate.ps1`. For a single script:
-`.\scripts\local\migrate.ps1 -Only 19_audit_ledger_integrity.sql`.
+`.\scripts\local\migrate.ps1 -Only 20_security_gaps.sql`.
 
 ## 6. Phase 3 — first Super-Admin (fresh database only)
 

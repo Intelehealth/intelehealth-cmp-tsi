@@ -244,6 +244,44 @@ def prune_revoked_tokens() -> dict[str, int]:
     return {"pruned": db.execute("DELETE FROM revoked_tokens WHERE expires_at < NOW()") or 0}
 
 
+def expire_lapsed_api_keys() -> dict[str, int]:
+    """SEC-07: mark keys whose expires_at has passed as EXPIRED so the listing
+    and the enforced behaviour (security.api_key_valid) always agree.
+
+    Enforcement already rejects an expired key at authenticate time; until this
+    sweep runs the console still shows such a key as ACTIVE, which is exactly
+    the mismatch the finding called out.
+    """
+    updated = db.execute(
+        "UPDATE api_keys SET status = 'EXPIRED', last_used_at = last_used_at"
+        " WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at < NOW()"
+    )
+    return {"expired": updated or 0}
+
+
+def prune_sso_nonces() -> dict[str, int]:
+    """SEC-14: drop SSO login nonces past the token lifetime; a nonce can never
+    be presented again once its id_token would have expired anyway."""
+    return {"pruned": db.execute("DELETE FROM sso_login_nonces WHERE expires_at < NOW()") or 0}
+
+
+def prune_old_webhook_deliveries(days: int = 30) -> dict[str, int]:
+    """SEC-13: retention on webhook_deliveries. Terminal rows (dispatched,
+    failed after the retry limit, or skipped with no configured webhook) are
+    removed once they are older than `days`, so even an encrypted OTP payload
+    does not accumulate forever. The audit trail of the event still leads to
+    the delivery via its own webhook_deliveries status history."""
+    pruned = (
+        db.execute(
+            "DELETE FROM webhook_deliveries WHERE status IN ('DISPATCHED', 'FAILED', 'SKIPPED')"
+            " AND created_at < NOW() - make_interval(days => %s)",
+            (int(days),),
+        )
+        or 0
+    )
+    return {"pruned": pruned}
+
+
 def _dpo_recipient(fiduciary_id: str) -> str:
     row = db.one(
         "SELECT id FROM operators WHERE fiduciary_id = %s AND role = 'DPO' AND status = 'ACTIVE' ORDER BY created_at LIMIT 1",

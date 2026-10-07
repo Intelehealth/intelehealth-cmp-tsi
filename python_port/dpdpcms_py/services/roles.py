@@ -141,10 +141,12 @@ def _validate_permissions(ctx: RequestContext, permissions: object) -> list[str]
     if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
         raise ApiError(400, "Bad Request", "permissions must be an array of strings.")
     cleaned = [p.strip().lower() for p in permissions if p.strip()]
-    # A tenant-scoped actor can only delegate what it already holds, so a custom
-    # role can never be used to climb above the creator's own access.
-    if ctx.fiduciary_id:
-        held = role_permissions(ctx)
+    # SEC-08: an actor can only delegate what it already holds, in every scope.
+    # A global operator without full access must not be able to mint a global
+    # role carrying '*' by sidestepping the tenant branch; a tenant-scoped actor
+    # may equally never climb above its own access.
+    held = role_permissions(ctx)
+    if FULL_ACCESS not in held:
         excess = [p for p in cleaned if p == FULL_ACCESS or not has_permission(held, p)]
         if excess:
             raise ApiError(403, "Forbidden", f"You cannot grant permissions you do not hold: {', '.join(excess)}.")

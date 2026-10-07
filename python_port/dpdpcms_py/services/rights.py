@@ -81,9 +81,12 @@ class RightsService(Service):
                 raise ApiError(404, "Not Found", "Nomination not found.")
             if str(row["nominating_principal_id"]) != ctx.principal_user_id:
                 raise ApiError(403, "Forbidden", "You may only revoke your own nominations.")
-        db.execute(
+        updated = db.execute(
             f"UPDATE nominations SET status = 'REVOKED', last_updated_at = NOW() WHERE {' AND '.join(where)}", params
         )
+        # SEC-12: a revoke that did not happen is not reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Nomination not found.")
         return {"success": True, "message": "Nomination revoked."}
 
     # ── Data correction ──────────────────────────────────────────────────

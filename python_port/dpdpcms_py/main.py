@@ -297,7 +297,7 @@ def authenticate(ctx: RequestContext) -> None:
             # service see the same user_id the caller is authorised for.
             ctx.payload["user_id"] = ctx.principal_user_id
             return
-        ok, fid, scopes = api_key_valid(
+        ok, fid, scopes, app_id = api_key_valid(
             ctx.headers.get("x-api-key") or ctx.headers.get("X-API-Key"),
             ctx.headers.get("x-api-secret") or ctx.headers.get("X-API-Secret"),
         )
@@ -305,6 +305,7 @@ def authenticate(ctx: RequestContext) -> None:
             raise ApiError(401, "Unauthorized", "Invalid or inactive API Key/Secret.")
         ctx.fiduciary_id = fid
         ctx.permissions = scopes
+        ctx.app_id = app_id
         # An API key is bound to one fiduciary: override any tenant id supplied in
         # the body so a key can never read or write another tenant's records.
         ctx.payload["fiduciary_id"] = ctx.fiduciary_id

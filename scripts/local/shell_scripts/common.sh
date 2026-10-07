@@ -29,6 +29,7 @@ UPGRADE_MIGRATIONS=(
   17_defect_fixes.sql
   18_brd_traceability.sql
   19_audit_ledger_integrity.sql
+  20_security_gaps.sql
 )
 REQUIRED_SECRETS=(JWT_SECRET DB_ENCRYPTION_KEY TSI_LOOKUP_SALT BOOTSTRAP_TOKEN)
 CONTAINER_NAMES=(tsi_dpdp_cms_py_db tsi_dpdp_cms_py_server tsi_dpdp_cms_py_worker)

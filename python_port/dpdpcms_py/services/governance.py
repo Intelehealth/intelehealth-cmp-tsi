@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+from datetime import UTC, datetime
 
 from .. import db
 from ..audit import get_log, list_logs, log_event
+from ..config import settings
 from ..context import RequestContext
 from ..errors import ApiError
 from ..netutil import validate_outbound_url
@@ -335,6 +338,12 @@ class NotificationService(Service):
         )
 
     def set_rights_app_config(self, ctx: RequestContext) -> dict:
+        otp_mode = str(require(ctx.payload.get("otp_mode"), "otp_mode")).upper()
+        # SEC-14: DUMMY_OTP is a fixed, unauthenticated code. It is only ever
+        # honoured where ALLOW_DUMMY_OTP permits; refusing to even record it in
+        # other environments makes the evaluation mode impossible by accident.
+        if otp_mode == "DUMMY_OTP" and not settings.allow_dummy_otp:
+            raise ApiError(400, "Bad Request", "DUMMY_OTP is only available when ALLOW_DUMMY_OTP is enabled.")
         db.execute(
             """
             INSERT INTO rights_app_config (fiduciary_id, otp_mode, otp_message_template, pca_qr_enabled, last_updated_at)
@@ -347,7 +356,7 @@ class NotificationService(Service):
             """,
             (
                 require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),
-                require(ctx.payload.get("otp_mode"), "otp_mode"),
+                otp_mode,
                 ctx.payload.get("otp_message_template"),
                 bool(ctx.payload.get("pca_qr_enabled", True)),
             ),
@@ -359,8 +368,11 @@ class NotificationService(Service):
             "SELECT * FROM rights_app_config WHERE fiduciary_id = %s",
             (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
         )
+        # SEC-14: no config row must never default to the evaluation mode. A
+        # fiduciary that never configured the rights app now reads as EMAIL_OTP
+        # (real delivery, fail-closed) instead of DUMMY_OTP (fixed code).
         return db.to_jsonable(
-            row or {"fiduciary_id": ctx.payload.get("fiduciary_id"), "otp_mode": "DUMMY_OTP", "pca_qr_enabled": True}
+            row or {"fiduciary_id": ctx.payload.get("fiduciary_id"), "otp_mode": "EMAIL_OTP", "pca_qr_enabled": True}
         )
 
     def dispatch_notification(self, ctx: RequestContext) -> dict:
@@ -513,10 +525,13 @@ class RopaService(Service):
 
     def retire_entry(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
-        db.execute(
+        updated = db.execute(
             f"UPDATE ropa_entries SET status = 'retired', updated_at = NOW() WHERE id = %s{scope}",
             (require(ctx.payload.get("id"), "id"), *scope_params),
         )
+        # SEC-12: a retire that did not happen is not reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "ROPA entry not found.")
         return {"success": True}
 
     def list_entries(self, ctx: RequestContext) -> list[dict]:
@@ -578,30 +593,76 @@ class RopaService(Service):
 
 class LegalService(Service):
     def generate_certificate(self, ctx: RequestContext) -> dict:
-        logs = list_logs(
+        """LG-05/SA-14: crystallise a principal's hash-chained trail as evidence.
+
+        The certificate embeds the verified chain segment (an evidence trail),
+        environment metadata and an HMAC signature over that payload. The signing
+        key is a deployment secret (`certificate_signing_key`), not a client
+        secret the CMS serves; the algorithm and metadata are recorded so the
+        certificate is verifiable rather than a bare log dump.
+        """
+        import hashlib
+        import hmac as hmac_lib
+
+        principal = require(ctx.payload.get("subject_principal_id"), "subject_principal_id")
+        fiduciary_id = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
+        case_ref = ctx.payload.get("case_ref_id")
+        logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": 500})
+        fiduciary = db.one("SELECT name FROM fiduciaries WHERE id = %s", (fiduciary_id,))
+        generated_at = datetime.now(UTC)
+        evidence_trail = [
             {
-                "fiduciary_id": ctx.payload.get("fiduciary_id"),
-                "user_id": ctx.payload.get("subject_principal_id"),
-                "limit": 500,
+                "ts": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
+                "act": row["audit_action"],
+                "hash": row.get("current_log_hash") or "",
             }
-        )
+            for row in logs
+        ]
+        data = {
+            "principal_id": principal,
+            "case_ref_id": case_ref,
+            "fiduciary_name": (fiduciary or {}).get("name") or "",
+            "timestamp": generated_at.isoformat(),
+            "environment": settings.environment,
+            "brand": settings.brand_name,
+            "system_metadata": {
+                "environment": settings.environment,
+                "generated_by": "TSI DPDP CMS",
+                "node": "python_port",
+            },
+            "evidence_trail": evidence_trail,
+            "signature_algorithm": "HMAC-SHA256",
+        }
+        canonical = json.dumps(data, sort_keys=True, ensure_ascii=False)
+        data["signature"] = hmac_lib.new(
+            settings.certificate_signing_key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
         row = db.insert_returning(
             "INSERT INTO evidence_certificates (id, fiduciary_id, subject_principal_id, certifying_officer_id, case_ref_id, certificate_data, attestation_text) VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s) RETURNING id",
             (
-                require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),
-                require(ctx.payload.get("subject_principal_id"), "subject_principal_id"),
-                ctx.payload.get("certifying_officer_id"),
-                ctx.payload.get("case_ref_id"),
-                db.as_jsonb({"logs": logs}),
+                fiduciary_id,
+                principal,
+                ctx.operator_id or ctx.payload.get("certifying_officer_id"),
+                case_ref,
+                db.as_jsonb(data),
                 ctx.payload.get("attestation_text", "System-generated evidence certificate."),
             ),
+        )
+        log_event(
+            ctx.actor_email or principal,
+            fiduciary_id,
+            "DPO_CONSOLE",
+            None,
+            "EVIDENCE_CERTIFICATE_GENERATED",
+            {"subject_principal_id": principal, "case_ref_id": case_ref},
+            source_ip=ctx.source_ip,
         )
         return {"success": True, "certificate_id": str(row["id"])}
 
     def list_certificates(self, ctx: RequestContext) -> list[dict]:
         return db.to_jsonable(
             db.all(
-                "SELECT id, fiduciary_id, subject_principal_id, generated_at, case_ref_id FROM evidence_certificates WHERE fiduciary_id = %s ORDER BY generated_at DESC",
+                "SELECT id, id AS certificate_id, fiduciary_id, subject_principal_id AS principal_id, generated_at AS timestamp, case_ref_id AS case_ref FROM evidence_certificates WHERE fiduciary_id = %s ORDER BY generated_at DESC",
                 (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
             )
         )
@@ -614,4 +675,15 @@ class LegalService(Service):
         )
         if not row:
             raise ApiError(404, "Not Found", "Certificate not found.")
-        return db.to_jsonable(row)
+        out = db.to_jsonable(row)
+        # The console views read certificate_id, data and attestation; keep the
+        # raw row under `data` so the viewer renders the signed payload.
+        try:
+            data = row["certificate_data"]
+            if isinstance(data, str):
+                data = json.loads(data)
+        except (ValueError, TypeError):
+            data = {}
+        out["data"] = data
+        out["attestation"] = out.get("attestation_text")
+        return out

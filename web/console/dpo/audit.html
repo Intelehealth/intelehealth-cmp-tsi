@@ -202,6 +202,15 @@
             <span id="log-count" class="text-sm text-gray-500 font-medium">Fetching logs...</span>
         </div>
 
+        <div class="flex items-center justify-end gap-2 mb-3">
+            <button id="verify-chain-btn"
+                class="bg-teal-600 text-white px-4 py-2 rounded-md text-sm font-bold hover:bg-teal-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Recompute the hash-chained ledger and report any break (LG-04). Requires a global administrator session.">
+                Verify Chain Integrity
+            </button>
+            <span id="verify-chain-result" class="text-xs font-mono text-gray-600"></span>
+        </div>
+
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200">
                 <thead>
@@ -433,6 +442,38 @@
         // Trigger native browser download
         XLSX.writeFile(workbook, filename);
     }
+
+    // SEC-10: surface the chain verifier in the DPO console. The service is
+    // admin-only and requires a global (unscoped) operator to run.
+    async function verifyChain() {
+        const btn = document.getElementById('verify-chain-btn');
+        const result = document.getElementById('verify-chain-result');
+        btn.disabled = true;
+        result.textContent = 'Checking…';
+        try {
+            const response = await fetch(API_URL_AUDIT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "verify_audit_chain", "limit": 100000 })
+            });
+            const body = await response.json();
+            if (response.status === 403) {
+                result.textContent = 'Verify Chain requires a global administrator session.';
+            } else if (response.ok && body.intact) {
+                result.textContent = `Chain intact: ${body.rows_checked} rows checked`
+                    + (body.legacy_rows_linkage_only ? ` (${body.legacy_rows_linkage_only} legacy linkage-only)` : '');
+            } else {
+                const failed = body && body.broken_count !== undefined ? body.broken_count : (body.message || 'failed');
+                result.textContent = `Chain BROKEN: ${failed}`;
+                console.warn('Audit chain verification failed', body);
+            }
+        } catch (e) {
+            result.textContent = 'Verification failed: ' + esc(e.message);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+    document.getElementById('verify-chain-btn').addEventListener('click', verifyChain);
 
     // Initialize DOM links and listeners
     tableBody = document.getElementById('audit-table-body');

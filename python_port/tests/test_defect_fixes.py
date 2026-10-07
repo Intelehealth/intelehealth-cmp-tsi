@@ -53,6 +53,12 @@ class FakeOtpStore:
         if "FROM principal_otps" in sql:
             live = [r for r in self.rows if r["subject_hash"] == params[0] and r["consumed_at"] is None]
             return live[-1] if live else None
+        if "pgp_sym_encrypt" in sql:
+            # SEC-13: the webhook queue gets a ciphertext, never the plaintext.
+            # Remember the plaintext separately so the login tests can still
+            # exercise principal_login with the real code.
+            self.last_code = str(params[0])
+            return {"enc": "enc:" + str(params[0])}
         raise AssertionError(sql)
 
     def execute(self, sql, params=()):
@@ -130,10 +136,14 @@ def test_request_otp_never_returns_the_code(otp_store):
     assert "otp" not in out
     assert len(otp_store.rows) == 1
     # The code went out of band (OTP webhook), and only its HMAC was stored.
+    # SEC-13: the queued payload carries the code only as ciphertext.
     (args, kwargs) = otp_store.webhooks[0]
-    sent = args[2]["otp"]
+    sent = args[2]
     assert kwargs["category"] == "OTP"
-    assert otp_store.rows[0]["code_hash"] != sent
+    assert "otp_enc" in sent and "encyclopedia" not in sent.get("otp_enc", "")
+    assert "otp" not in sent and "message" not in sent
+    assert "{{otp}}" in sent["message_template"]
+    assert otp_store.rows[0]["code_hash"] != sent["otp_enc"]
 
 
 def test_login_requires_an_otp(otp_store):
@@ -145,7 +155,7 @@ def test_login_requires_an_otp(otp_store):
 
 def test_login_rejects_wrong_code_and_accepts_right_code_once(otp_store):
     _request_otp()
-    sent = otp_store.webhooks[0][0][2]["otp"]
+    sent = otp_store.last_code
     wrong = "000000" if sent != "000000" else "111111"
     with pytest.raises(ApiError) as exc:
         _login(wrong)
@@ -157,14 +167,14 @@ def test_login_rejects_wrong_code_and_accepts_right_code_once(otp_store):
 
 def test_code_is_bound_to_its_principal(otp_store):
     _request_otp("asha@example.com")
-    sent = otp_store.webhooks[0][0][2]["otp"]
+    sent = otp_store.last_code
     with pytest.raises(ApiError):
         _login(sent, user="someone-else@example.com")
 
 
 def test_code_dies_after_max_attempts(otp_store):
     _request_otp()
-    sent = otp_store.webhooks[0][0][2]["otp"]
+    sent = otp_store.last_code
     wrong = "000000" if sent != "000000" else "111111"
     for _ in range(principal_otp.MAX_ATTEMPTS):
         with pytest.raises(ApiError):

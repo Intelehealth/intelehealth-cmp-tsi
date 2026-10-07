@@ -22,6 +22,9 @@ class RequestContext:
     # Set for admin-category calls once the bearer token is matched to an ACTIVE
     # operator row; the role on auth_token is then the database role, not the claim.
     operator_id: str | None = None
+    # SEC-04: the app an API-key caller's credential is bound to, so a PURGE
+    # confirmation can be restricted to the processor assigned to the request.
+    app_id: str | None = None
     # CC-06: the server-side session a consent action happened in (principal JWT jti).
     session_id: str | None = None
     source_ip: str | None = None

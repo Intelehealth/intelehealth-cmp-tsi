@@ -9,7 +9,13 @@
     "fiduciary_id": {
       "type": "string"
     },
-    "user_id": {
+    "subject_principal_id": {
+      "type": "string"
+    },
+    "attestation_text": {
+      "type": "string"
+    },
+    "certifying_officer_id": {
       "type": "string"
     },
     "_func": {
@@ -19,7 +25,7 @@
   "required": [
     "case_ref_id",
     "fiduciary_id",
-    "user_id",
+    "subject_principal_id",
     "_func"
   ]
 }

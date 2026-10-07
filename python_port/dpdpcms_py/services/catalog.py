@@ -273,10 +273,13 @@ class FiduciaryService(Service):
 
     def delete_fiduciary(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx, "id")
-        db.execute(
+        updated = db.execute(
             f"UPDATE fiduciaries SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s{scope}",
             (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"), *scope_params),
         )
+        # SEC-12: only log and report a deactivation that actually happened.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Data Fiduciary not found.")
         return {"success": True}
 
     def validate_fiduciary_domain(self, ctx: RequestContext) -> dict:
@@ -371,10 +374,13 @@ class AppService(Service):
 
     def delete_app(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
-        db.execute(
+        updated = db.execute(
             f"UPDATE apps SET status = 'INACTIVE', last_updated_at = NOW() WHERE id = %s{scope}",
             (require(ctx.payload.get("app_id"), "app_id"), *scope_params),
         )
+        # SEC-12: a delete that did not happen is not reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "App not found.")
         return {"success": True}
 
 
@@ -608,8 +614,11 @@ class PolicyService(Service):
     def delete_policy(self, ctx: RequestContext) -> dict:
         reject_operator(ctx)
         scope, scope_params = tenant_filter(ctx)
-        db.execute(
+        updated = db.execute(
             f"UPDATE consent_policies SET status = 'ARCHIVED', last_updated_at = NOW() WHERE id = %s{scope}",
             (require(ctx.payload.get("policy_id"), "policy_id"), *scope_params),
         )
+        # SEC-12: an archive that did not happen is not reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "Policy not found.")
         return {"success": True}

@@ -298,7 +298,11 @@ class ConsentService(Service):
         # and never grant a purpose that is CLOSED under the purpose lifecycle.
         closed = check_consent_alignment(fid, policy_id, version, data_consents)
         check_explicit_choices(policy.get("policy_content"), data_consents, closed)
-        age_category = str(payload.get("age_category") or "ADULT").upper()
+        # SEC-05: age_category is never silently defaulted to ADULT. When the
+        # payload names one it is honoured (MINOR still requires a VERIFIED
+        # guardian log below); when it is silent the existing value survives via
+        # COALESCE. An upsert default overwriting a MINOR row closes the s.9 gate.
+        age_category = str(payload["age_category"]).upper() if payload.get("age_category") else None
         guardian_id = payload.get("guardian_id")
         verification_log_id = payload.get("verification_log_id")
         if age_category == "MINOR":
@@ -369,9 +373,9 @@ class ConsentService(Service):
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id, fiduciary_id) DO UPDATE SET
                     last_consent_mechanism = EXCLUDED.last_consent_mechanism,
-                    age_category = EXCLUDED.age_category,
-                    guardian_id = EXCLUDED.guardian_id,
-                    verification_status = EXCLUDED.verification_status
+                    age_category = COALESCE(EXCLUDED.age_category, data_principal.age_category),
+                    guardian_id = COALESCE(EXCLUDED.guardian_id, data_principal.guardian_id),
+                    verification_status = COALESCE(EXCLUDED.verification_status, data_principal.verification_status)
                 """,
                 (
                     user_id,
@@ -379,7 +383,7 @@ class ConsentService(Service):
                     observed["mechanism"],
                     age_category,
                     guardian_id,
-                    "GUARDIAN_VERIFIED" if age_category == "MINOR" else "NOT_VERIFIED",
+                    "GUARDIAN_VERIFIED" if age_category == "MINOR" else None,
                 ),
             )
         _notify_principal(user_id, fid, NOTIF_CONSENT_GIVEN)
@@ -443,8 +447,11 @@ class ConsentService(Service):
         ref_id = payload.get("verification_ref_id")
         status, detail = "ASSERTED", "Recorded as an assertion; only EXISTING_ACCOUNT or DIGILOCKER can verify."
         if mechanism == "EXISTING_ACCOUNT":
+            # SEC-05: guardianship is proven by a row the server recorded as
+            # ADULT, never by the column default. A principal whose age the CMS
+            # has not attested (NULL) cannot vouch for a minor.
             adult = db.one(
-                "SELECT 1 FROM data_principal WHERE user_id = %s AND fiduciary_id = %s AND COALESCE(age_category, 'ADULT') = 'ADULT'",
+                "SELECT 1 FROM data_principal WHERE user_id = %s AND fiduciary_id = %s AND age_category = 'ADULT'",
                 (guardian, fid),
             )
             status = "VERIFIED" if adult else "REJECTED"
@@ -706,22 +713,16 @@ class ConsentService(Service):
             "UPDATE consent_records SET user_id = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s",
             (auth, anon, fid),
         )
+        # SEC-05: age_category and verification_status are server-derived from
+        # the guardian/consent flows (CC-05), never from this payload. The link
+        # only relabels an anonymous profile the server already recorded (age
+        # and verification intact) when the authenticated user has none of its
+        # own; an existing row is never overwritten, and no default 'ADULT'
+        # value is fabricated for a user whose age the server has not attested.
         db.execute(
-            """
-            INSERT INTO data_principal (user_id, fiduciary_id, age_category, guardian_id, verification_status)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (user_id, fiduciary_id) DO UPDATE SET
-                age_category = EXCLUDED.age_category,
-                guardian_id = EXCLUDED.guardian_id,
-                verification_status = EXCLUDED.verification_status
-            """,
-            (
-                auth,
-                fid,
-                ctx.payload.get("age_category", "ADULT"),
-                ctx.payload.get("guardian_id"),
-                ctx.payload.get("verification_status", "NOT_VERIFIED"),
-            ),
+            "UPDATE data_principal SET user_id = %s WHERE user_id = %s AND fiduciary_id = %s"
+            " AND NOT EXISTS (SELECT 1 FROM data_principal p WHERE p.user_id = %s AND p.fiduciary_id = %s)",
+            (auth, anon, fid, auth, fid),
         )
         return {"success": True, "message": "User consent records linked successfully."}
 
@@ -998,6 +999,10 @@ class ConsentService(Service):
                 from .retention import legal_hold_for
 
                 targets = purpose_ids or ["ALL"]
+                # SEC-04: an erasure initiated through an integrator key records
+                # which app opened it, so only that processor can later confirm
+                # the purge (confirm_purge_status binds to the key's app).
+                initiator_app_id = ctx.app_id if ctx.permissions else None
                 for target in targets:
                     # CW-11: decide at withdrawal time whether the law requires the
                     # data to be kept; a held request says so and cites the rule.
@@ -1005,9 +1010,9 @@ class ConsentService(Service):
                     cur.execute(
                         """
                         INSERT INTO purge_requests
-                            (user_id, fiduciary_id, purpose_id, trigger_event, details, status, legal_reference, hold_until)
+                            (user_id, fiduciary_id, purpose_id, trigger_event, details, status, legal_reference, hold_until, app_id)
                         VALUES (%s, %s, %s, 'ErasureRequest', %s, %s, %s,
-                                CASE WHEN %s::int IS NULL THEN NULL ELSE NOW() + make_interval(days => %s::int) END)
+                                CASE WHEN %s::int IS NULL THEN NULL ELSE NOW() + make_interval(days => %s::int) END, %s)
                         """,
                         (
                             user_id,
@@ -1018,6 +1023,7 @@ class ConsentService(Service):
                             hold["legal_reference"] if hold else None,
                             hold["days"] if hold else None,
                             hold["days"] if hold else None,
+                            initiator_app_id,
                         ),
                     )
                     if hold:
@@ -1072,7 +1078,7 @@ class PrincipalService(Service):
             db.all(
                 # otp_mode tells the rights portal whether to show "Send OTP".
                 """
-                SELECT f.id AS fiduciary_id, f.name, f.primary_domain, COALESCE(r.otp_mode, 'DUMMY_OTP') AS otp_mode
+                SELECT f.id AS fiduciary_id, f.name, f.primary_domain, COALESCE(r.otp_mode, 'EMAIL_OTP') AS otp_mode
                 FROM fiduciaries f LEFT JOIN rights_app_config r ON r.fiduciary_id = f.id
                 WHERE f.status = 'ACTIVE' ORDER BY f.name
                 """
@@ -1107,10 +1113,14 @@ class PrincipalService(Service):
 
     @staticmethod
     def _otp_mode(fid: str) -> tuple[str, str | None]:
-        """The fiduciary's configured OTP mode; 404 for an unknown or inactive fiduciary."""
+        """The fiduciary's configured OTP mode; 404 for an unknown or inactive fiduciary.
+
+        SEC-14: an unconfigured fiduciary reads EMAIL_OTP (real delivery) rather
+        than DUMMY_OTP; the fixed-code evaluation mode is only ever used when an
+        operator expressly set it AND allow_dummy_otp permits it."""
         row = db.one(
             """
-            SELECT COALESCE(r.otp_mode, 'DUMMY_OTP') AS otp_mode, r.otp_message_template
+            SELECT COALESCE(r.otp_mode, 'EMAIL_OTP') AS otp_mode, r.otp_message_template
             FROM fiduciaries f LEFT JOIN rights_app_config r ON r.fiduciary_id = f.id
             WHERE f.id = %s AND f.status = 'ACTIVE'
             """,
@@ -1154,17 +1164,21 @@ class PrincipalService(Service):
                 """,
                 (fid, subject, principal_otp.code_hash(subject, code), principal_otp.TTL_MINUTES),
             )
+        # SEC-13: the code is encrypted at enqueue so webhook_deliveries.payload
+        # never rests in the clear; the dispatcher decrypts it right before the
+        # POST and the message template is rendered only at dispatch time.
         from ..webhooks import queue_webhook
 
-        message = (template or "Your verification code is {{otp}}").replace("{{otp}}", code)
+        enc_code = principal_otp.encrypt_code(code)
+        message_template = template or "Your verification code is {{otp}}"
         queue_webhook(
             fid,
             "PRINCIPAL_OTP",
             {
                 "channel": "EMAIL" if mode == "EMAIL_OTP" else "SMS",
                 "recipient": user_id,
-                "otp": code,
-                "message": message,
+                "otp_enc": enc_code,
+                "message_template": message_template,
                 "expires_in_minutes": principal_otp.TTL_MINUTES,
             },
             category="OTP",
