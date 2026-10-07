@@ -3,9 +3,9 @@ name: Main
 on:
   workflow_dispatch: {}
   push:
-    branches: [p5_changes]
+    branches: [main, p5_changes]
   pull_request:
-    branches: [p5_changes]
+    branches: [main, p5_changes]
 
 permissions:
   contents: read
@@ -27,25 +27,25 @@ jobs:
       - name: Ruff check
         run: ruff check python_port
 
+      # Tighten once the codebase is formatted.
       - name: Ruff format check
         run: ruff format --check python_port
-        continue-on-error: true # tighten on
+        continue-on-error: true
 
   test:
     name: Import check + tests
     runs-on: ubuntu-latest
-    # CI-only placeholder secrets. config.py refuses to load unless every one of
-    # these is set (each secret at least 32 job level
-    # where every step sees the same values.
+    # CI-only placeholders. config.py needs all of
+    # them; each secret must be 32+ characters.
     env:
       POSTGRES_HOST: postgresql://localhost:5434
       POSTGRES_DB: ci
       POSTGRES_USER: ci
-      POSTGRES_PASSWD: ci-only-password-not-
-      JWT_SECRET: ci-only-jwt-secret-not-real-1234567890abcd
-      DB_ENCRYPTION_KEY: ci-only-enc-key-not
-      TSI_LOOKUP_SALT: ci-only-salt-not-real-1234567890abcdefgh
-      BOOTSTRAP_TOKEN: ci-only-bootstrap-tok
+      POSTGRES_PASSWD: ci-password-0123456789abcdef
+      JWT_SECRET: ci-jwt-0123456789abcdef0123456789abcdef
+      DB_ENCRYPTION_KEY: ci-enc-0123456789abcdef0123456789abcdef
+      TSI_LOOKUP_SALT: ci-salt-0123456789abcdef0123456789abcdef
+      BOOTSTRAP_TOKEN: ci-boot-0123456789abcdef0123456789abcdef
       TSI_DPDP_CMS_ENV: local
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +59,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r python_port/requirements.txt pytest
 
-      # Catches syntax errors and bad import
+      # Catches syntax errors and bad imports.
       - name: Byte-compile sources
         run: python -m compileall -q python_port/dpdpcms_py
 
@@ -67,9 +67,8 @@ jobs:
         working-directory: python_port
         run: python -c "import dpdpcms_py.main"
 
-      # `python -m pytest` puts python_port/rt
-      # dpdpcms_py` works with or without pytest.ini. A missing or empty suite
-      # fails the job (pytest exits 5)  instead of passing green.
+      # python -m pytest puts python_port/ on sys.path.
+      # An empty suite fails (exit 5), never green.
       - name: Run pytest
         working-directory: python_port
         run: python -m pytest -q tests
@@ -81,4 +80,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image
-        run: docker build -f python_port/Dockerfile -t tsi-dpdp-cms-python:ci .
+        run: >-
+          docker build -f python_port/Dockerfile
+          -t tsi-dpdp-cms-python:ci .
