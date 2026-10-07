@@ -83,7 +83,7 @@ def test_wallet_principal_cannot_act_for_another_user(client, ran):
 
 
 def test_wallet_api_key_caller_must_name_user(client, ran, monkeypatch):
-    monkeypatch.setattr(main, "api_key_valid", lambda *a: (True, FID, {"READ", "WRITE", "PURGE"}))
+    monkeypatch.setattr(main, "api_key_valid", lambda *a: (True, FID, {"READ", "WRITE", "PURGE"}, None))
     response = _wallet(client, {"action": "GLOBAL_ERASURE"})
     assert response.status_code == 400
     assert "user_id" in response.json()["message"]

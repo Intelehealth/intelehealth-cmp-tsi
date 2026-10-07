@@ -86,18 +86,20 @@ def pseudonym(value: str | None) -> str:
     return digest[:32]
 
 
-def api_key_valid(api_key: str | None, api_secret: str | None) -> tuple[bool, str | None, set[str]]:
+def api_key_valid(api_key: str | None, api_secret: str | None) -> tuple[bool, str | None, set[str], str | None]:
     if not api_key or not api_secret:
-        return False, None, set()
+        return False, None, set(), None
     row = db.one(
-        "SELECT fiduciary_id, key_value, permissions FROM api_keys WHERE id = %s AND status = 'ACTIVE'",
+        "SELECT fiduciary_id, app_id, key_value, permissions FROM api_keys WHERE id = %s AND status = 'ACTIVE'"
+        " AND (expires_at IS NULL OR expires_at > NOW())",
         (api_key,),
     )
     if not row or not verify_password(api_secret, row.get("key_value")):
-        return False, None, set()
+        return False, None, set(), None
     raw = row.get("permissions") or []
     if isinstance(raw, str):
         scopes = {part.strip().upper() for part in raw.strip("[]").replace('"', "").split(",") if part.strip()}
     else:
         scopes = {str(part).strip().upper() for part in raw}
-    return True, str(row["fiduciary_id"]), scopes
+    app_id = str(row["app_id"]) if row.get("app_id") else None
+    return True, str(row["fiduciary_id"]), scopes, app_id

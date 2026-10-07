@@ -79,6 +79,63 @@ All notable changes in this branch are documented here for reviewers and operato
 - **CF-03 / CF-04** Already fixed on this branch (test suite present; README upgrade loop lists `13`–`18`). The workbook v5 findings were made against `p4_changes`.
 - **CF-05** Cookie consent (BRD 4.2) is out of scope for this release.
 
+### Fixed (Security Gaps sheet, traceability workbook security)
+
+- **SEC-01** The unauthenticated recovery path (`verify_recovery_key`,
+  `reset_password_via_recovery`) is now throttled and locks out by email and by
+  source IP, every attempt and success is written to the audit ledger, and the
+  password floor matches `initial_setup` (12 characters). The reset also clears
+  `last_login_at` so the takeover is visible from the login signal. New
+  `auth_throttles` table (db/20), generic `throttle.py` helper, worker sweeps
+  the expired rows.
+- **SEC-03** Operator login now uses the same lockout pattern as MFA: 5
+  failures by identifier or source IP lock the account for 15 minutes, both are
+  cleared on success, and `last_login_at` is finally written on every
+  successful login.
+- **SEC-04** `confirm_purge_status` is bound to the authenticated caller. An
+  API key must belong to the app assigned to the purge request (`app_id` now
+  recorded when an erasure is initiated through an integrator key); the
+  confirming identity is derived from the credential, never from the
+  `confirmed_by_entity_id` body field, and the processor's claimed record count
+  is stored separately from CMS-verified erasure counts. Tests cover the 403 /
+  pass paths.
+- **SEC-05** `link_user` no longer accepts `age_category`, `verification_status`
+  or `guardian_id`, and never lets an upsert default overwrite an existing
+  value: only records are relinked and a server-attested profile is carried
+  across. `record_consent` no longer defaults a silent age to ADULT either, and
+  the EXISTING_ACCOUNT guardian path requires an explicitly-ADULT profile row.
+- **SEC-06** `get_admin_metrics` is tenant-scoped for DPO/OPERATOR/AUDITOR
+  callers (platform-wide only for a global ADMIN), matching `get_dpo_metrics`.
+- **SEC-07** `api_key_valid` refuses keys whose `expires_at` has passed, and a
+  new worker sweep (`expire_lapsed_api_keys`) marks lapsed keys EXPIRED so the
+  listing and the enforced behaviour agree.
+- **SEC-08** The no-escalation check on custom roles now runs for every actor,
+  including a global one with a NULL `fiduciary_id`: a role:manage holder
+  without full access can no longer mint a global role carrying `"*"`.
+- **SEC-10** Evidence certificates are signed (HMAC-SHA256 with
+  `certificate_signing_key`, defaulting to the DB encryption key) and carry
+  environment metadata and a verifiable evidence trail; the DPO console posts
+  `subject_principal_id` (the form previously always 400'd) and the audit page
+  gains a "Verify Chain Integrity" button that surfaces `verify_audit_chain`.
+- **SEC-12** `deactivate_user` and the sibling deletes (`delete_app`,
+  `delete_policy`, `delete_fiduciary`, `retire_entry`,
+  `delete_retention_policy`, `revoke_nomination`) check the rowcount and 404 on
+  zero before reporting (or logging) success.
+- **SEC-13** The principal OTP is encrypted at enqueue (pgcrypto) and rendered
+  plaintext only at dispatch, so `webhook_deliveries.payload` never rests in
+  the clear; a worker sweep enforces retention on terminal `webhook_deliveries`.
+- **SEC-14** An unconfigured rights app reads EMAIL_OTP instead of DUMMY_OTP,
+  recording DUMMY_OTP is refused outside `ALLOW_DUMMY_OTP`, SSO logins require a
+  single-use nonce (replay of a captured id_token fails), and the JWKS client
+  is cached per URL instead of fetched on every login.
+- **SEC-15** `erase_cms_copy` now covers every table carrying a principal
+  identifier: nominations (both columns), data-correction requests,
+  re-consent requests, parental-verification logs (both columns), PRINCIPAL
+  alerts, notification deliveries (via the owning notification) and affected-
+  principals breach rows, exposed as `ERASURE_TARGETS` with a regression test.
+- New `db/20_security_gaps.sql` (throttles, SSO nonces, OTP-mode default) and
+  `python_port/tests/test_security_gaps.py` (30 tests) covering the above.
+
 ### Fixed (BRD Traceability sheet, workbook v5 re-verification)
 
 - **PL-02** Closing a purpose that a policy still declares no longer blocks all consent under that policy. A closed purpose may be declined or left out; only granting it is refused (403). `check_consent_alignment` returns the closed set and `check_explicit_choices` exempts it.
@@ -106,7 +163,7 @@ All notable changes in this branch are documented here for reviewers and operato
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/19` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Existing database:** Run `db/13` through `db/20` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
 - **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

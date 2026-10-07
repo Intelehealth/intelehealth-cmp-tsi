@@ -66,19 +66,51 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
     the identifier. Every row keyed by the principal is re-keyed to a keyed hash
     (HMAC with the deployment's lookup salt), so the consent evidence trail stays
     countable but no longer names anyone, and free-text grievance content is
-    blanked. The audit log already stores only the pseudonym.
+    blanked. SEC-15: the covered set is every table/schema column that stores a
+    principal identifier (see ERASURE_TARGETS, kept next to the test that
+    enumerates them). The audit log already stores only the pseudonym.
     """
     from ..security import pseudonym
 
     token = f"erased:{pseudonym(f'{fiduciary_id}:{user_id}')}"
     counts: dict[str, int] = {}
     with db.connection() as conn, conn.cursor() as cur:
-        for table, column in (
-            ("consent_records", "user_id"),
-            ("notifications", "recipient_id"),
-            ("consent_validations", "user_id"),
-            ("purge_requests", "user_id"),
-        ):
+        for table, column in ERASURE_TARGETS:
+            if table == "notification_deliveries":
+                # There is no principal key on the row; the recipient (a resolved
+                # address or device id) is reached through its notification.
+                cur.execute(
+                    """
+                    UPDATE notification_deliveries nd SET recipient = %s
+                    FROM notifications n
+                    WHERE nd.notification_id = n.id AND n.fiduciary_id = %s
+                      AND n.recipient_type = 'PRINCIPAL' AND n.recipient_id = %s
+                    """,
+                    (token, fiduciary_id, user_id),
+                )
+                counts[table] = cur.rowcount
+                continue
+            if table == "breach_affected_principals":
+                # The table carries no fiduciary_id; its rows hang off
+                # breach_incidents, which does.
+                cur.execute(
+                    """
+                    UPDATE breach_affected_principals b SET user_id = %s
+                    FROM breach_incidents bi
+                    WHERE b.breach_id = bi.id AND bi.fiduciary_id = %s AND b.user_id = %s
+                    """,
+                    (token, fiduciary_id, user_id),
+                )
+                counts[table] = cur.rowcount
+                continue
+            if table == "alerts":
+                cur.execute(
+                    "UPDATE alerts SET recipient_id = %s"
+                    " WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL' AND recipient_id = %s",
+                    (token, fiduciary_id, user_id),
+                )
+                counts[table] = cur.rowcount
+                continue
             cur.execute(
                 f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s",
                 (token, fiduciary_id, user_id),
@@ -113,6 +145,27 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
         )
     _remove_unreferenced_files(attachment_paths)
     return counts
+
+
+# SEC-15: every table whose rows carry a principal identifier, mapped to the
+# column storing it. extend these in one place; the regression test enumerates
+# the schema files against this set so a new table cannot be forgotten.
+ERASURE_TARGETS: tuple[tuple[str, str], ...] = (
+    ("consent_records", "user_id"),
+    ("notifications", "recipient_id"),
+    ("consent_validations", "user_id"),
+    ("purge_requests", "user_id"),
+    ("grievances", "user_id"),
+    ("nominations", "nominating_principal_id"),
+    ("nominations", "nominated_principal_id"),
+    ("data_correction_requests", "user_id"),
+    ("reconsent_requests", "user_id"),
+    ("parental_verification_logs", "child_principal_id"),
+    ("parental_verification_logs", "guardian_principal_id"),
+    ("alerts", "recipient_id"),
+    ("notification_deliveries", "recipient"),
+    ("breach_affected_principals", "user_id"),
+)
 
 
 def _remove_unreferenced_files(paths: set[str]) -> None:
@@ -170,7 +223,13 @@ class ComplianceService(Service):
     def confirm_purge_status(self, ctx: RequestContext) -> dict:
         """SA-09: the processor that executed a purge confirms it with evidence
         (records affected, who confirmed, any error), so completion is recorded
-        as verified rather than assumed."""
+        as verified rather than assumed.
+
+        SEC-04: the confirmation is bound to the authenticated caller. An API
+        key must belong to the app assigned to the purge request, and the
+        confirming identity is taken from the credential, never from the free
+        `confirmed_by_entity_id` payload text.
+        """
         status = str(require(ctx.payload.get("status"), "status")).upper()
         if status not in {"PURGE_COMPLETED", "PURGE_FAILED", "COMPLETED", "FAILED"}:
             raise ApiError(400, "Bad Request", "status must be PURGE_COMPLETED or PURGE_FAILED.")
@@ -180,9 +239,22 @@ class ComplianceService(Service):
             raise ApiError(400, "Bad Request", "records_affected_count must be an integer.") from None
         if affected < 0:
             raise ApiError(400, "Bad Request", "records_affected_count must not be negative.")
+        # SEC-04: the confirming entity is the authenticated credential's owner,
+        # not a string the body names. A processor key confirms as its app; a
+        # console operator confirms as the signed-in account.
+        if ctx.permissions:
+            if not ctx.app_id:
+                raise ApiError(403, "Forbidden", "This API key is not bound to an app and cannot confirm purges.")
+            confirmed_by = ctx.app_id
+        elif ctx.operator_id:
+            confirmed_by = ctx.actor_email or ctx.operator_id
+        else:
+            confirmed_by = require(ctx.payload.get("confirmed_by_entity_id"), "confirmed_by_entity_id")
         evidence = {
             "records_affected_count": affected,
-            "confirmed_by_entity_id": require(ctx.payload.get("confirmed_by_entity_id"), "confirmed_by_entity_id"),
+            "claimed_records_affected_count": affected,
+            "confirmed_by_entity_id": confirmed_by,
+            "claimed_confirmed_by_entity_id": ctx.payload.get("confirmed_by_entity_id"),
             "error_message": ctx.payload.get("error_message"),
             "confirmed_at": datetime.now(UTC).isoformat(),
             "confirmed_via": "API_KEY" if ctx.permissions else "CONSOLE",
@@ -198,11 +270,17 @@ class ComplianceService(Service):
     def _set_purge_status(self, ctx: RequestContext, request_id: str, status: str, details, evidence) -> dict:
         scope, scope_params = tenant_filter(ctx)
         current = db.one(
-            f"SELECT id, user_id, fiduciary_id, purpose_id, trigger_event, status, hold_until FROM purge_requests WHERE id = %s{scope}",
+            f"SELECT id, user_id, fiduciary_id, purpose_id, trigger_event, status, hold_until, app_id, assigned_operator_id FROM purge_requests WHERE id = %s{scope}",
             (request_id, *scope_params),
         )
         if not current:
             raise ApiError(404, "Not Found", "Purge request not found.")
+        # SEC-04: an API key may only confirm or update a purge request that is
+        # assigned to its own app. A key confirmed_by_entity_id is not checked;
+        # the app binding is. Console operators are already tenant-scoped above.
+        if ctx.permissions:
+            if not ctx.app_id or str(current.get("app_id") or "") != ctx.app_id:
+                raise ApiError(403, "Forbidden", "This API key is not assigned to the purge request.")
         # CW-11: data under an unexpired legal hold may not be reported deleted.
         if (
             current["status"] == "LEGAL_HOLD_APPLIED"

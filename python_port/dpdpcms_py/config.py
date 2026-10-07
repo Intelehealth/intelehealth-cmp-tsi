@@ -76,6 +76,10 @@ class Settings:
     sso_jwks_url: str = ""
     # GR-04: grievance attachment limits.
     attachment_max_bytes: int = 5 * 1024 * 1024
+    # SA-14: key that signs evidence certificates. Defaults to the DB encryption
+    # key so nothing new needs provisioning; a deployment may set its own
+    # CERTIFICATE_SIGNING_KEY (still a server secret, never a client one).
+    certificate_signing_key: str = ""
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -137,6 +141,7 @@ class Settings:
             sso_audience=os.getenv("SSO_AUDIENCE", ""),
             sso_jwks_url=os.getenv("SSO_JWKS_URL", ""),
             attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
+            certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
         )
 
 

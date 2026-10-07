@@ -3,7 +3,8 @@
 Pure helpers only; the PrincipalService stores and consumes codes. A code is
 stored as an HMAC bound to the (fiduciary, principal) subject, so a database
 read neither reveals live codes nor lets one subject's code open another's
-session.
+session. SEC-13: when a code transits the webhook queue it is encrypted with
+the deployment DB key at enqueue time and rendered plaintext only at dispatch.
 """
 
 from __future__ import annotations
@@ -51,3 +52,28 @@ def code_matches(subject: str, supplied: str, stored_hash: str | None) -> bool:
     if not stored_hash or not supplied:
         return False
     return hmac.compare_digest(code_hash(subject, supplied), str(stored_hash))
+
+
+def encrypt_code(code: str) -> str:
+    """Encrypt a code so the webhook queue never holds it in the clear (SEC-13).
+
+    Uses the pgcrypto symmetric encryption the rest of the schema uses
+    (DB_ENCRYPTION_KEY); the dispatcher decrypts right before POSTing.
+    """
+    from . import db
+
+    row = db.one("SELECT encode(pgp_sym_encrypt(%s, %s), 'base64') AS enc", (code, settings.db_encryption_key))
+    return str(row["enc"]) if row else ""
+
+
+def decrypt_code(ciphertext: str | None) -> str | None:
+    """Decrypt a code rendered at dispatch time. Returns None when unusable."""
+    if not ciphertext:
+        return None
+    from . import db
+
+    try:
+        row = db.one("SELECT pgp_sym_decrypt(decode(%s, 'base64'), %s) AS code", (ciphertext, settings.db_encryption_key))
+    except Exception:  # pragma: no cover - a corrupt payload must not crash the sweep
+        return None
+    return str(row["code"]) if row else None

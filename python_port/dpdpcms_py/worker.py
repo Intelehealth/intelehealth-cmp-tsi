@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from . import delivery, jobs, webhooks
+from . import delivery, jobs, throttle, webhooks
 
 log = logging.getLogger("dpdpcms.worker")
 
@@ -30,6 +30,10 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "overdue_purges": jobs.flag_overdue_purges,
         "legal_holds": jobs.release_expired_legal_holds,
         "revoked_tokens": jobs.prune_revoked_tokens,
+        "expired_api_keys": jobs.expire_lapsed_api_keys,
+        "throttles": throttle.prune_expired,
+        "sso_nonces": jobs.prune_sso_nonces,
+        "webhook_deliveries": jobs.prune_old_webhook_deliveries,
     }
     # Each sweep is isolated: one failing sweep is logged and reported, and the
     # rest of the cycle still runs.
@@ -55,6 +59,10 @@ def list_sweeps() -> list[str]:
         "jobs.flag_overdue_purges                 (SA-09 unconfirmed purges)",
         "jobs.release_expired_legal_holds         (CW-11 legal hold end)",
         "jobs.prune_revoked_tokens                (SA-05 revocation list)",
+        "jobs.expire_lapsed_api_keys              (SEC-07 expiry enforcement)",
+        "throttle.prune_expired                   (SEC-01/03 throttle table)",
+        "jobs.prune_sso_nonces                    (SEC-14 one-time SSO nonces)",
+        "jobs.prune_old_webhook_deliveries          (SEC-13 webhook retention)",
     ]
 
 

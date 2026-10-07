@@ -60,9 +60,32 @@ def _sign(secret: str, body: bytes) -> str:
     return f"sha256={digest}"
 
 
+def _render_otp(payload: dict[str, Any]) -> dict[str, Any]:
+    """Render a queued OTP webhook into its outbound payload (SEC-13).
+
+    The queue stores the code encrypted (principal_otp.encrypt_code) and the
+    unrendered template; the plaintext is materialised only here, in memory,
+    immediately before the POST, so the database row never holds it.
+    """
+    if not payload.get("otp_enc"):
+        return payload
+    from . import principal_otp
+
+    code = principal_otp.decrypt_code(payload.get("otp_enc"))
+    out = {k: v for k, v in payload.items() if k not in {"otp_enc", "message_template"}}
+    if code is None:
+        out["error"] = "otp_enc could not be decrypted"
+        out["otp"] = None
+        return out
+    template = payload.get("message_template") or "Your verification code is {{otp}}"
+    out["otp"] = code
+    out["message"] = template.replace("{{otp}}", code)
+    return out
+
+
 def _send(delivery: dict[str, Any], config: dict[str, Any]) -> tuple[int | None, str | None]:
     """POST one queued delivery to one webhook config. Returns (status, error)."""
-    payload = delivery.get("payload") or {}
+    payload = _render_otp(delivery.get("payload") or {})
     envelope = {
         "event_id": str(delivery["id"]),
         "event_type": delivery["event_type"],
