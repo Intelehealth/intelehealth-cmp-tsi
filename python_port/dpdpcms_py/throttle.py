@@ -64,51 +64,58 @@ def require_allowed(scope: str, key: str) -> None:
 def record_failure(scope: str, key: str, max_failures: int = MAX_FAILURES, lockout_minutes: int = LOCKOUT_MINUTES) -> None:
     """Record one failed attempt; lock the key out once the cap is reached.
 
-    Runs as a read-modify-write inside one transaction so two concurrent
-    failures cannot both decide from the same counter value.
+    P6-04: the counter increment is issued server-side in one UPSERT
+    (`failures = auth_throttles.failures + 1`), so two concurrent first failures
+    cannot both read 0 and both write 1 — a parallel burst of login or
+    recovery failures previously lost every attempt but the first. The lock
+    decision is then computed from the RETURNING row and applied in the same
+    transaction.
     """
     now = datetime.now(UTC)
     with db.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT failures, locked_until, lockout_minutes FROM auth_throttles WHERE scope = %s AND key = %s FOR UPDATE",
-            (scope, key),
-        )
-        row = cur.fetchone()
-        if row:
-            failures = int(row["failures"] or 0)
-            locked_until = row.get("locked_until")
-            active_lock = locked_until is not None and locked_until > now
-            lapsed_lock = locked_until is not None and locked_until <= now
-            previous_minutes = int(row.get("lockout_minutes") or lockout_minutes)
-        else:
-            failures = 0
-            locked_until = None
-            active_lock = lapsed_lock = False
-            previous_minutes = lockout_minutes
-        if active_lock:
-            # Still inside the lock: count the attempt but keep the lock.
-            new_failures, new_locked, new_minutes = failures + 1, locked_until, previous_minutes
-        else:
-            # P5-02: a lapsed lock (or a counter already at the cap) starts a
-            # fresh window, so one attempt every 15 minutes can no longer keep
-            # an account or office locked forever.
-            new_failures = 1 if (lapsed_lock or failures >= max_failures) else failures + 1
-            if new_failures >= max_failures:
-                new_minutes = min(previous_minutes * 2, MAX_LOCKOUT_MINUTES) if previous_minutes else lockout_minutes
-                new_locked = now + timedelta(minutes=new_minutes)
-            else:
-                new_minutes, new_locked = lockout_minutes, None
+        # Atomic increment: the ON CONFLICT branch takes the row lock and adds
+        # one, so concurrent callers see strictly increasing counters. The
+        # RETURNING row's locked_until / lockout_minutes are the pre-lock state,
+        # which this statement does not touch.
         cur.execute(
             """
             INSERT INTO auth_throttles (scope, key, failures, locked_until, lockout_minutes, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, 1, NULL, %s, %s)
             ON CONFLICT (scope, key) DO UPDATE SET
-                failures = EXCLUDED.failures,
-                locked_until = EXCLUDED.locked_until,
-                lockout_minutes = EXCLUDED.lockout_minutes,
+                failures = auth_throttles.failures + 1,
                 updated_at = EXCLUDED.updated_at
+            RETURNING failures, locked_until, lockout_minutes
             """,
-            (scope, key, new_failures, new_locked, new_minutes, now),
+            (scope, key, lockout_minutes, now),
+        )
+        row = cur.fetchone()
+        failures = int(row["failures"])
+        locked_until = row.get("locked_until")
+        previous_minutes = int(row.get("lockout_minutes") or lockout_minutes)
+        active_lock = locked_until is not None and locked_until > now
+        lapsed_lock = locked_until is not None and locked_until <= now
+        if active_lock:
+            # Still inside the lock: the counter above already counted the
+            # attempt; keep the lock as-is.
+            return
+        # Pre-increment count decides the window semantics (P5-02): a lapsed
+        # lock, or a counter already at the cap, starts a fresh window so one
+        # attempt every 15 minutes can no longer keep the key locked forever.
+        old_failures = failures - 1
+        if lapsed_lock or old_failures >= max_failures:
+            new_failures = 1
+        else:
+            new_failures = failures
+        if new_failures >= max_failures:
+            # Just (re-)reached the cap: escalate, capped.
+            new_minutes = min(previous_minutes * 2, MAX_LOCKOUT_MINUTES) if previous_minutes else lockout_minutes
+            new_locked = now + timedelta(minutes=new_minutes)
+        else:
+            new_minutes, new_locked = lockout_minutes, None
+        cur.execute(
+            "UPDATE auth_throttles SET failures = %s, locked_until = %s, lockout_minutes = %s, updated_at = %s"
+            " WHERE scope = %s AND key = %s",
+            (new_failures, new_locked, new_minutes, now, scope, key),
         )
 
 

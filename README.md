@@ -101,7 +101,7 @@ More detail: [python_port/README.md](python_port/README.md).
 
 ## Database upgrades
 
-Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `21_defect_remediation_p6.sql`).
+Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `22_sec18_null_fiduciary_block.sql`).
 
 | Script | Purpose |
 | --- | --- |
@@ -113,16 +113,17 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `18_brd_traceability.sql` | Append-only consent metadata, guardian verification status, purge action/legal hold/evidence, grievance feedback and attachments, token revocation |
 | `19_audit_ledger_integrity.sql` | Trigger that makes `audit_logs` append-only (UPDATE, DELETE and TRUNCATE fail) |
 | `20_security_gaps.sql` | Attempt throttles (login/recovery), single-use SSO nonces, rights-app OTP mode default |
-| `21_defect_remediation_p6.sql` | Throttle backoff column, one-off clear of pre-encryption OTP webhook payloads |
+| `21_defect_remediation_p6.sql` | Throttle backoff column, one-off clear of pre-encryption OTP webhook payloads (terminal rows only) |
+| `22_sec18_null_fiduciary_block.sql` | Deactivates pre-existing non-ADMIN operators with a NULL `fiduciary_id` (SEC-18) |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`21` manually (each script is idempotent). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`22` manually (each script is idempotent). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \
          db/15_p1_consent_lifecycle_alerts.sql db/16_p2_roles_mfa_retention.sql \
          db/17_defect_fixes.sql db/18_brd_traceability.sql \
          db/19_audit_ledger_integrity.sql db/20_security_gaps.sql \
-         db/21_defect_remediation_p6.sql; do
+         db/21_defect_remediation_p6.sql db/22_sec18_null_fiduciary_block.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```
@@ -183,7 +184,7 @@ Admin and bootstrap routes use operator JWT or `BOOTSTRAP_TOKEN` respectively. S
 1. Copy `.env.example` → `.env` and set unique secrets (`openssl rand -hex 32` for each).
 2. Set `TSI_DPDP_CMS_ENV` to anything **other than** `local` (disables `/docs`, prefers SSL to Postgres).
 3. Set `ALLOWED_ORIGINS` to your real console origins.
-4. Run DB migrations `13`–`21` on existing databases (see [Database upgrades](#database-upgrades)).
+4. Run DB migrations `13`–`22` on existing databases (see [Database upgrades](#database-upgrades)).
 5. Run **two processes**: `uvicorn dpdpcms_py.main:app` and `python -m dpdpcms_py.worker` (or Compose `python_app` + `python_worker`).
 6. Configure SMTP and/or SMS/push gateway URLs if off-channel notification delivery is required.
 7. Do **not** rotate `DB_ENCRYPTION_KEY` after encrypted data exists.

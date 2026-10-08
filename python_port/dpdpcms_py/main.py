@@ -205,10 +205,15 @@ def _is_read_classified(service: str, func: str) -> bool:
 
     The same rule the role gate uses: side-effect-free prefixes, or an explicit
     `:read` entry in FUNC_PERMISSIONS. Everything else (a write, a
-    `validate_*`, an MFA round-trip, logout) must be a POST.
+    `validate_*`, an MFA round-trip, logout) must be a POST. P6-05: client
+    API-key READ scopes are folded in too, so `validate_consent` and `sync`,
+    which the client callers may legitimately poll, are not wrongly refused a
+    GET.
     """
     if func in MFA_EXEMPT_FUNCS:
         return False
+    if CLIENT_FUNC_SCOPES.get(func) == "READ":
+        return True
     if func.startswith(READ_PREFIXES):
         return True
     permission = FUNC_PERMISSIONS.get((service, func))
@@ -221,17 +226,41 @@ def client_ip(request: Request) -> str | None:
     P5-02: when the API sits behind a reverse proxy, every request arrives from
     the proxy and `request.client.host` is the proxy's address — so all
     operators would share one IP throttle bucket. X-Forwarded-For is honoured
-    only when the immediate peer is a configured trusted proxy (TRUSTED_PROXY_IPS);
-    a direct caller can never self-declare its identity.
+    only when the immediate peer is a configured trusted proxy
+    (TRUSTED_PROXY_IPS); a direct caller can never self-declare its identity.
+    P6-04: the chain is walked RIGHT-to-LEFT, dropping trailing trusted hops, so
+    a caller behind the proxy cannot force a spoofed hop at the front of the
+    header to win — the rightmost non-trusted hop is the real client. Matches
+    support exact IPs and CIDR ranges.
     """
+    import ipaddress
+
     if request.client is None:
         return None
     peer = request.client.host
+
+    def trusted(ip: str) -> bool:
+        for entry in settings.trusted_proxy_ips or ():
+            try:
+                if "/" in entry and ipaddress.ip_address(ip) in ipaddress.ip_network(entry, strict=False):
+                    return True
+            except ValueError:
+                continue
+            if entry == ip:
+                return True
+        return False
+
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded and peer in settings.trusted_proxy_ips:
+    if forwarded and trusted(peer):
         chain = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
-        if chain and chain[0] not in settings.trusted_proxy_ips:
-            return chain[0]
+        # Rightmost hop was appended by the nearest proxy. Walk right-to-left,
+        # skipping hops that are themselves trusted proxies, and return the first
+        # untrusted hop — that is the true client that entered the proxy fleet.
+        for hop in reversed(chain):
+            if trusted(hop):
+                continue
+            return hop
+        return peer
     return peer
 
 

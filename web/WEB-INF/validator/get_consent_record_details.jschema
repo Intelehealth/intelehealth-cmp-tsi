@@ -12,11 +12,33 @@
     "policy_id": {
       "type": "string"
     },
+    "user_id": {
+      "type": "string"
+    },
     "fiduciary_id": {
       "type": "string"
     }
   },
   "required": [
     "_func"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "policy_id": {
+            "minLength": 1
+          }
+        },
+        "required": [
+          "policy_id"
+        ]
+      },
+      "then": {
+        "required": [
+          "user_id"
+        ]
+      }
+    }
   ]
 }

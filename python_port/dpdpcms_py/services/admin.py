@@ -479,9 +479,17 @@ class OperatorService(Service):
             # SA-05: a new password ends every existing session of the account.
             fields.append("password_hash = %s, tokens_valid_after = NOW()")
             params.append(hash_password(ctx.payload["password"]))
-        if verified_role(ctx) == "ADMIN":
+        # SEC-18: the WHERE below targets exactly non-ADMIN rows, so a NULL
+        # fiduciary_id on these rows is the account shape that defeats every
+        # tenancy check. The field is updated ONLY when the caller explicitly
+        # supplies it — an ADMIN rename that omits it must not silently null the
+        # operator's tenant — and a NULL value is refused outright.
+        if "fiduciary_id" in ctx.payload:
+            new_fid = ctx.payload.get("fiduciary_id") or None
+            if not new_fid:
+                raise ApiError(400, "Bad Request", "Non-ADMIN operators must belong to a fiduciary_id.")
             fields.append("fiduciary_id = %s")
-            params.append(ctx.payload.get("fiduciary_id") or None)
+            params.append(new_fid)
         scope, scope_params = tenant_filter(ctx)
         params.extend([uid, *scope_params])
         updated = db.execute(f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'{scope}", params)

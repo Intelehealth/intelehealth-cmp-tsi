@@ -25,8 +25,8 @@ class RightsService(Service):
             """
             INSERT INTO nominations
                 (id, fiduciary_id, nominating_principal_id, nominated_principal_id,
-                 relationship, valid_until, status, created_at, last_updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, 'ACTIVE', NOW(), NOW())
+                 relationship, valid_from, valid_until, status, created_at, last_updated_at)
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, COALESCE(%s, NOW()), %s, 'ACTIVE', NOW(), NOW())
             RETURNING id
             """,
             (
@@ -34,6 +34,11 @@ class RightsService(Service):
                 nominator,
                 nominated,
                 ctx.payload.get("relationship"),
+                # P6-07: a caller-supplied valid_from (a future effective date) is
+                # honoured instead of being silently discarded; the clone-safety
+                # behaviour when it is absent is the DEFAULT NOW() that P5-06
+                # restored.
+                ctx.payload.get("valid_from") or None,
                 ctx.payload.get("valid_until") or None,
             ),
         )

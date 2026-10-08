@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
 from datetime import UTC, datetime
@@ -416,10 +417,31 @@ class JobService(Service):
     def download_file(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT output_file_path FROM jobs WHERE id = %s{scope}",
+            f"SELECT output_file_path, subtype FROM jobs WHERE id = %s{scope}",
             (require(ctx.payload.get("job_id"), "job_id"), *scope_params),
         )
-        return db.to_jsonable(row or {})
+        if not row or not row.get("output_file_path"):
+            return {"success": False, "message": "Export file not ready yet."}
+        # P6-03/LG-07: the export is returned as BASE64 inside the authenticated
+        # JSON response, because the console pages are browser navigations that
+        # cannot set an Authorization header. The old behaviour (returning a
+        # server-side path and downloading via ?auth= in the URL) is gone.
+        import base64
+        from pathlib import Path
+
+        path = Path(str(row["output_file_path"]))
+        if not path.exists():
+            return {"success": False, "message": "Export file not found on disk."}
+        data = path.read_bytes()
+        filename = str(row.get("subtype") or path.name).lower() or path.name
+        return {
+            "success": True,
+            "job_id": ctx.payload.get("job_id"),
+            "filename": path.name,
+            "content_type": "text/csv; charset=utf-8",
+            "content_base64": base64.b64encode(data).decode("ascii"),
+            "subtype": filename,
+        }
 
 
 class RopaService(Service):
@@ -697,14 +719,15 @@ class LegalService(Service):
     def verify_certificate(self, ctx: RequestContext) -> dict:
         """SEC-10: verify an evidence certificate's HMAC signature.
 
-        Not a trust assertion about the ledger — that is verify_audit_chain's
-        job — but the missing counterpart to generation: recompute the signature
-        over the canonical JSON (the exact function generate_certificate used)
-        and report whether the certificate is internally authentic and unchanged.
+        The signature is compared in constant time, and the certificate's
+        embedded evidence trail is re-derived against `audit_logs` — so a
+        certificate signed before the ledger was tampered with no longer returns
+        "valid" on signature alone. A chain break, or any embedded trail hash
+        that no longer exists in the ledger, is reported.
         """
         scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT certificate_data FROM evidence_certificates WHERE id = %s{scope}",
+            f"SELECT certificate_data, fiduciary_id FROM evidence_certificates WHERE id = %s{scope}",
             (require(ctx.payload.get("id"), "id"), *scope_params),
         )
         if not row:
@@ -719,8 +742,41 @@ class LegalService(Service):
             return {"valid": False, "reason": "Certificate carries no signature."}
         expected = data.get("signature")
         recomputed = certificate_signature(data)
-        if expected != recomputed:
+        # SEC-10: constant-time comparison; a plain != let a timing side-channel
+        # distinguish how much of the digest matched.
+        if not hmac.compare_digest(str(expected), str(recomputed)):
             return {"valid": False, "reason": "Signature mismatch — the certificate has been altered."}
+
+        # SEC-10: re-derive the embedded trail against the live ledger. Each hash
+        # the certificate claims to crystallise must still exist in audit_logs,
+        # and the fiduciary's chain must still verify.
+        trail = data.get("evidence_trail") or []
+        claimed = [str(entry.get("hash") or "").strip() for entry in trail if isinstance(entry, dict) and entry.get("hash")]
+        missing = []
+        if claimed:
+            missing = [
+                h
+                for h in claimed
+                if not db.one(
+                    "SELECT 1 FROM audit_logs WHERE current_log_hash = %s AND fiduciary_id = %s LIMIT 1",
+                    (h, str(row["fiduciary_id"])),
+                )
+            ]
+        chain = verify_chain(limit=2_000_000, fiduciary_id=str(row["fiduciary_id"]))
+        if not chain["intact"]:
+            return {
+                "valid": False,
+                "reason": "The audit chain this certificate rests on no longer verifies; treat the certificate and its trail as compromised.",
+                "chain_intact": False,
+                "broken_count": chain.get("broken_count", 0),
+            }
+        if missing:
+            return {
+                "valid": False,
+                "reason": "Certificate embeds hashes no longer present in the audit ledger.",
+                "missing_hashes": missing[:10],
+                "chain_intact": True,
+            }
         log_event(
             ctx.actor_email or "DPO",
             ctx.fiduciary_id,
@@ -730,4 +786,10 @@ class LegalService(Service):
             {"certificate_id": str(require(ctx.payload.get("id"), "id"))},
             source_ip=ctx.source_ip,
         )
-        return {"valid": True, "signature_algorithm": data.get("signature_algorithm"), "signature": expected}
+        return {
+            "valid": True,
+            "signature_algorithm": data.get("signature_algorithm"),
+            "signature": expected,
+            "trail_hashes_checked": len(claimed),
+            "chain_intact": chain["intact"],
+        }

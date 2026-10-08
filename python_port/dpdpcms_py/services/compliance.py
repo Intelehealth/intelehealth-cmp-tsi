@@ -59,7 +59,7 @@ def _notify_grievance_stage(user_id: str, fiduciary_id: str, stage: str) -> None
         )
 
 
-def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
+def erase_cms_copy(fiduciary_id: str, user_id: str, action: str = "ERASE") -> dict[str, int]:
     """SA-13: irreversibly de-identify what the CMS itself holds about a principal.
 
     The processor deletes the business data; this removes the CMS's own copy of
@@ -69,6 +69,12 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
     blanked. SEC-15: the covered set is every table/schema column that stores a
     principal identifier (see ERASURE_TARGETS, kept next to the test that
     enumerates them). The audit log already stores only the pseudonym.
+
+    PL-03: the caller passes `action` — the value stored on the purge request
+    (from the retention policy or the closure). ERASE deletes the data_principal
+    profile outright; DE_IDENTIFY re-keys it to the pseudonym instead, so the
+    two BRD dispositions genuinely behave differently in the CMS rather than
+    both boiling down to the same hard delete.
     """
     from ..security import pseudonym
 
@@ -103,6 +109,29 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
         )
         counts["grievances"] = cur.rowcount
 
+        # P6-06: statements that match the ORIGINAL user_id must run before the
+        # generic loop below, exactly like the grievance block above — the loop
+        # re-keys consent_records.user_id and notifications.recipient_id first,
+        # which used to make the metadata scrub and the deliveries join match
+        # nothing, so the session IP / user agent and the delivery recipient
+        # survived erasure.
+        cur.execute(
+            "UPDATE consent_records SET ip_address = '0.0.0.0', user_agent = NULL"
+            " WHERE fiduciary_id = %s AND user_id = %s",
+            (fiduciary_id, user_id),
+        )
+        counts["consent_records.metadata"] = cur.rowcount
+        cur.execute(
+            """
+            UPDATE notification_deliveries nd SET recipient = %s
+            FROM notifications n
+            WHERE nd.notification_id = n.id AND n.fiduciary_id = %s
+              AND n.recipient_type = 'PRINCIPAL' AND n.recipient_id = %s
+            """,
+            (token, fiduciary_id, user_id),
+        )
+        counts["notification_deliveries"] = cur.rowcount
+
         for table, column in ERASURE_TARGETS:
             if table == "grievances":
                 # P5-01: covered by the dedicated block above, which runs before
@@ -110,18 +139,9 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
                 # original user_id. Skipped here so the row is not double-keyed.
                 continue
             if table == "notification_deliveries":
-                # There is no principal key on the row; the recipient (a resolved
-                # address or device id) is reached through its notification.
-                cur.execute(
-                    """
-                    UPDATE notification_deliveries nd SET recipient = %s
-                    FROM notifications n
-                    WHERE nd.notification_id = n.id AND n.fiduciary_id = %s
-                      AND n.recipient_type = 'PRINCIPAL' AND n.recipient_id = %s
-                    """,
-                    (token, fiduciary_id, user_id),
-                )
-                counts[table] = cur.rowcount
+                # P6-06: handled ahead of the loop for the same reason as the
+                # grievances block — the join predicates on the notifications
+                # row's ORIGINAL recipient_id.
                 continue
             if table == "breach_affected_principals":
                 # The table carries no fiduciary_id; its rows hang off
@@ -167,14 +187,6 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
             (token, fiduciary_id, user_id),
         )
         counts["data_principal.guardian_id"] = cur.rowcount
-        # consent_records.ip_address / user_agent fingerprint the principal's
-        # session; ip_address is NOT NULL so it is zeroed, not nulled.
-        cur.execute(
-            "UPDATE consent_records SET ip_address = '0.0.0.0', user_agent = NULL"
-            " WHERE fiduciary_id = %s AND user_id = %s",
-            (fiduciary_id, user_id),
-        )
-        counts["consent_records.metadata"] = cur.rowcount
         # webhook_deliveries.payload carries a raw user_id for consent events;
         # re-key it so the queued event no longer names the principal.
         cur.execute(
@@ -185,8 +197,22 @@ def erase_cms_copy(fiduciary_id: str, user_id: str) -> dict[str, int]:
         )
         counts["webhook_deliveries"] = cur.rowcount
 
-        cur.execute("DELETE FROM data_principal WHERE fiduciary_id = %s AND user_id = %s", (fiduciary_id, user_id))
-        counts["data_principal"] = cur.rowcount
+        # PL-03: the BRD's two dispositions diverge here. ERASE removes the
+        # data_principal profile entirely; DE_IDENTIFY keeps a de-identified
+        # copy (the pseudonym) so the fiduciary still has a record of the data
+        # subject without the identifier.
+        if action == "DE_IDENTIFY":
+            cur.execute(
+                "UPDATE data_principal SET user_id = %s WHERE fiduciary_id = %s AND user_id = %s",
+                (token, fiduciary_id, user_id),
+            )
+            counts["data_principal"] = cur.rowcount
+        else:
+            cur.execute(
+                "DELETE FROM data_principal WHERE fiduciary_id = %s AND user_id = %s",
+                (fiduciary_id, user_id),
+            )
+            counts["data_principal"] = cur.rowcount
         cur.execute(
             "UPDATE purge_requests SET cms_erased_at = NOW() WHERE fiduciary_id = %s AND user_id = %s",
             (fiduciary_id, token),
@@ -322,7 +348,7 @@ class ComplianceService(Service):
     def _set_purge_status(self, ctx: RequestContext, request_id: str, status: str, details, evidence) -> dict:
         scope, scope_params = tenant_filter(ctx)
         current = db.one(
-            f"SELECT id, user_id, fiduciary_id, purpose_id, trigger_event, status, hold_until, app_id, assigned_operator_id FROM purge_requests WHERE id = %s{scope}",
+            f"SELECT id, user_id, fiduciary_id, purpose_id, trigger_event, status, hold_until, app_id, assigned_operator_id, action FROM purge_requests WHERE id = %s{scope}",
             (request_id, *scope_params),
         )
         if not current:
@@ -373,13 +399,16 @@ class ComplianceService(Service):
         erased = None
         # SA-13: once a whole-account erasure is confirmed done (and nothing for
         # this principal is still held by law), the CMS de-identifies its own copy.
+        # PL-03: the disposition comes from the purge request's own `action` —
+        # ERASE deletes the profile, DE_IDENTIFY keeps the pseudonym — so the CMS
+        # no longer treats both as identical.
         if completed and current["trigger_event"] == "ErasureRequest" and current["purpose_id"] == "ALL":
             still_held = db.one(
                 "SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND user_id = %s AND status = 'LEGAL_HOLD_APPLIED' LIMIT 1",
                 (fid, user_id),
             )
             if not still_held:
-                erased = erase_cms_copy(fid, user_id)
+                erased = erase_cms_copy(fid, user_id, action=str(current.get("action") or "ERASE").upper())
         log_event(
             ctx.actor_email or ("INTEGRATOR" if ctx.permissions else "DPO"),
             fid,

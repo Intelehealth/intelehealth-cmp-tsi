@@ -400,7 +400,30 @@
         }
 
         function downloadJobFile(jobId) {
-            window.location.href = `${API_URL_JOBS}?_func=download_file&job_id=${jobId}&auth=${AUTH_TOKEN}`;
+            // P6-03: the ?auth= query parameter was removed (SEC-17) and a browser
+            // navigation cannot set an Authorization header, so the file is fetched
+            // through the authenticated API and given to the browser as a blob.
+            fetch(API_URL_JOBS, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "download_file", "job_id": jobId })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) { alert(data.message || "Export file not ready."); return; }
+                    const bytes = atob(data.content_base64);
+                    const arr = new Uint8Array(bytes.length);
+                    for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+                    const blob = new Blob([arr], { type: data.content_type || 'text/csv' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = data.filename || `export-${jobId}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                })
+                .catch(err => alert("Download failed: " + err));
         }
 
         document.getElementById('export-form').onsubmit = async (e) => {

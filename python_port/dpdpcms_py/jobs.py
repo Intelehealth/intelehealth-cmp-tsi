@@ -109,6 +109,14 @@ def escalate_overdue_grievances() -> dict[str, int]:
             """,
             (str(row["user_id"]), fid),
         )
+        # GR-07: an escalation must reach the fiduciary's DPO too, not only the
+        # complainant — the DPO owns the SLA and can reassign or drive the
+        # overdue grievance to resolution.
+        db.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
+            " VALUES ('DPO', %s, %s, 'GRIEVANCE_ESCALATED')",
+            (_dpo_recipient(fid), fid),
+        )
         log_event(str(row["user_id"]), fid, "APP", None, "GRIEVANCE_ESCALATED", {"grievance_id": gid})
         count += 1
     return {"escalated": count}
@@ -265,6 +273,16 @@ def prune_sso_nonces() -> dict[str, int]:
     return {"pruned": db.execute("DELETE FROM sso_login_nonces WHERE expires_at < NOW()") or 0}
 
 
+# P5-07: Rule 6(1)(e) sets a ONE-YEAR floor on retaining logs and personal
+# data. webhook_deliveries is the channel of record for consent events and OTP
+# dispatch, so terminal rows may never be pruned faster than this floor, whatever
+# WEBHOOK_DELIVERY_RETENTION_DAYS says. audit_logs and notification_deliveries
+# are intentionally NEVER pruned by any sweep (the audit ledger is also
+# append-only by trigger), which satisfies the same floor by construction —
+# that retention choice is stated here as policy, not an accident of the code.
+RULE_6_1_E_MIN_RETENTION_DAYS = 365
+
+
 def prune_old_webhook_deliveries(days: int | None = None) -> dict[str, int]:
     """SEC-13 / P5-07: retention on webhook_deliveries.
 
@@ -273,19 +291,23 @@ def prune_old_webhook_deliveries(days: int | None = None) -> dict[str, int]:
     the queue stop holding plaintext OTP codes (rows are payload->>'otp
     encrypted), so a long retention no longer preserves secrets in the clear.
     P5-07: the delivery table is the channel of record for consent events and
-    OTP dispatch, so the default honours the Rule 6(1)(e) one-year floor
-    (WEBHOOK_DELIVERY_RETENTION_DAYS) rather than a hard-coded 30.
+    OTP dispatch, so the retention honours the Rule 6(1)(e) one-year floor
+    (WEBHOOK_DELIVERY_RETENTION_DAYS) rather than a hard-coded 30 — and the
+    floor is ENFORCED: the knob can never configure a retention shorter than the
+    statute allows.
     """
-    days = days or settings.webhook_delivery_retention_days
+    floor = RULE_6_1_E_MIN_RETENTION_DAYS
+    requested = days or settings.webhook_delivery_retention_days
+    effective = max(int(requested), floor)
     pruned = (
         db.execute(
             "DELETE FROM webhook_deliveries WHERE status IN ('DISPATCHED', 'FAILED', 'SKIPPED')"
             " AND created_at < NOW() - make_interval(days => %s)",
-            (int(days),),
+            (effective,),
         )
         or 0
     )
-    return {"pruned": pruned}
+    return {"pruned": pruned, "retention_days": effective, "floor_enforced": effective == floor}
 
 
 def _dpo_recipient(fiduciary_id: str) -> str:

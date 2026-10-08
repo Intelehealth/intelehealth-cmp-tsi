@@ -532,6 +532,7 @@ class ConsentService(Service):
         # P4-01: the wallet's GET_CONSENT_DETAILS sends policy_id, not record_id.
         # Accept either: record_id reads one record; policy_id reads the
         # principal's active record for that policy.
+        bind_principal_field(ctx, "user_id")
         where: list[str] = []
         params: list[Any] = []
         record_id = ctx.payload.get("record_id")
@@ -540,9 +541,15 @@ class ConsentService(Service):
             where.append("id = %s")
             params.append(record_id)
         elif policy_id:
+            # P6-02: the policy_id branch must name a principal. A principal JWT
+            # has user_id bound to the token subject by bind_principal_field /
+            # authenticate; an integrator key must send an explicit user_id, so a
+            # READ key can no longer read an arbitrary principal's active record
+            # without naming one.
+            where.append("user_id = %s")
             where.append("policy_id = %s")
             where.append("is_active_consent IS TRUE")
-            params.append(policy_id)
+            params.extend([require(ctx.payload.get("user_id"), "user_id"), policy_id])
         else:
             raise ApiError(400, "Bad Request", "'record_id' or 'policy_id' is required.")
         if ctx.fiduciary_id:
@@ -580,6 +587,34 @@ class ConsentService(Service):
                     (str(row["fiduciary_id"]), db.as_jsonb([str(row["policy_id"])])),
                 )
             )
+            # UD-02 (DD-01): the dashboard substitutes purpose-lifecycle state and
+            # the governing retention period for the expiry date the BRD asked
+            # for. Surface both so the principal still sees a temporal fact —
+            # just the accurate one for an open-ended consent.
+            lifecycle = {
+                str(r["purpose_id"]).lower(): r["state"]
+                for r in db.all(
+                    "SELECT purpose_id, state FROM purpose_lifecycle WHERE fiduciary_id = %s",
+                    (str(row["fiduciary_id"]),),
+                )
+            }
+            purposes: list[dict] = []
+            for point in row.get("data_point_consents") or []:
+                if not isinstance(point, dict):
+                    continue
+                pid = str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "").lower()
+                if not pid:
+                    continue
+                purposes.append(
+                    {
+                        "purpose_id": pid,
+                        "name": point.get("purpose_agreed_to") or point.get("name"),
+                        "state": lifecycle.get(pid, "ACTIVE"),
+                        "retention_period_days": point.get("retention_period_days")
+                        or point.get("consent_expiry"),
+                    }
+                )
+            out["purpose_states"] = purposes
         return out
 
     def list_consent_history(self, ctx: RequestContext) -> list[dict]:
@@ -1058,6 +1093,25 @@ class ConsentService(Service):
             record_id = record_ids[0] if record_ids else None
             if erasure:
                 from .retention import legal_hold_for
+
+                # SEC-04: an erasure filed through an integrator key is bound to a
+                # REAL principal. Without this, a WRITE+PURGE key could call
+                # erasure_request with any user_id in the tenant — no active
+                # consent on file — create a purge row stamped with its own
+                # app_id, and then confirm it, reaching erase_cms_copy with no
+                # relationship to the subject at all. Require an actual consent
+                # record before a key may open an erasure on a principal.
+                if ctx.permissions and not ctx.auth_via_principal_jwt:
+                    exists = db.one(
+                        "SELECT 1 FROM consent_records WHERE user_id = %s AND fiduciary_id = %s LIMIT 1",
+                        (user_id, fid),
+                    )
+                    if not exists:
+                        raise ApiError(
+                            403,
+                            "Forbidden",
+                            "This principal has no consent record with this fiduciary; an erasure request must reference a principal the fiduciary actually holds data on.",
+                        )
 
                 targets = purpose_ids or ["ALL"]
                 # SEC-04: an erasure initiated through an integrator key records

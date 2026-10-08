@@ -282,6 +282,10 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
 
     monkeypatch.setattr(worker.delivery, "process_pending_notifications", boom)
     monkeypatch.setattr(worker.webhooks, "process_pending_webhooks", lambda: {"dispatched": 1})
+    # P6: every sweep the worker now runs is stubbed so the test asserts isolation
+    # without touching the database (the sweeps added on p5/p6 — expired keys,
+    # SSO nonces, webhook retention, throttle pruning — used to fall through to
+    # the real implementation and hang on a dead DB connection).
     for name in (
         "close_due_time_bound_purposes",
         "escalate_stale_alerts",
@@ -291,8 +295,12 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
         "flag_overdue_purges",
         "release_expired_legal_holds",
         "prune_revoked_tokens",
+        "expire_lapsed_api_keys",
+        "prune_sso_nonces",
+        "prune_old_webhook_deliveries",
     ):
         monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})
+    monkeypatch.setattr(worker.throttle, "prune_expired", lambda: {"pruned": 0})
     summary = worker.run_cycle()
     assert "smtp exploded" in summary["delivery"]["error"]
     assert summary["webhooks"] == {"dispatched": 1}

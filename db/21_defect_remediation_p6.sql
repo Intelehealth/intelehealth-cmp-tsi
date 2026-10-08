@@ -19,11 +19,15 @@ ALTER TABLE auth_throttles
 -- SEC-13 one-off cleanup: webhook_deliveries rows queued BEFORE
 -- the SEC-13 fix hold the OTP code in the clear (payload ->> 'otp').
 -- The dispatcher now ships only otp_enc, so any row that still carries
--- the plaintext key predates the fix. Delete them now rather than
--- letting the 30-day (now one-year) prune keep the codes around.
+-- the plaintext key predates the fix. P6-09: the DELETE is restricted to
+-- TERMINAL rows (DISPATCHED / FAILED / SKIPPED) so a principal who
+-- requested a code just before this migration ran still receives it —
+-- a still-pending delivery is left in place, never silently discarded
+-- with no SKIPPED/FAILED row and no audit trail.
 -- ============================================================
 DELETE FROM webhook_deliveries
-WHERE payload ? 'otp';
+WHERE payload ? 'otp'
+  AND status IN ('DISPATCHED', 'FAILED', 'SKIPPED');
 
 -- ============================================================
 -- P5-07: webhook_deliveries is the channel of record for consent

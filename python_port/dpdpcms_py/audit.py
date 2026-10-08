@@ -162,20 +162,24 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
     every v2 row's own hash are verified; rows from before v2 are checked for
     linkage only and counted as legacy.
 
-    When `fiduciary_id` is given, only that tenant's rows are checked, so a
-    tenant-scoped DPO can verify its own ledger without learning other tenants'
-    row ids.
+    P6-01: the linkage check ALWAYS runs against the unfiltered chain, because
+    the chain is global — `log_event` picks its predecessor with no fiduciary
+    filter, and ADMIN events are normalised to a NULL fiduciary. Filtering the
+    *query* by `fiduciary_id` previously turned a perfectly intact ledger into a
+    LINK_MISMATCH on every pair. The unfiltered walk fixes that; `fiduciary_id`
+    now only narrows the REPORT, so a tenant-scoped DPO verifies its own ledger
+    (and learns no other tenant's row ids) while the adjacency asserted is the
+    one the chain actually encodes.
     """
     cols = ", ".join(_HASHED_COLUMNS)
-    where = "WHERE fiduciary_id = %s" if fiduciary_id else ""
-    params: list[Any] = [fiduciary_id] if fiduciary_id else []
     rows = db.all(
-        f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs {where} "
+        f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
         "ORDER BY timestamp DESC, id DESC LIMIT %s",
-        (*params, limit),
+        (limit,),
     )
     broken: list[dict] = []
     legacy = 0
+    tenant_checked = 0
     for index, row in enumerate(rows):
         meta = row.get("system_metadata") or {}
         if isinstance(meta, str):
@@ -183,18 +187,27 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
                 meta = json.loads(meta)
             except ValueError:
                 meta = {}
+        # Report only the requested tenant's rows; a scoped DPO never sees a
+        # row id that belongs to another fiduciary.
+        in_scope = fiduciary_id is None or str(row.get("fiduciary_id") or "") == str(fiduciary_id)
         # `row` is older than `rows[index - 1]` (we walk newest first): the
         # newer row's prev_log_hash must equal this row's current_log_hash.
         if index > 0 and (rows[index - 1].get("prev_log_hash") or "") != (row.get("current_log_hash") or ""):
-            broken.append({"id": str(rows[index - 1]["id"]), "reason": "LINK_MISMATCH"})
+            newer = rows[index - 1]
+            newer_scoped = fiduciary_id is None or str(newer.get("fiduciary_id") or "") == str(fiduciary_id)
+            if newer_scoped:
+                broken.append({"id": str(newer["id"]), "reason": "LINK_MISMATCH"})
         if meta.get("hash_v") == HASH_VERSION:
             if row_hash(row.get("prev_log_hash"), row) != row.get("current_log_hash"):
-                broken.append({"id": str(row["id"]), "reason": "CONTENT_MISMATCH"})
-        else:
+                if in_scope:
+                    broken.append({"id": str(row["id"]), "reason": "CONTENT_MISMATCH"})
+            if in_scope:
+                tenant_checked += 1
+        elif in_scope:
             legacy += 1
     return {
         "intact": not broken,
-        "rows_checked": len(rows),
+        "rows_checked": tenant_checked if fiduciary_id else len(rows),
         "legacy_rows_linkage_only": legacy,
         "broken": broken[:100],
         "broken_count": len(broken),

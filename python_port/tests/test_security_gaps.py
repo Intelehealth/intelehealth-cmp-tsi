@@ -7,6 +7,7 @@ throttle module is tested directly against a captured-SQL fake.
 
 import contextlib
 import types
+from pathlib import Path
 
 import jwt as pyjwt
 import pytest
@@ -15,6 +16,7 @@ from dpdpcms_py.context import RequestContext
 from dpdpcms_py.errors import ApiError
 from dpdpcms_py.services import admin, compliance, consent, governance, rights, roles
 
+REPO = Path(__file__).resolve().parents[2]
 FID = "11111111-1111-1111-1111-111111111111"
 APP_ID = "33333333-3333-3333-3333-333333333333"
 
@@ -671,20 +673,65 @@ def test_verify_certificate_detects_signature_tampering(monkeypatch):
 
     def one(sql, params=()):
         assert "FROM evidence_certificates" in sql
-        return {"certificate_data": data}
+        return {"certificate_data": data, "fiduciary_id": FID}
 
     monkeypatch.setattr(governance.db, "one", one)
     monkeypatch.setattr(governance, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        governance,
+        "verify_chain",
+        lambda limit=100_000, fiduciary_id=None: {"intact": True, "broken_count": 0, "broken": []},
+    )
     ctx = _ctx(service="legal", func="verify_certificate", payload={"id": "cert-1"}, fiduciary_id=FID)
     assert governance.LegalService().verify_certificate(ctx)["valid"] is True
 
+    # SEC-10: a tampered payload fails on the constant-time signature compare.
     tampered = {**data, "principal_id": "another-principal"}
+    tampered["signature"] = certificate_signature(data)  # signature over the ORIGINAL payload
     monkeypatch.setattr(
         governance.db,
         "one",
-        lambda sql, params=(): {"certificate_data": tampered},
+        lambda sql, params=(): {"certificate_data": tampered, "fiduciary_id": FID},
+    )
+    monkeypatch.setattr(
+        governance,
+        "verify_chain",
+        lambda limit=100_000, fiduciary_id=None: {"intact": True, "broken_count": 0, "broken": []},
     )
     assert governance.LegalService().verify_certificate(ctx)["valid"] is False
+
+    # SEC-10: a certificate whose embedded hashes no longer exist is INVALID even
+    # though its signature recomputes — the trail is re-derived against the live
+    # ledger, not trusted on the certificate's word.
+    signed_intact = {**data, "evidence_trail": [{"ts": "2026-01-01", "act": "X", "hash": "gone"}]}
+    signed_intact["signature"] = certificate_signature(signed_intact)
+
+    def trail_one(sql, params=()):
+        if "FROM evidence_certificates" in sql:
+            return {"certificate_data": signed_intact, "fiduciary_id": FID}
+        if "FROM audit_logs" in sql:
+            return None  # the embedded hash "gone" no longer exists in the live ledger
+        return None
+
+    monkeypatch.setattr(governance.db, "one", trail_one)
+    monkeypatch.setattr(
+        governance,
+        "verify_chain",
+        lambda limit=100_000, fiduciary_id=None: {"intact": True, "broken_count": 0, "broken": []},
+    )
+    result = governance.LegalService().verify_certificate(ctx)
+    assert result["valid"] is False
+    assert "no longer present" in result["reason"]
+
+    # SEC-10: a signed certificate on a broken chain is refused too.
+    monkeypatch.setattr(
+        governance,
+        "verify_chain",
+        lambda limit=100_000, fiduciary_id=None: {"intact": False, "broken_count": 2, "broken": []},
+    )
+    result = governance.LegalService().verify_certificate(ctx)
+    assert result["valid"] is False
+    assert "no longer verifies" in result["reason"]
 
 
 def test_generate_certificate_requires_subject_principal_id():
@@ -777,12 +824,11 @@ def test_erasure_orders_grievance_statements_before_the_loop(monkeypatch, tmp_pa
     assert any("UPDATE webhook_deliveries" in s for s in cursor.sql)
 
 
-# ── P5-02 the throttle counter resets when a lapsed lock is observed ────────
-def test_throttle_lapsed_lock_starts_a_fresh_window(monkeypatch):
-    from datetime import UTC, datetime, timedelta
-
-    now = datetime.now(UTC)
-    lapsed = now - timedelta(minutes=5)
+# ── P5-02 / P6-04 the throttle counter resets on a lapsed lock and the
+# increment is atomic (server-side), so concurrent failures are not lost ─────
+def _throttle_capture(returned_row):
+    """A cursor that returns `returned_row` from the atomic UPSERT and records
+    the final UPDATE's params (the post-increment lock decision)."""
     captured = {}
 
     class _Cursor:
@@ -790,12 +836,13 @@ def test_throttle_lapsed_lock_starts_a_fresh_window(monkeypatch):
             self.phase = 0
 
         def execute(self, sql, params=()):
-            if self.phase == 1 and "INSERT INTO auth_throttles" in sql:
-                captured["params"] = params
-            self.phase += 1
+            if "INSERT INTO auth_throttles" in sql:
+                self.phase = 1  # atomic counter increment happened server-side
+            elif self.phase == 1 and sql.lstrip().startswith("UPDATE"):
+                captured["params"] = params  # (failures, locked_until, lockout_minutes, now, scope, key)
 
         def fetchone(self):
-            return {"failures": 5, "locked_until": lapsed, "lockout_minutes": 30}
+            return returned_row
 
         def __enter__(self):
             return self
@@ -811,55 +858,45 @@ def test_throttle_lapsed_lock_starts_a_fresh_window(monkeypatch):
     def fake_connection():
         yield _Conn()
 
+    return captured, fake_connection
+
+
+def test_throttle_lapsed_lock_starts_a_fresh_window(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    lapsed = now - timedelta(minutes=5)
+    # POST-increment row: the serialised counter already read 5, with the last
+    # lock lapsed — the 5th/6th attempt starts a fresh window rather than
+    # re-locking a saturated counter forever.
+    captured, fake_connection = _throttle_capture(
+        {"failures": 5, "locked_until": lapsed, "lockout_minutes": 30}
+    )
     monkeypatch.setattr(throttle.db, "connection", fake_connection)
     throttle.record_failure("login:ip", "1.2.3.4")
     # P5-02: after a lapsed lock the counter restarts at 1 (not 6) and no lock
     # is set, so one attempt every 15 minutes can no longer lock the key for
     # ever. The single failure is a fresh window, not a re-lock.
-    assert captured["params"][2] == 1
-    assert captured["params"][3] is None
+    assert captured["params"][0] == 1
+    assert captured["params"][1] is None
 
 
 def test_throttle_lock_escalates_geometrically(monkeypatch):
     from datetime import UTC, datetime
 
     now = datetime.now(UTC)
-    captured = {}
-
-    class _Cursor:
-        def __init__(self):
-            self.phase = 0
-
-        def execute(self, sql, params=()):
-            if self.phase == 1 and "INSERT INTO auth_throttles" in sql:
-                captured["params"] = params
-            self.phase += 1
-
-        def fetchone(self):
-            # Four prior failures, the last lock 30 minutes long and lapsed.
-            return {"failures": 4, "locked_until": None, "lockout_minutes": 30}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    class _Conn:
-        def cursor(self):
-            return _Cursor()
-
-    @contextlib.contextmanager
-    def fake_connection():
-        yield _Conn()
-
+    # POST-increment row: the counter just became 5 (4 prior failures + this
+    # one), no active lock, previous escalation stage 30 minutes.
+    captured, fake_connection = _throttle_capture(
+        {"failures": 5, "locked_until": None, "lockout_minutes": 30}
+    )
     monkeypatch.setattr(throttle.db, "connection", fake_connection)
     throttle.record_failure("login:ip", "1.2.3.4")
     # The 5th failure sets a lock whose duration doubles the previous one
     # (30 -> 60 minutes, capped at MAX_LOCKOUT_MINUTES).
-    assert captured["params"][2] == 5
-    assert captured["params"][4] == 60
-    assert captured["params"][3] > now
+    assert captured["params"][0] == 5
+    assert captured["params"][2] == 60
+    assert captured["params"][1] > now
 
 
 def test_throttle_email_key_normaliases_and_stores_no_address():
@@ -990,7 +1027,11 @@ def test_create_nomination_defaults_valid_from(monkeypatch):
     )
     rights.RightsService().create_nomination(ctx)
     insert = next(s for s in executed if "INSERT INTO nominations" in s)
-    assert "valid_from" not in insert, "valid_from must be omitted so the DEFAULT NOW() applies"
+    # P6-07: valid_from is bound back in with COALESCE(%s, NOW()) so a caller can
+    # set a future effective date. Omitting it still falls back to DEFAULT NOW(),
+    # exactly the P5-06 clone-safety behaviour, now expressed in the SQL.
+    assert "valid_from" in insert
+    assert "COALESCE(%s, NOW())" in insert
     assert "valid_until" in insert
 
 
@@ -1072,3 +1113,367 @@ def test_get_read_dispatch_validates_and_reaches_the_handler(monkeypatch):
     )
     assert response.status_code == 200, response.text
     assert called and called[0][0] == "get_active_consent"
+
+
+# ── P6-01 the chain verifier walks the unfiltered ledger and filters only the
+# report, so a tenant-scoped check on an INTACT ledger reports intact ─────────
+def _make_chain_rows():
+    """A 5-row intact global chain owned A, B, NULL, A, B.
+
+    Rows are built OLDEST-first with real hashes (each row's prev_log_hash is
+    the previous row's current_log_hash) and returned NEWEST-first, exactly as
+    verify_chain reads them.
+    """
+    from dpdpcms_py import audit
+
+    owners = ["A", "B", None, "A", "B"]  # oldest -> newest
+    rows = []
+    prev = ""
+    for i, owner in enumerate(owners):
+        row = {
+            "id": f"r{i}",
+            "fiduciary_id": owner,
+            "timestamp": f"2026-01-0{i + 1}T00:00:00",
+            "user_id": "u",
+            "service_type": "S",
+            "service_id": None,
+            "audit_action": "X",
+            "context_details": "{}",
+            "purpose_id": None,
+            "consent_status": None,
+            "initiator": None,
+            "source_ip": None,
+            "prev_log_hash": prev,
+            "system_metadata": {"hash_v": audit.HASH_VERSION},
+        }
+        row["current_log_hash"] = audit.row_hash(prev, row)
+        prev = row["current_log_hash"]
+        rows.append(row)
+    return list(reversed(rows))  # newest-first, as the query returns
+
+
+def test_p6_01_scoped_verify_reports_intact_on_an_untampered_global_chain(monkeypatch):
+    from dpdpcms_py import audit
+
+    rows = _make_chain_rows()
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: rows)
+    # Scoped to fiduciary A: adjacency is checked against the GLOBAL chain, so an
+    # intact ledger is intact here too (previously every pair was a mismatch).
+    res = audit.verify_chain(limit=100, fiduciary_id="A")
+    assert res["intact"] is True
+    assert res["broken_count"] == 0
+    # The report is filtered: only A's own rows are counted / reported.
+    assert res["rows_checked"] == 2
+
+
+def test_p6_01_scoped_verify_detects_own_content_tampering(monkeypatch):
+    from dpdpcms_py import audit
+
+    rows = _make_chain_rows()
+    edited = [dict(r) for r in rows]
+    # Break the NEWEST row that belongs to A (id r3) in content only.
+    homerow = next(r for r in edited if r.get("id") == "r3")
+    assert str(homerow["fiduciary_id"]) == "A"
+    homerow["context_details"] = "tampered"
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: edited)
+    res = audit.verify_chain(limit=100, fiduciary_id="A")
+    assert res["intact"] is False
+    assert any(b["reason"] == "CONTENT_MISMATCH" for b in res["broken"])
+
+
+def test_p6_01_scoped_verify_hides_another_tenants_break(monkeypatch):
+    from dpdpcms_py import audit
+
+    rows = _make_chain_rows()
+    edited = [dict(r) for r in rows]
+    # Break a row that belongs to B; scoping to A must not leak B's row id.
+    brow = next(r for r in edited if r.get("fiduciary_id") == "B")
+    brow["context_details"] = "tampered"
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: edited)
+    res = audit.verify_chain(limit=100, fiduciary_id="A")
+    assert all(b.get("id") != brow["id"] for b in res["broken"])
+    assert res["broken_count"] == 0
+
+
+# ── P6-02 policy_id branch of get_consent_record_details must name a principal
+def test_p6_02_policy_id_branch_requires_user_id_for_key_callers(monkeypatch):
+    from dpdpcms_py.services import consent as consent_mod
+
+    def fake_one(sql, params=()):
+        if "FROM consent_records" in sql:
+            return {"id": "rec-1", "user_id": "asha", "fiduciary_id": FID, "policy_id": "p1",
+                    "data_point_consents": [], "timestamp": "2026-01-01"}
+        return {}
+    monkeypatch.setattr(consent_mod.db, "one", fake_one)
+    monkeypatch.setattr(consent_mod.db, "all", lambda *a, **k: [])
+    ctx = _ctx(
+        category="client", service="consent", func="get_consent_record_details",
+        payload={"policy_id": "p1"}, fiduciary_id=FID, permissions={"READ"},
+    )
+    with pytest.raises(ApiError) as exc:
+        consent_mod.ConsentService().get_consent_record_details(ctx)
+    assert exc.value.status == 400
+    assert "user_id" in str(exc.value.message)
+
+
+def test_p6_02_policy_id_branch_binds_user_id(monkeypatch):
+    from dpdpcms_py.services import consent as consent_mod
+
+    captured = {}
+
+    def fake_one(sql, params=()):
+        if "FROM consent_records" in sql:
+            captured["params"] = params
+            return {"id": "rec-1", "user_id": "asha", "fiduciary_id": FID, "policy_id": "p1",
+                    "data_point_consents": [], "timestamp": "2026-01-01"}
+        return {}
+    monkeypatch.setattr(consent_mod.db, "one", fake_one)
+    monkeypatch.setattr(consent_mod.db, "all", lambda *a, **k: [])
+    ctx = _ctx(
+        category="client", service="consent", func="get_consent_record_details",
+        payload={"policy_id": "p1", "user_id": "asha"}, fiduciary_id=FID, permissions={"READ"},
+    )
+    out = consent_mod.ConsentService().get_consent_record_details(ctx)
+    assert out["id"] == "rec-1"
+    # The policy_id branch's WHERE clause carries user_id first, policy_id second,
+    # so the query is principal-scoped rather than "anyone's newest record".
+    assert captured["params"][0] == "asha"
+    assert captured["params"][1] == "p1"
+
+
+# ── P6-04 the throttle counter increments server-side (no lost updates) ──────
+def test_p6_04_record_failure_upserts_instead_of_read_modify_write(monkeypatch):
+    from dpdpcms_py import throttle as throttle_mod
+
+    seen = []
+
+    class _Cursor:
+        def execute(self, sql, params=()):
+            seen.append(sql)
+            self.failures, self.locked, self.minutes = 4, None, 15
+
+        def fetchone(self):
+            return {"failures": 4, "locked_until": None, "lockout_minutes": 15}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(throttle_mod.db, "connection", fake_connection)
+    throttle_mod.record_failure("login:ip", "1.2.3.4")
+    # The atomic UPSERT must be present, not a SELECT ... FOR UPDATE + INSERT.
+    assert any(s.lstrip().startswith("INSERT INTO auth_throttles") and "ON CONFLICT" in s for s in seen)
+    assert not any("SELECT failures" in s for s in seen)
+
+
+# ── P6-04 client_ip walks the X-Forwarded-For chain right-to-left ────────────
+def test_p6_04_client_ip_uses_rightmost_untrusted_hop(monkeypatch):
+    from dpdpcms_py import main as main_mod
+    from fastapi.testclient import TestClient
+    import types
+
+    # settings is a frozen dataclass; swap the module's reference for a stub.
+    monkeypatch.setattr(main_mod, "settings", types.SimpleNamespace(trusted_proxy_ips=("10.0.0.1", "10.0.0.0/8")))
+    client = TestClient(main_mod.app)
+    # A spoofed hop at the FRONT of the chain must lose to the hop the proxy
+    # appended at the RIGHT (the real client).
+    req = client.build_request("GET", "/healthz", headers={"X-Forwarded-For": "6.6.6.6, 10.0.0.1"})
+    # simulate the immediate peer being the trusted proxy 10.0.0.1
+    class _Fake:
+        host = "10.0.0.1"
+    req.client = _Fake()
+    out = main_mod.client_ip(req)
+    assert out == "6.6.6.6"
+    # A fully-trusted chain falls back to the socket peer.
+    req2 = client.build_request("GET", "/healthz", headers={"X-Forwarded-For": "10.0.0.2, 10.0.0.1"})
+    req2.client = _Fake()
+    assert main_mod.client_ip(req2) == "10.0.0.1"
+
+
+# ── P6-05 client READ scopes are accepted over GET (validate_consent, sync) ──
+def test_p6_05_client_read_functions_are_get_eligible():
+    from dpdpcms_py import main as main_mod
+
+    assert main_mod._is_read_classified("consent", "validate_consent") is True
+    assert main_mod._is_read_classified("wallet", "sync") is True
+
+
+# ── P6-06 erasure scrubs consent metadata and delivery recipients ahead of the
+# generic re-key loop, so the ORIGINAL user_id still matches ──────────────────
+def test_p6_06_erasure_metadata_statements_run_before_the_loop(monkeypatch, tmp_path):
+    cursor = _ErasureCursor()
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(compliance.db, "connection", fake_connection)
+    monkeypatch.setattr(compliance.db, "one", lambda sql, params=(): None)
+    compliance.erase_cms_copy(FID, "asha")
+    ip_idx = next(i for i, s in enumerate(cursor.sql) if "SET ip_address = '0.0.0.0'" in s)
+    nd_idx = next(i for i, s in enumerate(cursor.sql) if "UPDATE notification_deliveries" in s)
+    consent_idx = next(i for i, s in enumerate(cursor.sql) if "SET user_id" in s and "consent_records" in s)
+    assert ip_idx < consent_idx, "metadata scrub must run before consent_records is re-keyed"
+    assert nd_idx < consent_idx, "deliveries join must run before notifications are re-keyed"
+
+
+# ── P6-07 create_nomination binds COALESCE(valid_from, NOW()) ────────────────
+def test_p6_07_nomination_binds_valid_from(monkeypatch):
+    from dpdpcms_py.services import rights as rights_mod
+
+    executed = []
+
+    def fake_insert(sql, params=()):
+        executed.append(sql)
+        return {"id": "n-2"}
+
+    monkeypatch.setattr(rights_mod.db, "insert_returning", fake_insert)
+    monkeypatch.setattr(rights_mod, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(rights_mod, "resolve_fiduciary", lambda ctx: FID)
+    ctx = _ctx(
+        category="client", service="rights", func="create_nomination",
+        payload={"nominating_principal_id": "a", "nominated_principal_id": "b", "valid_from": "2030-01-01"},
+        fiduciary_id=FID,
+    )
+    rights_mod.RightsService().create_nomination(ctx)
+    insert = next(s for s in executed if "INSERT INTO nominations" in s)
+    assert "COALESCE(%s, NOW())" in insert
+
+
+# ── P6-09 the OTP cleanup migration never touches pending deliveries ─────────
+def test_p6_09_otp_cleanup_skips_pending_rows():
+    sql = (REPO / "db" / "21_defect_remediation_p6.sql").read_text(encoding="utf-8")
+    delete = next(part for part in sql.split("DELETE FROM webhook_deliveries")[1:]).split(";", 1)[0]
+    assert "payload ? 'otp'" in delete
+    assert "status IN" in delete
+    assert "PENDING" not in delete or "NOT IN ('PENDING'" in delete
+
+
+# ── SEC-18 update_user refuses to silently null a tenant ─────────────────────
+def test_p6_sec18_update_user_requires_fiduciary_when_present(monkeypatch):
+    from dpdpcms_py.services import admin as admin_mod
+
+    monkeypatch.setattr(admin_mod, "verified_role", lambda ctx: "ADMIN")
+
+    def fake_execute(sql, params=()):
+        return 1
+
+    executed = []
+    monkeypatch.setattr(admin_mod, "authenticated_user_id", lambda ctx: "a1")
+    monkeypatch.setattr(admin_mod, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(admin_mod, "tenant_filter", lambda ctx, col="fiduciary_id": ("", []))
+    monkeypatch.setattr(admin_mod.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
+    # ADMIN rename that OMITS fiduciary_id must not null the tenant.
+    ctx = _ctx(service="operator", func="update_user", payload={"user_id": "u1", "username": "new"})
+    admin_mod.OperatorService().update_user(ctx)
+    assert not any("fiduciary_id" in s for s in executed), "omit must not touch fiduciary_id"
+    # Explicitly sending an empty/none fiduciary is refused.
+    ctx2 = _ctx(service="operator", func="update_user", payload={"user_id": "u1", "username": "new", "fiduciary_id": ""})
+    with pytest.raises(ApiError) as exc:
+        admin_mod.OperatorService().update_user(ctx2)
+    assert exc.value.status == 400
+
+
+# ── PL-03 ERASE vs DE_IDENTIFY genuinely diverge in the CMS ──────────────────
+def test_pl_03_deidentify_keeps_the_profile(monkeypatch):
+    cursor = _ErasureCursor()
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(compliance.db, "connection", fake_connection)
+    monkeypatch.setattr(compliance.db, "one", lambda sql, params=(): None)
+    compliance.erase_cms_copy(FID, "asha", action="DE_IDENTIFY")
+    assert any("UPDATE data_principal SET user_id" in s for s in cursor.sql)
+    assert not any("DELETE FROM data_principal" in s for s in cursor.sql)
+
+
+def test_pl_03_erase_deletes_the_profile(monkeypatch):
+    cursor = _ErasureCursor()
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(compliance.db, "connection", fake_connection)
+    monkeypatch.setattr(compliance.db, "one", lambda sql, params=(): None)
+    compliance.erase_cms_copy(FID, "asha", action="ERASE")
+    assert any("DELETE FROM data_principal" in s for s in cursor.sql)
+
+
+# ── GR-07 the escalation sweep notifies the DPO, not only the principal ──────
+def test_gr_07_escalation_notifies_dpo(monkeypatch):
+    from dpdpcms_py import jobs
+
+    executed = []
+
+    def fake_all(sql, params=()):
+        if sql.lstrip().startswith("UPDATE grievances"):
+            return [{"id": "g1", "user_id": "u1", "fiduciary_id": FID}]
+        return []
+
+    def fake_execute(sql, params=()):
+        executed.append(sql)
+        return 1
+
+    def fake_one(sql, params=()):
+        if "FROM operators" in sql:
+            return {"id": "dpo-1"}
+        return None
+
+    monkeypatch.setattr(jobs.db, "all", fake_all)
+    monkeypatch.setattr(jobs.db, "execute", fake_execute)
+    monkeypatch.setattr(jobs.db, "one", fake_one)
+    monkeypatch.setattr(jobs, "log_event", lambda *a, **k: None)
+    out = jobs.escalate_overdue_grievances()
+    assert out["escalated"] == 1
+    dpo_notices = [s for s in executed if "VALUES ('DPO'" in s and "GRIEVANCE_ESCALATED" in s]
+    assert len(dpo_notices) == 1
+
+
+# ── SEC-18 migration / P5-07 floor wiring are catalogued in db/22 and jobs ───
+def test_p5_07_retention_floor_is_enforced(monkeypatch):
+    from dpdpcms_py import jobs
+
+    captured = {}
+    monkeypatch.setattr(jobs, "settings", types.SimpleNamespace(webhook_delivery_retention_days=1))
+
+    def fake_execute(sql, params=()):
+        captured["params"] = params
+        return 5
+
+    monkeypatch.setattr(jobs.db, "execute", fake_execute)
+    out = jobs.prune_old_webhook_deliveries()
+    # A knob that asks for 1 day must still honour the one-year floor.
+    assert out["retention_days"] == 365
+    assert captured["params"][0] == 365
+
+
+def test_sec18_migration_blocks_null_fiduciary_accounts():
+    sql = (REPO / "db" / "22_sec18_null_fiduciary_block.sql").read_text(encoding="utf-8")
+    assert "role <> 'ADMIN'" in sql
+    assert "fiduciary_id IS NULL" in sql
+    assert "status = 'INACTIVE'" in sql

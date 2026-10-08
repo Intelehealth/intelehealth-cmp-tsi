@@ -267,6 +267,7 @@
     function renderPurposes(purposes) {
         const container = document.getElementById('policy-content');
         container.innerHTML = '';
+        learnerChoices = {}; // raw purpose id -> checkbox element (P6-08)
 
         purposes.forEach(p => {
             const requiresVPC = p.requires_parental_consent === true;
@@ -279,8 +280,8 @@
                         <p class="font-bold text-slate-800 text-sm">${esc(p.name)}</p>
                         <p class="text-[10px] text-slate-500 mt-1">${esc(p.description)}</p>
                     </div>
-                    <input type="checkbox" id="check-${esc(p.id)}" ${p.is_mandatory_for_service ? 'checked disabled' : 'checked'}
-                        class="w-5 h-5 rounded border-slate-300 text-teal-600 focus:ring-teal-500">
+                    <input type="checkbox" class="purpose-check w-5 h-5 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                        ${p.is_mandatory_for_service ? 'checked disabled' : 'checked'}>
                 </div>
                 <div class="flex gap-2 mt-3">
                     <span class="text-[8px] font-black uppercase bg-white border px-1.5 py-0.5 rounded text-slate-400">Retention: ${esc(p.retention_duration_value)} ${esc(p.retention_duration_unit)}</span>
@@ -288,7 +289,10 @@
                 </div>
             `;
             container.appendChild(div);
-            learnerChoices[p.id] = true;
+            // P6-08: keep the raw id in the map, never in a getElementById string
+            // built from escaped markup — a purpose id containing an entity
+            // character used to make the lookup return null.
+            learnerChoices[p.id] = div.querySelector('.purpose-check');
         });
     }
 
@@ -338,7 +342,8 @@
             // 3. Record Actual Consent (Atomic Link to Verification Log)
             const finalChoices = [];
             currentPolicy.data_processing_purposes.forEach(p => {
-                const checked = document.getElementById(`check-${p.id}`).checked;
+                const checkbox = learnerChoices[p.id];
+                const checked = checkbox ? checkbox.checked : false; // P6-08: read via the map, never an escaped id
                 finalChoices.push({
                     "data_point_id": p.id,
                     "consent_granted": checked,

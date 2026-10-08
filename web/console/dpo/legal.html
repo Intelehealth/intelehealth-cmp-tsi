@@ -189,6 +189,10 @@
 <div id="cert-modal" class="modal-overlay">
     <div class="max-w-4xl w-full p-6 max-h-screen overflow-y-auto">
         <div class="flex justify-end mb-4 gap-3 no-print">
+            <button id="verify-cert-btn" class="bg-emerald-600 text-white px-6 py-2 rounded-lg font-bold text-sm shadow-md flex items-center gap-2 hover:bg-emerald-700">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                Verify Integrity
+            </button>
             <button onclick="window.print()" class="bg-teal-600 text-white px-6 py-2 rounded-lg font-bold text-sm shadow-md flex items-center gap-2 hover:bg-teal-700">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>
                 Print Admissible Document
@@ -325,7 +329,7 @@
     /**
      * Retrieves and renders a specific certificate with its hash-chained trail.
      */
-    async function viewCertificate(id) {
+    async function _viewCertificate(id) {
         try {
             const response = await fetch(API_URL, {
                 method: 'POST',
@@ -416,6 +420,38 @@
     };
 
     function closeModal() { document.getElementById('cert-modal').style.display = 'none'; }
+
+    // SEC-10: the console can now re-verify a certificate's signature AND its
+    // embedded trail against the live audit ledger (constant-time compare and
+    // chain re-derivation live in the API), so the DPO does not have to trust
+    // the printed document.
+    let CURRENT_CERT_ID = null;
+    function viewCertificate(id) { CURRENT_CERT_ID = id; _viewCertificate(id); }
+
+    document.getElementById('verify-cert-btn').addEventListener('click', async () => {
+        if (!CURRENT_CERT_ID) { alert("Open a certificate first."); return; }
+        const btn = document.getElementById('verify-cert-btn');
+        btn.disabled = true;
+        btn.innerHTML = 'Verifying...';
+        try {
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "verify_certificate", "id": CURRENT_CERT_ID })
+            });
+            const res = await response.json();
+            alert(
+                res.valid
+                    ? `Certificate VERIFIED.\nSignature: ${res.signature_algorithm || 'HMAC-SHA256'}\nTrail hashes checked: ${res.trail_hashes_checked ?? 0}\nChain intact: ${res.chain_intact === true ? 'YES' : 'NO'}`
+                    : `Certificate FAILED verification:\n${res.reason || 'invalid'}` + (res.broken_count != null ? `\nChain breaks: ${res.broken_count}` : '')
+            );
+        } catch (err) {
+            alert("Verification request failed: " + err);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>\n                Verify Integrity';
+        }
+    });
     function handleLogout() { localStorage.clear(); window.location.href = "../index.html"; }
 
     window.onload = () => {

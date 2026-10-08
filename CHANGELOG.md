@@ -222,6 +222,88 @@ All notable changes in this branch are documented here for reviewers and operato
   `*.xlsx` is gitignored, and the file was purged from local history.
 - New `db/21_defect_remediation_p6.sql`.
 
+### Fixed (Security workbook v3, remediation round on `p6_defect_fixes`)
+
+Closes every previously-OPEN finding from the security workbook's third
+revision. Where a finding said "PARTLY FIXED" the remaining half is now closed;
+where it said "OPEN" the defect is fixed.
+
+- **P6-01 / LG-04** `verify_chain` no longer scopes the *query* — the chain is
+  global (a row's predecessor is picked with no fiduciary filter), so filtering
+  the rows before checking adjacency reported LINK_MISMATCH on an intact
+  ledger. It now walks the unfiltered chain and filters only the *report*:
+  a tenant-scoped DPO gets back only its own counts and broken-row ids, and an
+  untampered ledger verifies as intact. A break in another tenant's rows is
+  never attributed to — or leaked to — the caller.
+- **P6-02 / UD-02** The `policy_id` branch of `get_consent_record_details` now
+  requires and binds `user_id` (principal JWTs get it from the token; API keys
+  must name a principal). A READ-scoped key can no longer read an arbitrary
+  principal's active consent record without naming them. The response also now
+  carries each purpose's lifecycle state and governing retention, so the
+  dashboard shows the DD-01 substitute for an expiry date.
+- **P6-03 / LG-07** Console export downloads are fixed without bringing back
+  `?auth=` in a URL: `download_file` returns the file's bytes base64-encoded in
+  the authenticated JSON response, and the admin dashboard and DPO reports
+  pages fetch it with the Authorization header and hand the browser a blob.
+- **P6-04** `record_failure` issues the counter increment server-side in one
+  atomic `INSERT ... ON CONFLICT ... RETURNING` (a parallel burst of first
+  failures can no longer all write 1); the lock decision is then applied from
+  the returned row in the same transaction. `client_ip` now walks the
+  X-Forwarded-For chain right-to-left dropping trailing trusted hops — a caller
+  cannot force a spoofed hop at the front of the header to win — and
+  `TRUSTED_PROXY_IPS` matches CIDR ranges as well as literals.
+- **P6-05** `_is_read_classified` now folds in client-category READ scopes, so
+  `validate_consent` and `sync` (both READ for client callers) are no longer
+  refused a GET.
+- **P6-06 / SA-13** The erasure ordering bug is dead for good: in
+  `erase_cms_copy`, the `consent_records` metadata scrub and the
+  `notification_deliveries` join now run BEFORE the generic re-key loop (which
+  matches the grievance block from P5-01), so the session IP / user agent and
+  the delivery recipient really are scrubbed.
+- **P6-07** `create_nomination` binds `COALESCE(%s, NOW())` for `valid_from`,
+  so a caller-supplied future effective date is honoured instead of silently
+  discarded (a missing value still falls back to `DEFAULT NOW()`).
+- **P6-08** `tour/parent-consent.html` keys the checkbox lookups off a JS map
+  rather than building a `getElementById` string from escaped markup, so a
+  purpose id containing an entity character no longer breaks the submission.
+- **P6-09** The one-off OTP cleanup in `db/21` is restricted to terminal
+  `webhook_deliveries` rows — a principal who requested a code just before the
+  migration ran still receives it.
+- **SEC-04** `erasure_request` through an integrator key is bound to a real
+  principal: a key may no longer open a purge for a user the fiduciary holds no
+  consent record on, closing the WRITE+PURGE escalation that reached
+  `erase_cms_copy` for an arbitrary user_id.
+- **SEC-10** `verify_certificate` compares the signature in constant time,
+  re-derives the embedded trail against `audit_logs` (hashes that no longer
+  exist invalidate the certificate), and refuses a certificate resting on a
+  chain that no longer verifies. The DPO console's legal page gains a
+  "Verify Integrity" button.
+- **SEC-18** `update_user` only touches `fiduciary_id` when the caller
+  explicitly supplies a tenant, and refuses NULL for non-ADMIN rows — an ADMIN
+  rename that omits the field no longer silently nulls the operator's tenant.
+  New `db/22_sec18_null_fiduciary_block.sql` deactivates pre-existing
+  non-ADMIN operators with a NULL `fiduciary_id` (the account shape that
+  defeats every tenancy check).
+- **PL-03** The CMS finally reads `purge_requests.action`: ERASE deletes the
+  `data_principal` profile, DE_IDENTIFY re-keys it to the pseudonym, so the two
+  dispositions no longer behave identically.
+- **GR-07** The overdue-grievance sweep notifies the fiduciary's DPO as well as
+  the complainant.
+- **P5-07** `prune_old_webhook_deliveries` enforces the Rule 6(1)(e) one-year
+  floor whatever `WEBHOOK_DELIVERY_RETENTION_DAYS` says, and the never-prune
+  policy for `audit_logs` / `notification_deliveries` is stated as policy
+  (RULE_6_1_E_MIN_RETENTION_DAYS), not a code accident.
+- Tests: `test_security_gaps.py` grows regression coverage for every P6-xx /
+  SEC residual above (scoped chain, policy_id user_id, right-to-left proxy,
+  GET reads, erasure ordering, valid_from, DPO escalation notice, retention
+  floor, migrations); `test_defect_fixes.py` stubs every sweep the worker now
+  runs so the isolation test no longer waits on a dead database connection.
+- Still OUTSTANDING (not code): **P5-05** — the findings workbook blob remains
+  public on the published `p5_changes` branch; deleting or rewriting that
+  branch is an owner action that needs remote push access. `D10/D13` remain
+  bookkeeping only — reconciling the two p3 defect letters requires the original
+  p3 defect list.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
