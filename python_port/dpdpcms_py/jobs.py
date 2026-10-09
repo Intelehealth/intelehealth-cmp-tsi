@@ -277,10 +277,25 @@ def prune_sso_nonces() -> dict[str, int]:
 # data. webhook_deliveries is the channel of record for consent events and OTP
 # dispatch, so terminal rows may never be pruned faster than this floor, whatever
 # WEBHOOK_DELIVERY_RETENTION_DAYS says. audit_logs and notification_deliveries
-# are intentionally NEVER pruned by any sweep (the audit ledger is also
-# append-only by trigger), which satisfies the same floor by construction —
+# are intentionally NEVER pruned by any sweep — audit_logs is append-only by
+# trigger (db/19) and notification_deliveries now has a database-enforced
+# one-year DELETE floor (db/23) — which satisfies the same floor by construction;
 # that retention choice is stated here as policy, not an accident of the code.
 RULE_6_1_E_MIN_RETENTION_DAYS = 365
+
+
+def expire_nominations() -> dict[str, int]:
+    """P6-07: sweep ACTIVE nominations whose valid_until has passed to EXPIRED.
+
+    This makes valid_until actually mean something (a nomination dated 2030 is
+    no longer returned as active today once 2030 arrives), and keeps the stored
+    status in line with the effective status list_nominations already computes.
+    """
+    expired = db.execute(
+        "UPDATE nominations SET status = 'EXPIRED', last_updated_at = NOW()"
+        " WHERE status = 'ACTIVE' AND valid_until IS NOT NULL AND valid_until < NOW()"
+    )
+    return {"expired": expired or 0}
 
 
 def prune_old_webhook_deliveries(days: int | None = None) -> dict[str, int]:

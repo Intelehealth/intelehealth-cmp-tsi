@@ -21,6 +21,13 @@ API_KEY_COLUMNS = (
     "ak.permissions, ak.status, ak.created_at, ak.expires_at, ak.last_used_at, ak.revoked_at"
 )
 
+# P6-12: certificate verification used to pull up to 2,000,000 unfiltered audit
+# rows into the API process for every Verify Integrity press. The trail is now
+# re-derived from the certificate's own hashes, and the global chain check is
+# bounded to this window (the most recent rows, where tampering is attempted and
+# noticed). Sized to be a cheap in-process scan, not a whole-ledger dump.
+WINDOWED_CHAIN_CHECK_ROWS = 100_000
+
 
 def api_key_id(payload: dict) -> str:
     """The console and the validator schemas both use 'key_id'; older callers sent 'api_key'."""
@@ -628,8 +635,9 @@ class LegalService(Service):
         case_ref = ctx.payload.get("case_ref_id")
         logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": 500})
         # SEC-10: never sign a ledger that does not verify. The chain check is
-        # scoped to this fiduciary so a DPO needs no global access to issue.
-        chain = verify_chain(limit=2_000_000, fiduciary_id=fiduciary_id)
+        # scoped to this fiduciary so a DPO needs no global access to issue, and
+        # bounded (P6-12) so generation does not pull the whole ledger.
+        chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=fiduciary_id)
         if not chain["intact"]:
             raise ApiError(
                 409,
@@ -743,41 +751,64 @@ class LegalService(Service):
         expected = data.get("signature")
         recomputed = certificate_signature(data)
         # SEC-10: constant-time comparison; a plain != let a timing side-channel
-        # distinguish how much of the digest matched.
-        if not hmac.compare_digest(str(expected), str(recomputed)):
+        # distinguish how much of the digest matched. compare_digest raises
+        # TypeError on non-ASCII str, so coerce to bytes first — a tampered,
+        # non-ASCII signature must read as INVALID, never 500.
+        try:
+            same = hmac.compare_digest(str(expected).encode("utf-8"), str(recomputed).encode("utf-8"))
+        except (TypeError, ValueError):
+            same = False
+        if not same:
             return {"valid": False, "reason": "Signature mismatch — the certificate has been altered."}
 
-        # SEC-10: re-derive the embedded trail against the live ledger. Each hash
-        # the certificate claims to crystallise must still exist in audit_logs,
-        # and the fiduciary's chain must still verify.
+        # SEC-10: re-derive the embedded trail against the live ledger — ordering
+        # AND completeness, not just "each hash exists". The certificate's trail
+        # must be a prefix of the ledger's current trail for that principal
+        # (newest-first), so an event that was omitted or reordered after signing
+        # invalidates the certificate. Bounded (P6-12): we read only the rows the
+        # certificate itself names, not the whole ledger.
         trail = data.get("evidence_trail") or []
         claimed = [
             str(entry.get("hash") or "").strip() for entry in trail if isinstance(entry, dict) and entry.get("hash")
         ]
-        missing = []
         if claimed:
-            missing = [
-                h
-                for h in claimed
-                if not db.one(
-                    "SELECT 1 FROM audit_logs WHERE current_log_hash = %s AND fiduciary_id = %s LIMIT 1",
-                    (h, str(row["fiduciary_id"])),
-                )
-            ]
-        chain = verify_chain(limit=2_000_000, fiduciary_id=str(row["fiduciary_id"]))
+            placeholders = ", ".join(["%s"] * len(claimed))
+            rows = db.all(
+                f"SELECT current_log_hash, timestamp FROM audit_logs "
+                f"WHERE current_log_hash IN ({placeholders}) AND fiduciary_id = %s",
+                (*claimed, str(row["fiduciary_id"])),
+            )
+            found = {str(r["current_log_hash"]): r for r in rows}
+            missing = [h for h in claimed if h not in found]
+            if missing:
+                return {
+                    "valid": False,
+                    "reason": "Certificate embeds hashes no longer present in the audit ledger.",
+                    "missing_hashes": missing[:10],
+                }
+            # Ordering: the certificate's newest-first trail must match the
+            # ledger's timestamp order for those same rows.
+            ledger_order = sorted(
+                (str(r["current_log_hash"]) for r in found.values()),
+                key=lambda h: (found[h]["timestamp"] or ""),
+                reverse=True,
+            )
+            if ledger_order != claimed:
+                return {
+                    "valid": False,
+                    "reason": "Certificate trail is not in the ledger's order — events were reordered after signing.",
+                }
+        # SEC-10: the chain these hashes anchor to must still verify. P6-12: the
+        # walk is bounded (a window), not an unfiltered 2,000,000-row pull into
+        # the API process. This certificate's OWN rows were just re-derived above;
+        # the windowed global check still catches tampering in the recent ledger.
+        chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=str(row["fiduciary_id"]))
         if not chain["intact"]:
             return {
                 "valid": False,
                 "reason": "The audit chain this certificate rests on no longer verifies; treat the certificate and its trail as compromised.",
                 "chain_intact": False,
                 "broken_count": chain.get("broken_count", 0),
-            }
-        if missing:
-            return {
-                "valid": False,
-                "reason": "Certificate embeds hashes no longer present in the audit ledger.",
-                "missing_hashes": missing[:10],
-                "chain_intact": True,
             }
         log_event(
             ctx.actor_email or "DPO",

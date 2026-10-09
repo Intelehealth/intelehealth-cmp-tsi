@@ -33,6 +33,7 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "expired_api_keys": jobs.expire_lapsed_api_keys,
         "throttles": throttle.prune_expired,
         "sso_nonces": jobs.prune_sso_nonces,
+        "nominations": jobs.expire_nominations,
         "webhook_deliveries": jobs.prune_old_webhook_deliveries,
     }
     # Each sweep is isolated: one failing sweep is logged and reported, and the
@@ -62,6 +63,7 @@ def list_sweeps() -> list[str]:
         "jobs.expire_lapsed_api_keys              (SEC-07 expiry enforcement)",
         "throttle.prune_expired                   (SEC-01/03 throttle table)",
         "jobs.prune_sso_nonces                    (SEC-14 one-time SSO nonces)",
+        "jobs.expire_nominations                  (P6-07 nomination window expiry)",
         "jobs.prune_old_webhook_deliveries          (SEC-13/P5-07 webhook retention)",
     ]
 

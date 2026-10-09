@@ -627,14 +627,25 @@
         const dpc = rec.data_point_consents || {};
         let purposeHtml = '';
         const entries = Array.isArray(dpc) ? dpc : Object.values(dpc);
+        // UD-02 / DD-01: each purpose row also shows its lifecycle state and the
+        // governing retention period, the substitute for the BRD's expiry date
+        // under the open-ended-consent decision.
+        const statesById = {};
+        (rec.purpose_states || []).forEach(s => { statesById[String(s.purpose_id || '').toLowerCase()] = s; });
         entries.forEach(item => {
             // Use the actual per-purpose consent_granted value from the record.
             // Do NOT blanket-override to false — partial withdrawals have a mix of true/false.
             const granted = item.consent_granted === true;
             let label = granted ? '✓ GRANTED' : (isErasure ? '✕ ERASED' : isWithdrawal ? '✕ WITHDRAWN' : '✕ DENIED');
             let color = granted ? '#15803d' : '#b91c1c';
+            const pid = String(item.data_point_id || item.id || item.purpose_id || '').toLowerCase();
+            const state = statesById[pid];
+            const stateHtml = state && state.state && state.state !== 'ACTIVE'
+                ? `<span style="font-size:0.65rem;font-weight:800;color:#b45309;border:1px solid #f59e0b;border-radius:4px;padding:2px 6px;margin-left:6px;text-transform:uppercase;">${esc(state.state)}</span>` : '';
+            const retentionHtml = state && state.retention_period_days
+                ? `<span style="font-size:0.62rem;color:#64748b;margin-left:6px;white-space:nowrap;">retention ${esc(state.retention_period_days)}</span>` : '';
             purposeHtml += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0;margin-bottom:8px;">
-                <span style="font-weight:700;font-size:0.8rem;color:#1e293b;">${esc(item.purpose_agreed_to || item.data_point_id)}</span>
+                <span style="font-weight:700;font-size:0.8rem;color:#1e293b;">${esc(item.purpose_agreed_to || item.data_point_id)}${stateHtml}${retentionHtml}</span>
                 <span style="font-weight:800;font-size:0.75rem;color:${color};">${label}</span>
             </div>`;
         });

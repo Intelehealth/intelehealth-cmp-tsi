@@ -177,6 +177,7 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
     broken: list[dict] = []
     legacy = 0
     tenant_checked = 0
+    in_scope_total = 0
     for index, row in enumerate(rows):
         meta = row.get("system_metadata") or {}
         if isinstance(meta, str):
@@ -187,6 +188,8 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
         # Report only the requested tenant's rows; a scoped DPO never sees a
         # row id that belongs to another fiduciary.
         in_scope = fiduciary_id is None or str(row.get("fiduciary_id") or "") == str(fiduciary_id)
+        if in_scope:
+            in_scope_total += 1
         # `row` is older than `rows[index - 1]` (we walk newest first): the
         # newer row's prev_log_hash must equal this row's current_log_hash.
         if index > 0 and (rows[index - 1].get("prev_log_hash") or "") != (row.get("current_log_hash") or ""):
@@ -204,7 +207,11 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
             legacy += 1
     return {
         "intact": not broken,
-        "rows_checked": tenant_checked if fiduciary_id else len(rows),
+        # P6-13: rows_checked now means the same thing at every scope — the
+        # in-scope rows examined — and the breakdown is reported separately, so
+        # a tenant DPO's figure is comparable with the ADMIN-scope figure.
+        "rows_checked": in_scope_total,
+        "rows_verified": tenant_checked,
         "legacy_rows_linkage_only": legacy,
         "broken": broken[:100],
         "broken_count": len(broken),

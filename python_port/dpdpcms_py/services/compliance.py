@@ -263,6 +263,69 @@ def _remove_unreferenced_files(paths: set[str]) -> None:
             log.warning("Could not delete erased attachment file %s", path)
 
 
+def deidentify_purpose_cms_copy(fiduciary_id: str, purpose_id: str, action: str = "ERASE") -> dict[str, int]:
+    """PL-03: when a PURPOSE closes (not a whole account), the CMS de-identifies
+    the consent records held only under it.
+
+    The whole-account path (erase_cms_copy) re-keys the principal. A purpose
+    closure must not re-key the principal — it must remove that purpose's
+    footprint from the CMS's own copy: the `data_point_consents` entries naming
+    the purpose are blanked (DE_IDENTIFY) or dropped (ERASE) from every consent
+    record of the fiduciary that carries them. This is what makes PL-03 real:
+    closing a purpose genuinely erases or de-identifies data held only under it,
+    rather than merely raising a processor-facing purge request.
+    """
+    from ..security import pseudonym
+
+    marker = f"erased:{pseudonym(f'{fiduciary_id}:{purpose_id}')}"
+    with db.connection() as conn, conn.cursor() as cur:
+        # DE_IDENTIFY: keep the entry so the consent's history is intact, but
+        # blank the fields that name the purpose or the principal's choices.
+        # ERASE: drop the entry entirely.
+        if action == "DE_IDENTIFY":
+            cur.execute(
+                """
+                UPDATE consent_records
+                SET data_point_consents = (
+                    SELECT jsonb_agg(
+                        CASE
+                          WHEN lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) = %s
+                          THEN jsonb_build_object(
+                                 'data_point_id', %s,
+                                 'consent_granted', false,
+                                 'status', 'de_identified',
+                                 'purpose_agreed_to', '[erased]',
+                                 'name', '[erased]'
+                               )
+                          ELSE p
+                        END
+                    )
+                    FROM jsonb_array_elements(data_point_consents) AS p
+                )
+                WHERE fiduciary_id = %s
+                  AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
+                              WHERE lower(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id')) = %s)
+                """,
+                (purpose_id.lower(), marker, fiduciary_id, purpose_id.lower()),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE consent_records
+                SET data_point_consents = (
+                    SELECT COALESCE(jsonb_agg(p), '[]'::jsonb)
+                    FROM jsonb_array_elements(data_point_consents) AS p
+                    WHERE lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) <> %s
+                )
+                WHERE fiduciary_id = %s
+                  AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
+                              WHERE lower(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id')) = %s)
+                """,
+                (purpose_id.lower(), fiduciary_id, purpose_id.lower()),
+            )
+        return {"consent_records_touched": cur.rowcount}
+
+
 class ComplianceService(Service):
     def list_purge_requests(self, ctx: RequestContext) -> list[dict]:
         page, limit = page_limit(ctx.payload, 50)
@@ -368,6 +431,18 @@ class ComplianceService(Service):
             if request_app:
                 if not ctx.app_id or request_app != ctx.app_id:
                     raise ApiError(403, "Forbidden", "This API key is not assigned to the purge request.")
+                # SEC-04: the whole-account erasure escalation. A WRITE+PURGE key
+                # used to open an erasure on any principal in its tenant, stamp it
+                # with its own app_id, then confirm it itself — a single
+                # credential reaching irreversible erase_cms_copy. An erasure the
+                # key itself opened must be confirmed by a DIFFERENT party: only
+                # an operator may complete it.
+                if current["trigger_event"] == "ErasureRequest" and current["purpose_id"] == "ALL":
+                    raise ApiError(
+                        403,
+                        "Forbidden",
+                        "A whole-account erasure opened by an API key must be confirmed by an operator, not the key that requested it.",
+                    )
             elif current.get("assigned_operator_id"):
                 raise ApiError(
                     403,
@@ -411,6 +486,13 @@ class ComplianceService(Service):
             )
             if not still_held:
                 erased = erase_cms_copy(fid, user_id, action=str(current.get("action") or "ERASE").upper())
+        elif completed and current["purpose_id"] and current["purpose_id"] != "ALL":
+            # PL-03: a PURPOSE-scoped purge (purpose closure / retention sweep)
+            # completing must de-identify the CMS's own copy held under that
+            # purpose — not re-key the principal, just that purpose's footprint.
+            erased = deidentify_purpose_cms_copy(
+                fid, current["purpose_id"], action=str(current.get("action") or "ERASE").upper()
+            )
         log_event(
             ctx.actor_email or ("INTEGRATOR" if ctx.permissions else "DPO"),
             fid,
@@ -496,6 +578,27 @@ class GrievanceService(Service):
             ),
         )
         gid = str(row["id"])
+        # GR-07: route by complaint CATEGORY to the fiduciary's DPO — the
+        # department the BRD's "appropriate department or DPO" is satisfied by.
+        # Every type is a DPDP data-rights grievance, so the DPO office is the
+        # target for all of them; if the fiduciary has an ACTIVE DPO, the
+        # complaint is assigned and marked IN_PROGRESS immediately, and the DPO
+        # is notified. This gives category-based routing without a waiting-for-
+        # assignment step. (A fiduciary without a DPO stays NEW in the unassigned
+        # queue.)
+        dpo = db.one(
+            "SELECT id FROM operators WHERE fiduciary_id = %s AND role = 'DPO' AND status = 'ACTIVE'"
+            " ORDER BY created_at LIMIT 1",
+            (fid,),
+        )
+        if dpo:
+            entry = self._log_entry(ctx, "ASSIGNED", None, route=f"{grievance_type} -> DPO")
+            db.execute(
+                "UPDATE grievances SET assigned_dpo_user_id = %s, status = 'IN_PROGRESS', last_updated_at = NOW(),"
+                " communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb WHERE id = %s",
+                (str(dpo["id"]), db.as_jsonb([entry]), gid),
+            )
+            _notify_grievance_stage(user_id, fid, "ASSIGNED")
         db.execute(
             "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED')",
             (user_id, fid),

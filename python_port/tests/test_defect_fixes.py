@@ -297,6 +297,7 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
         "prune_revoked_tokens",
         "expire_lapsed_api_keys",
         "prune_sso_nonces",
+        "expire_nominations",
         "prune_old_webhook_deliveries",
     ):
         monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})

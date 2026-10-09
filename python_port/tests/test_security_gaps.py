@@ -183,10 +183,11 @@ def test_login_success_writes_last_login_at(monkeypatch):
 
 # ── SEC-04 purge confirmation is bound to the authenticated key ─────────────
 class _PurgeDb:
-    def __init__(self, app_id=None, status="PENDING", assigned_operator_id=None):
+    def __init__(self, app_id=None, status="PENDING", assigned_operator_id=None, purpose_id="ALL"):
         self.app_id = app_id
         self.status = status
         self.assigned_operator_id = assigned_operator_id
+        self.purpose_id = purpose_id
 
     def one(self, sql, params=()):
         if "FROM purge_requests" in sql and "app_id" in sql:
@@ -194,7 +195,7 @@ class _PurgeDb:
                 "id": "pr-1",
                 "user_id": "u",
                 "fiduciary_id": FID,
-                "purpose_id": "ALL",
+                "purpose_id": self.purpose_id,
                 "trigger_event": "ErasureRequest",
                 "status": self.status,
                 "hold_until": None,
@@ -228,12 +229,16 @@ def test_confirm_purge_rejects_key_not_assigned_to_request(monkeypatch):
     assert exc.value.status == 403
 
 
-def test_confirm_purge_assigned_app_passes(monkeypatch):
+def test_confirm_purge_assigned_app_passes_for_purpose_purge(monkeypatch):
+    # SEC-04 (v6): whole-account erasures opened by a key need an operator; a
+    # PURPOSE-scoped purge remains confirmable by the assigned app.
     capture = _PurgeDb(app_id=APP_ID)
+    capture.purpose_id = "care"
     executed = []
     monkeypatch.setattr(compliance.db, "one", capture.one)
     monkeypatch.setattr(compliance.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
     monkeypatch.setattr(compliance, "erase_cms_copy", lambda *a, **k: {})
+    monkeypatch.setattr(compliance, "deidentify_purpose_cms_copy", lambda *a, **k: {})
     monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
     ctx = _confirm_ctx(app_id=APP_ID, permissions={"PURGE"})
     out = compliance.ComplianceService().confirm_purge_status(ctx)
@@ -241,8 +246,23 @@ def test_confirm_purge_assigned_app_passes(monkeypatch):
     assert any("completion_evidence" in s for s in executed)
 
 
-def test_confirm_purge_api_key_identity_used_not_payload(monkeypatch):
+def test_confirm_whole_account_erasure_needs_operator_not_the_same_key(monkeypatch):
+    # SEC-04: the WRITE+PURGE escalation is closed — a key cannot confirm the
+    # whole-account erasure it opened itself; an operator must.
     capture = _PurgeDb(app_id=APP_ID)
+    monkeypatch.setattr(compliance.db, "one", capture.one)
+    ctx = _confirm_ctx(app_id=APP_ID, permissions={"PURGE"})
+    with pytest.raises(ApiError) as exc:
+        compliance.ComplianceService().confirm_purge_status(ctx)
+    assert exc.value.status == 403
+    assert "operator" in str(exc.value.message).lower()
+
+
+def test_confirm_purge_api_key_identity_used_not_payload(monkeypatch):
+    # Purpose-scoped purge: the app key is still allowed, and the confirming
+    # identity is the credential, never the body's claimed entity.
+    capture = _PurgeDb(app_id=APP_ID)
+    capture.purpose_id = "care"
     evidence = {}
 
     def execute(sql, params=()):
@@ -253,6 +273,7 @@ def test_confirm_purge_api_key_identity_used_not_payload(monkeypatch):
     monkeypatch.setattr(compliance.db, "one", capture.one)
     monkeypatch.setattr(compliance.db, "execute", execute)
     monkeypatch.setattr(compliance, "erase_cms_copy", lambda *a, **k: {})
+    monkeypatch.setattr(compliance, "deidentify_purpose_cms_copy", lambda *a, **k: {})
     monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
     ctx = _confirm_ctx(app_id=APP_ID, permissions={"PURGE"})
     compliance.ComplianceService().confirm_purge_status(ctx)
@@ -726,11 +747,12 @@ def test_verify_certificate_detects_signature_tampering(monkeypatch):
     def trail_one(sql, params=()):
         if "FROM evidence_certificates" in sql:
             return {"certificate_data": signed_intact, "fiduciary_id": FID}
-        if "FROM audit_logs" in sql:
-            return None  # the embedded hash "gone" no longer exists in the live ledger
         return None
 
+    # P6-12/SEC-10: the trail is re-derived through db.all against the live
+    # ledger. Returning no rows for the claimed hash marks it missing.
     monkeypatch.setattr(governance.db, "one", trail_one)
+    monkeypatch.setattr(governance.db, "all", lambda sql, params=(): [])
     monkeypatch.setattr(
         governance,
         "verify_chain",
@@ -740,7 +762,22 @@ def test_verify_certificate_detects_signature_tampering(monkeypatch):
     assert result["valid"] is False
     assert "no longer present" in result["reason"]
 
-    # SEC-10: a signed certificate on a broken chain is refused too.
+    # SEC-10: a signed certificate on a broken chain is refused too — but only
+    # once its trail still exists; a missing hash is reported first.
+    chain_break_data = {**data, "evidence_trail": [{"ts": "2026-01-01", "act": "X", "hash": "h1"}]}
+    chain_break_data["signature"] = certificate_signature(chain_break_data)
+
+    def chain_one(sql, params=()):
+        if "FROM evidence_certificates" in sql:
+            return {"certificate_data": chain_break_data, "fiduciary_id": FID}
+        return None
+
+    monkeypatch.setattr(governance.db, "one", chain_one)
+    monkeypatch.setattr(
+        governance.db,
+        "all",
+        lambda sql, params=(): [{"current_log_hash": "h1", "timestamp": "2026-01-01T00:00:00+00:00"}],
+    )
     monkeypatch.setattr(
         governance,
         "verify_chain",
@@ -749,6 +786,41 @@ def test_verify_certificate_detects_signature_tampering(monkeypatch):
     result = governance.LegalService().verify_certificate(ctx)
     assert result["valid"] is False
     assert "no longer verifies" in result["reason"]
+
+
+# ── v6 workbook — CF-03: download path and tour page now have regression tests
+def test_p6_03_download_file_returns_base64_bytes(monkeypatch):
+    """download_file serves the export bytes base64 in the authenticated JSON."""
+    import base64
+    from pathlib import Path
+
+    from dpdpcms_py.services import governance as gov_mod
+
+    tmp = Path(".") / "exports"
+    tmp.mkdir(parents=True, exist_ok=True)
+    job = {"output_file_path": str(tmp / "job_1_consent.csv"), "subtype": "CONSENT"}
+    (tmp / "job_1_consent.csv").write_text("id,user_id\na,b\n", encoding="utf-8")
+    try:
+        monkeypatch.setattr(gov_mod.db, "one", lambda sql, params=(): job)
+        ctx = _ctx(service="job", func="download_file", payload={"job_id": "1"}, fiduciary_id=FID)
+        out = gov_mod.JobService().download_file(ctx)
+        assert out["success"] is True
+        decoded = base64.b64decode(out["content_base64"]).decode("utf-8")
+        assert "id,user_id" in decoded
+        assert out["filename"] == "job_1_consent.csv"
+        assert out["content_type"] == "text/csv; charset=utf-8"
+    finally:
+        (tmp / "job_1_consent.csv").unlink(missing_ok=True)
+
+
+def test_p6_08_tour_page_keys_lookup_off_a_map_not_escaped_id():
+    """parent-consent.html must not build getElementById ids from escaped markup."""
+    from dpdpcms_py.config import WEB_ROOT
+
+    page = (WEB_ROOT / "tour" / "parent-consent.html").read_text(encoding="utf-8")
+    assert "id=\"check-${esc(" not in page
+    assert "learnerChoices[p.id]" in page
+    assert "document.getElementById(`check-" not in page
 
 
 def test_generate_certificate_requires_subject_principal_id():
@@ -1340,8 +1412,12 @@ def test_p6_04_client_ip_uses_rightmost_untrusted_hop(monkeypatch):
 def test_p6_05_client_read_functions_are_get_eligible():
     from dpdpcms_py import main as main_mod
 
-    assert main_mod._is_read_classified("consent", "validate_consent") is True
+    # P6-05: sync (a genuine no-op read) is GET-eligible for client callers.
     assert main_mod._is_read_classified("wallet", "sync") is True
+    # P6-10: validate_consent is stamped READ for scope-gating but WRITES (it
+    # inserts a validation row and notifies the principal), so it is NOT
+    # GET-eligible — folding it in re-opened SEC-17.
+    assert main_mod._is_read_classified("consent", "validate_consent") is False
 
 
 # ── P6-06 erasure scrubs consent metadata and delivery recipients ahead of the
@@ -1517,3 +1593,170 @@ def test_sec18_migration_blocks_null_fiduciary_accounts():
     assert "role <> 'ADMIN'" in sql
     assert "fiduciary_id IS NULL" in sql
     assert "status = 'INACTIVE'" in sql
+
+
+# ── v6 workbook — SEC-18 runtime refuses a NULL-tenant non-ADMIN at the door ──
+def test_sec18_authenticate_refuses_non_admin_without_fiduciary(monkeypatch):
+    from dpdpcms_py import main as main_mod
+    from fastapi.testclient import TestClient
+
+    # An ACTIVE DPO operator whose fiduciary_id is NULL must be refused by
+    # authenticate, not silently treated as a global account.
+    def fake_one(sql, params=()):
+        if "FROM operators" in sql:
+            return {"id": "op-1", "role": "DPO", "fiduciary_id": None, "mfa_enabled": False,
+                    "valid_after": None, "revoked": False}
+        return None
+
+    monkeypatch.setattr(main_mod.db, "one", fake_one)
+    monkeypatch.setattr(
+        main_mod,
+        "decode_token",
+        lambda raw: {"typ": "operator", "email": "dpo@x.y", "jti": "j1", "iat": 1, "mfa": True},
+    )
+    monkeypatch.setattr(main_mod, "bearer_token", lambda headers: "tok")
+    response = TestClient(main_mod.app).post(
+        "/api/v1/operator",
+        json={"_func": "list_users"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert response.status_code == 403, response.text
+    assert "fiduciary" in response.text.lower()
+
+
+# ── v6 workbook — P6-10 validate_consent writes, so it is NOT GET-eligible ───
+def test_p6_10_validate_consent_is_not_get_eligible():
+    from dpdpcms_py import main as main_mod
+
+    assert main_mod._is_read_classified("consent", "validate_consent") is False
+    assert main_mod._is_read_classified("wallet", "sync") is True  # a genuine no-op read
+    # A real client WRITE is unchanged (never GET).
+    assert main_mod._is_read_classified("consent", "record_consent") is False
+
+
+# ── v6 workbook — P6-11 CI runs on every branch, not a per-branch allow-list ──
+def test_p6_11_ci_triggers_all_branches():
+    wf = (REPO / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+    assert "branches: ['**']" in wf or "branches: [\"**\"]" in wf
+    assert "p6_changes" not in wf, "per-branch allow-list silently disables CI"
+
+
+# ── v6 workbook — P6-12 certificate path is windowed, not a 2M-row pull ──────
+def test_p6_12_certificate_window_is_bounded():
+    from dpdpcms_py.services import governance
+
+    assert governance.WINDOWED_CHAIN_CHECK_ROWS < 2_000_000
+    assert "2_000_000" not in (REPO / "python_port" / "dpdpcms_py" / "services" / "governance.py").read_text(
+        encoding="utf-8"
+    ), "the 2M-row pull from certificate verification is gone"
+
+
+# ── v6 workbook — P6-13 rows_checked is consistently the in-scope total ──────
+def test_p6_13_rows_checked_means_in_scope_total(monkeypatch):
+    from dpdpcms_py import audit
+
+    rows = _make_chain_rows()
+    # Rows owned A, B, NULL, A, B (newest-first) — scoped to A should report
+    # total=2, verified=2, legacy=0.
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: rows)
+    res = audit.verify_chain(limit=100, fiduciary_id="A")
+    assert res["rows_checked"] == 2
+    assert res["rows_verified"] == 2
+    assert res["legacy_rows_linkage_only"] == 0
+    assert res["intact"] is True
+
+
+# ── v6 workbook — P5-07 notification_deliveries floor is database-enforced ───
+def test_p5_07_notification_delivery_floor_trigger():
+    sql = (REPO / "db" / "23_notification_delivery_floor.sql").read_text(encoding="utf-8")
+    assert "BEFORE DELETE ON notification_deliveries" in sql
+    assert "365 days" in sql
+
+
+# ── v6 workbook — P6-07 nominations honour valid_from/valid_until ────────────
+def test_p6_07_list_nominations_reports_effective_status(monkeypatch):
+    from dpdpcms_py.services import rights as rights_mod
+
+    rows = [
+        {"id": "n1", "fiduciary_id": FID, "nominating_principal_id": "a", "nominated_principal_id": "b",
+         "status": "ACTIVE", "valid_from": None, "valid_until": None},
+        {"id": "n2", "fiduciary_id": FID, "nominating_principal_id": "a", "nominated_principal_id": "b",
+         "status": "ACTIVE", "valid_from": "2030-01-01T00:00:00+00:00", "valid_until": None},
+        {"id": "n3", "fiduciary_id": FID, "nominating_principal_id": "a", "nominated_principal_id": "b",
+         "status": "ACTIVE", "valid_from": None, "valid_until": "2020-01-01T00:00:00+00:00"},
+    ]
+    monkeypatch.setattr(rights_mod.db, "all", lambda sql, params=(): rows)
+    monkeypatch.setattr(rights_mod, "resolve_fiduciary", lambda ctx: FID)
+    ctx = _ctx(category="client", service="rights", func="list_nominations", payload={}, fiduciary_id=FID)
+    out = rights_mod.RightsService().list_nominations(ctx)
+    by_id = {r["id"]: r["status"] for r in out}
+    assert by_id["n1"] == "ACTIVE"
+    assert by_id["n2"] == "PENDING"   # dated in the future is not active today
+    assert by_id["n3"] == "EXPIRED"   # window lapsed
+
+
+def test_p6_07_expire_nominations_sweep(monkeypatch):
+    from dpdpcms_py import jobs
+
+    captured = []
+    monkeypatch.setattr(jobs.db, "execute", lambda sql, params=(): captured.append(sql) or 1)
+    out = jobs.expire_nominations()
+    assert out["expired"] == 1
+    assert any("valid_until < NOW()" in s for s in captured)
+
+
+# ── v6 workbook — GR-07 category routing auto-assigns to the fiduciary DPO ───
+def test_gr_07_submit_grievance_routes_to_dpo(monkeypatch):
+    from dpdpcms_py.services import compliance as compliance_mod
+
+    dpo_row = {"id": "dpo-1"}
+    executed = []
+
+    def fake_one(sql, params=()):
+        if "FROM operators" in sql and "role = 'DPO'" in sql:
+            return dpo_row
+        if "SELECT COUNT(*) FROM consent_records" in sql:
+            return None
+        return None
+
+    monkeypatch.setattr(compliance_mod, "resolve_fiduciary", lambda ctx: FID)
+    monkeypatch.setattr(compliance_mod.db, "one", fake_one)
+    monkeypatch.setattr(compliance_mod.db, "insert_returning",
+                        lambda sql, params=(): {"id": "g1", "reference_number": "GRV-2026-ABC123"})
+    monkeypatch.setattr(compliance_mod.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
+    monkeypatch.setattr(compliance_mod, "log_event", lambda *a, **k: None)
+    ctx = _ctx(
+        category="client", service="grievance", func="submit_grievance",
+        payload={"user_id": "asha", "type": "DATA_ACCESS_REQUEST", "subject": "S", "description": "D"},
+        fiduciary_id=FID,
+    )
+    out = compliance_mod.GrievanceService().submit_grievance(ctx)
+    assert out["success"] is True
+    # The complaint is routed to the DPO and marked IN_PROGRESS immediately.
+    assert any("assigned_dpo_user_id = %s" in s for s in executed)
+    assert any("'IN_PROGRESS'" in s for s in executed)
+
+
+# ── v6 workbook — PL-03 purpose-scoped purge de-identifies the CMS copy ──────
+def test_pl_03_purpose_purge_completion_calls_deidentify(monkeypatch):
+    captured = {}
+
+    def fake_one(sql, params=()):
+        if "FROM purge_requests" in sql and "app_id" in sql:
+            return {
+                "id": "pr-1", "user_id": "u", "fiduciary_id": FID, "purpose_id": "care",
+                "trigger_event": "RetentionPolicyExpiry", "status": "PENDING", "hold_until": None,
+                "app_id": None, "assigned_operator_id": None, "action": "ERASE",
+            }
+        if "LEGAL_HOLD_APPLIED" in sql:
+            return None
+        return None
+
+    monkeypatch.setattr(compliance.db, "one", fake_one)
+    monkeypatch.setattr(compliance.db, "execute", lambda sql, params=(): 1)
+    monkeypatch.setattr(compliance, "deidentify_purpose_cms_copy",
+                        lambda *a, **k: captured.setdefault("called", True) or {})
+    monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
+    ctx = _confirm_ctx()
+    compliance.ComplianceService()._set_purge_status(ctx, "pr-1", "PURGE_COMPLETED", "done", None)
+    assert captured.get("called") is True

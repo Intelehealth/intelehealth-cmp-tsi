@@ -113,6 +113,13 @@ CLIENT_FUNC_SCOPES = {
     "get_grievance_attachment": "READ",
     "confirm_purge_status": "PURGE",
 }
+# P6-10: functions CLIENT_FUNC_SCOPES marks READ that are GENUINELY side-effect
+# free and therefore safe to call over GET. `validate_consent` is deliberately
+# NOT listed: it is stamped READ for scope-gating but writes a
+# consent_validations row and notifies the principal on denial, so folding it
+# in would re-open SEC-17 (a write over GET with personal data in the query
+# string).
+CLIENT_GET_SAFE_FUNCS = {"sync"}
 
 
 _docs = "/docs" if settings.environment == "local" else None
@@ -205,14 +212,18 @@ def _is_read_classified(service: str, func: str) -> bool:
 
     The same rule the role gate uses: side-effect-free prefixes, or an explicit
     `:read` entry in FUNC_PERMISSIONS. Everything else (a write, a
-    `validate_*`, an MFA round-trip, logout) must be a POST. P6-05: client
-    API-key READ scopes are folded in too, so `validate_consent` and `sync`,
-    which the client callers may legitimately poll, are not wrongly refused a
-    GET.
+    `validate_*`, an MFA round-trip, logout) must be a POST. P6-05: the client
+    API-key READ scopes are folded in too, so a genuine client read (`sync`,
+    which is a no-op) is not wrongly refused a GET. P6-10: `validate_consent`
+    is stamped READ in CLIENT_FUNC_SCOPES but WRITES (it inserts a
+    consent_validations row and, on denial, notifies the principal and queues a
+    webhook) — folding it in re-opened part of SEC-17, so it stays POST-only.
+    Folding in a client READ scope therefore requires the function to be
+    genuinely side-effect-free.
     """
     if func in MFA_EXEMPT_FUNCS:
         return False
-    if CLIENT_FUNC_SCOPES.get(func) == "READ":
+    if CLIENT_FUNC_SCOPES.get(func) == "READ" and func in CLIENT_GET_SAFE_FUNCS:
         return True
     if func.startswith(READ_PREFIXES):
         return True
@@ -332,6 +343,12 @@ def authenticate(ctx: RequestContext) -> None:
             )
         ctx.auth_token = {**token, "role": operator["role"]}
         ctx.operator_id = str(operator["id"])
+        # SEC-18: a non-ADMIN operator with a NULL fiduciary_id defeats every
+        # tenancy check, so the shape is refused at the door — a data migration
+        # (db/22) is not a runtime control and this must not fail OPEN the moment
+        # the shape recurs by restore, direct SQL, or re-activating an account.
+        if str(operator["role"]).upper() != "ADMIN" and not operator.get("fiduciary_id"):
+            raise ApiError(403, "Forbidden", "This operator is not bound to a fiduciary and cannot be authenticated.")
         # A fiduciary-scoped operator (DPO, OPERATOR, AUDITOR...) is bound to its
         # own tenant exactly like an API key: never trust a body-supplied
         # fiduciary_id. Only a global ADMIN selects a tenant via the payload.

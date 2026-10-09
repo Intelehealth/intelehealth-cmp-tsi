@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
 from .base import Service, bind_principal_field, principal_list_filter, require, tenant_filter
 from .catalog import resolve_fiduciary
+
+
+def _parse_ts(value) -> datetime | None:
+    """Normalise a (possibly naive/ISO) timestamp to an aware datetime, or None."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 class RightsService(Service):
@@ -26,7 +41,7 @@ class RightsService(Service):
             INSERT INTO nominations
                 (id, fiduciary_id, nominating_principal_id, nominated_principal_id,
                  relationship, valid_from, valid_until, status, created_at, last_updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, COALESCE(%s, NOW()), %s, 'ACTIVE', NOW(), NOW())
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, COALESCE(%s, NOW()), %s, %s, NOW(), NOW())
             RETURNING id
             """,
             (
@@ -40,6 +55,11 @@ class RightsService(Service):
                 # restored.
                 ctx.payload.get("valid_from") or None,
                 ctx.payload.get("valid_until") or None,
+                # P6-07: a nomination whose valid_from is still in the future is
+                # stored PENDING, never ACTIVE.
+                "PENDING"
+                if _parse_ts(ctx.payload.get("valid_from")) and _parse_ts(ctx.payload.get("valid_from")) > datetime.now(UTC)
+                else "ACTIVE",
             ),
         )
         nid = str(row["id"])
@@ -61,13 +81,40 @@ class RightsService(Service):
         if nominator:
             where.append("nominating_principal_id = %s")
             params.append(nominator)
-        if ctx.payload.get("status"):
-            where.append("status = %s")
-            params.append(ctx.payload["status"].upper())
+        # P6-07: the EFFECTIVE status derives from the dates, not the stored
+        # literal. A nomination dated 2030 is PENDING (not active) until
+        # valid_from; one whose valid_until has passed is EXPIRED. Filtering by
+        # status applies to the effective status so callers can list "active
+        # today" without guessing.
+        status_filter = ctx.payload.get("status")
+        if status_filter:
+            status_filter = str(status_filter).upper()
+            where.append(
+                """CASE
+                     WHEN valid_from IS NOT NULL AND valid_from > NOW() THEN 'PENDING'
+                     WHEN valid_until IS NOT NULL AND valid_until < NOW() THEN 'EXPIRED'
+                     ELSE status END = %s"""
+            )
+            params.append(status_filter)
         params.append(int(ctx.payload.get("limit") or 50))
-        return db.to_jsonable(
-            db.all(f"SELECT * FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params)
-        )
+        rows = db.all(f"SELECT * FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params)
+        # P6-07: compute the effective status in Python so the contract is explicit
+        # and testable — never trust a stored literal a future date makes stale.
+        now = datetime.now(UTC)
+        out = []
+        for row in rows:
+            item = db.to_jsonable(row)
+            from_ = item.get("valid_from")
+            until = item.get("valid_until")
+            effective = item.get("status")
+            if until and _parse_ts(until) < now:
+                effective = "EXPIRED"
+            elif from_ and _parse_ts(from_) > now:
+                effective = "PENDING"
+            item["status"] = effective
+            item["effective_status"] = effective
+            out.append(item)
+        return out
 
     def revoke_nomination(self, ctx: RequestContext) -> dict:
         nid = require(ctx.payload.get("nomination_id"), "nomination_id")

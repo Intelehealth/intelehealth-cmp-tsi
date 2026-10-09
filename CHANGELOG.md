@@ -304,6 +304,60 @@ where it said "OPEN" the defect is fixed.
   bookkeeping only — reconciling the two p3 defect letters requires the original
   p3 defect list.
 
+### Fixed (Security workbook v6, p7 remediation round)
+
+Independent re-review against `951bad4` found four NEW defects and, correctly,
+that several v4-era "FIXED" labels were premature. All are now closed:
+
+- **P6-10** Reverts part of the P6-05 GET widening: client READ scopes fold into
+  `_is_read_classified` only via a curated `CLIENT_GET_SAFE_FUNCS` set. 
+  `validate_consent` — stamped READ but WRITES (inserts a validation row,
+  notifies the principal) — is explicitly excluded, so SEC-17's GET boundary is
+  restored. Regression test pins both directions.
+- **P6-11** CI triggers are no longer a per-branch allow-list: the workflow runs
+  on `push` to every branch and on every `pull_request`. The
+  "CI silently disabled because a branch name changed" class is gone.
+- **P6-12** Certificate verification/generation no longer pull up to 2,000,000
+  unfiltered rows into the API process: the trail is re-derived from the
+  certificate's own hashes and the global chain check is bounded
+  (`WINDOWED_CHAIN_CHECK_ROWS = 100_000`).
+- **P6-13** `verify_chain` reports in-scope total / verified / legacy separately
+  (`rows_checked` / `rows_verified` / `legacy_rows_linkage_only`), so a tenant
+  DPO's figure is comparable with the ADMIN-scope figure.
+- **SEC-04** finally closed. The whole-account erasure escalation is dead: a
+  purge row a key opened (app_id + `ErasureRequest` purpose ALL) can only be
+  confirmed by an operator, never the same (or any) API key. Purpose-scoped
+  purges stay processor-confirmable. Regression test covers the block.
+- **SEC-10** Signature comparison is constant-time and byte-coerced (a tampered
+  non-ASCII signature reads INVALID, never 500); the embedded trail is
+  re-derived against the live ledger including ORDER and completeness, not just
+  existence. Three regression tests.
+- **SEC-18** Runtime fails closed: `authenticate` refuses a non-ADMIN operator
+  with a NULL `fiduciary_id` at the door (403), so the shape is blocked the
+  moment it recurs — db/22 remains as the cleanup of pre-existing rows.
+- **P5-07** The one-year floor is database-enforced on `notification_deliveries`
+  too: db/23 adds a BEFORE DELETE trigger (mirrors audit_logs in db/19), so a
+  direct DELETE can no longer bypass the policy.
+- **P6-07** Nomination dates now have effect: `create_nomination` stores PENDING
+  when `valid_from` is in the future; `list_nominations` computes an effective
+  status and filters on it; a new `expire_nominations` worker sweep flips
+  ACTIVE → EXPIRED past `valid_until`.
+- **PL-03** Purpose-scoped purges de-identify the CMS copy:
+  `deidentify_purpose_cms_copy` blanks (DE_IDENTIFY) or drops (ERASE) the
+  purpose from consent_records when a purpose-closure/retention purge completes.
+- **GR-07** Category routing: `submit_grievance` auto-assigns to the fiduciary's
+  ACTIVE DPO and marks IN_PROGRESS, notifying the DPO.
+- **UD-02** The rights dashboard now renders each purpose's lifecycle state and
+  retention period (the DD-01 expiry substitute) from `purpose_states`.
+- **CF-03** Regression coverage added for every p6/p7 finding (download path,
+  tour page, SEC-04 block, SEC-18 refusal, effective nomination status, CI
+  triggers, bounded cert verification, scope reporting); suite is 252 tests.
+- New `db/23_notification_delivery_floor.sql`. README upgrade list extended to
+  `db/13..23`.
+- **Still open (not code):** **P5-05** — workbook blob still public on
+  `origin/p5_changes`; **D10/D13** — reconciled as far as evidence allows (D13 =
+  README loop / CF-04, Fixed), D10 awaits the p3 list.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
