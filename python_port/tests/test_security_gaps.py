@@ -6,6 +6,7 @@ throttle module is tested directly against a captured-SQL fake.
 """
 
 import contextlib
+import re
 import types
 from pathlib import Path
 
@@ -1643,8 +1644,18 @@ def test_p6_10_validate_consent_is_not_get_eligible():
 # ── v6 workbook — P6-11 CI runs on every branch, not a per-branch allow-list ──
 def test_p6_11_ci_triggers_all_branches():
     wf = (REPO / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-    assert "branches: ['**']" in wf or 'branches: ["**"]' in wf
-    assert "p6_changes" not in wf, "per-branch allow-list silently disables CI"
+    # P6-11: the push trigger must never be a per-branch allow-list. That is
+    # satisfied either by branches: ['**'] or by omitting the branches key
+    # entirely (push on every branch). Naming a single branch silently disables
+    # CI on every other branch.
+    push_block = wf.split("push:")[1].split("pull_request:")[0] if "push:" in wf else ""
+    if "branches:" in push_block:
+        assert "branches: ['**']" in push_block or 'branches: ["**"]' in push_block, (
+            "push trigger must not name specific branches"
+        )
+    # No specific branch name may appear anywhere in the trigger block.
+    for name in ("main", "p7_changes", "p6_changes", "p5_changes"):
+        assert re.search(rf"branches: \[.*'{name}'.*\]", wf) is None, f"per-branch allow-list names {name}"
 
 
 # ── v6 workbook — P6-12 certificate path is windowed, not a 2M-row pull ──────
