@@ -1278,9 +1278,10 @@ def test_p6_04_record_failure_upserts_instead_of_read_modify_write(monkeypatch):
 
 # ── P6-04 client_ip walks the X-Forwarded-For chain right-to-left ────────────
 def test_p6_04_client_ip_uses_rightmost_untrusted_hop(monkeypatch):
+    import types
+
     from dpdpcms_py import main as main_mod
     from fastapi.testclient import TestClient
-    import types
 
     # settings is a frozen dataclass; swap the module's reference for a stub.
     monkeypatch.setattr(main_mod, "settings", types.SimpleNamespace(trusted_proxy_ips=("10.0.0.1", "10.0.0.0/8")))
