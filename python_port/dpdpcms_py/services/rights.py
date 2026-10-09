@@ -92,6 +92,7 @@ class RightsService(Service):
             status_filter = str(status_filter).upper()
             where.append(
                 """CASE
+                     WHEN status IN ('REVOKED', 'EXPIRED') THEN status
                      WHEN valid_from IS NOT NULL AND valid_from > NOW() THEN 'PENDING'
                      WHEN valid_until IS NOT NULL AND valid_until < NOW() THEN 'EXPIRED'
                      ELSE status END = %s"""
@@ -101,20 +102,25 @@ class RightsService(Service):
         rows = db.all(
             f"SELECT * FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params
         )
-        # P6-07: compute the effective status in Python so the contract is explicit
-        # and testable — never trust a stored literal a future date makes stale.
+        # P6-07/P7-03: derive an EFFECTIVE status from the dates, but never
+        # override a terminal state and never overwrite the stored value.
+        # REVOKED and EXPIRED are facts; PENDING/ACTIVE are window judgments a
+        # future date makes stale. `status` stays as stored; `effective_status`
+        # carries the derived value, so a revoked nomination can never read
+        # "PENDING, will become active".
         now = datetime.now(UTC)
         out = []
         for row in rows:
             item = db.to_jsonable(row)
-            from_ = item.get("valid_from")
-            until = item.get("valid_until")
-            effective = item.get("status")
-            if until and _parse_ts(until) < now:
-                effective = "EXPIRED"
-            elif from_ and _parse_ts(from_) > now:
-                effective = "PENDING"
-            item["status"] = effective
+            stored = item.get("status")
+            effective = stored
+            if stored not in {"REVOKED", "EXPIRED"}:
+                from_ = item.get("valid_from")
+                until = item.get("valid_until")
+                if until and _parse_ts(until) < now:
+                    effective = "EXPIRED"
+                elif from_ and _parse_ts(from_) > now:
+                    effective = "PENDING"
             item["effective_status"] = effective
             out.append(item)
         return out

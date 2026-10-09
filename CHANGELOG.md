@@ -358,6 +358,46 @@ that several v4-era "FIXED" labels were premature. All are now closed:
   `origin/p5_changes`; **D10/D13** — reconciled as far as evidence allows (D13 =
   README loop / CF-04, Fixed), D10 awaits the p3 list.
 
+### Fixed (Security workbook v5, p8 remediation round)
+
+Independent re-review against `85f515f` found six new defects (P7-01..P7-06).
+All are closed, and the root cause the workbook names — the suite stubs the
+database — is being addressed with a real-Postgres CI path.
+
+- **P7-01 (CRITICAL)** `deidentify_purpose_cms_copy` now takes `user_id` and
+  both UPDATEs scope by it, so a purpose-scoped purge completion de-identifies
+  only the principal whose purge completed — never every consent record in the
+  tenant. The legal-hold guard now applies to this branch too. The old test
+  that monkeypatched this exact function away (and asserted no arguments) is
+  replaced by one that pins the call-site `user_id` and one that inspects the
+  emitted SQL for `user_id = %s`.
+- **P7-02** The chain verifier no longer reports "intact" when a scoped DPO's
+  rows fell outside the window: `verify_chain` returns `unexamined_tenant`, and
+  `verify_certificate` / `generate_certificate` refuse (invalid / 409) rather
+  than certify an unexamined chain.
+- **P7-03** Nomination status derivation short-circuits terminal statuses
+  (REVOKED, EXPIRED) in both the SQL filter and the Python loop; `status` stays
+  as stored and the derived value lives in `effective_status` — a revoked
+  nomination can never read "PENDING".
+- **P7-04** db/23 gains BEFORE TRUNCATE triggers and the same floor trigger on
+  `webhook_deliveries`; `UPGRADE_MIGRATIONS`, `migrate.sh`, `preflight.sh` and
+  `deploy.sh` now cover db/21..db/23 (deploy.sh "01-23").
+- **P7-05** Grievance routing to a DPO now emits a DPO notification (the
+  assigned DPO is told, not just the principal) and no longer forces
+  IN_PROGRESS in the same call, so the console's NEW state stays observable.
+- **P7-06** `get_consent_record_details` now reads the retention day count from
+  the governing retention policy / ROPA (never an ISO `consent_expiry`
+  mislabelled as a period) and reports the lifecycle state verbatim
+  (OPEN/CLOSED); the rights dashboard renders the badge against CLOSED and
+  labels the span "retention N days".
+- **Root cause: real Postgres in CI.** The test job now provisions a Postgres
+  service, applies `db/*.sql`, and runs the suite against it. New
+  `tests/test_integration_db.py` exercises the P7-01 scoping, P6-06 erasure
+  ordering and the chain verifier against the live ledger; they skip when no DB
+  is reachable so the local unit suite stays fast. This is the fix the workbook
+  named as the reason each branch closes findings and opens new ones.
+- Tests: 260 passed, 4 skipped (3 DB-backed + 1 pre-existing); ruff clean.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.

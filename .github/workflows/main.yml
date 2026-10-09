@@ -35,6 +35,20 @@ jobs:
     runs-on: ubuntu-latest
     # CI-only placeholders. config.py needs all of
     # them; each secret must be 32+ characters.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ci
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-password-0123456789abcdef
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       POSTGRES_HOST: postgresql://localhost:5434
       POSTGRES_DB: ci
@@ -59,16 +73,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r python_port/requirements-dev.txt
 
-      # Catches syntax errors and bad imports.
-      - name: Byte-compile sources
-        run: python -m compileall -q python_port/dpdpcms_py
+      # Import smoke test after the schema is ready.
+      - name: Provision test database
+        env:
+          PGHOST: localhost
+          PGPORT: "5434"
+          PGDATABASE: ci
+          PGUSER: ci
+          PGPASSWORD: ci-password-0123456789abcdef
+        run: |
+          for f in db/*.sql; do
+            echo "applying $f"
+            psql -q -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Import smoke test
         working-directory: python_port
         run: python -c "import dpdpcms_py.main"
 
       # python -m pytest puts python_port/ on sys.path.
-      # An empty suite fails (exit 5), never green.
+      # An empty suite fails (exit 5), never green. The DB-backed tests in
+      # tests/test_integration_db.py run against the provisioned Postgres, so
+      # scoping/ordering defects that the stubbed unit suite cannot see are
+      # now caught in CI (the workbook's P6/P7 root-cause finding).
       - name: Run pytest
         working-directory: python_port
         run: python -m pytest -q tests

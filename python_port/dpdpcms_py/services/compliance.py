@@ -263,17 +263,19 @@ def _remove_unreferenced_files(paths: set[str]) -> None:
             log.warning("Could not delete erased attachment file %s", path)
 
 
-def deidentify_purpose_cms_copy(fiduciary_id: str, purpose_id: str, action: str = "ERASE") -> dict[str, int]:
+def deidentify_purpose_cms_copy(fiduciary_id: str, user_id: str, purpose_id: str, action: str = "ERASE") -> dict[str, int]:
     """PL-03: when a PURPOSE closes (not a whole account), the CMS de-identifies
-    the consent records held only under it.
+    the consent records held only under it FOR THAT PRINCIPAL.
 
     The whole-account path (erase_cms_copy) re-keys the principal. A purpose
     closure must not re-key the principal — it must remove that purpose's
     footprint from the CMS's own copy: the `data_point_consents` entries naming
-    the purpose are blanked (DE_IDENTIFY) or dropped (ERASE) from every consent
-    record of the fiduciary that carries them. This is what makes PL-03 real:
-    closing a purpose genuinely erases or de-identifies data held only under it,
-    rather than merely raising a processor-facing purge request.
+    the purpose are blanked (DE_IDENTIFY) or dropped (ERASE) from the consent
+    records of the ONE principal whose purge completed. P7-01: the update MUST
+    be scoped by user_id as well as fiduciary_id — scoping by the tenant alone
+    made a single processor callback rewrite every consent record in the
+    fiduciary that names the purpose, for principals who never had a purge
+    raised and whose requests may sit under legal hold.
     """
     from ..security import pseudonym
 
@@ -302,11 +304,11 @@ def deidentify_purpose_cms_copy(fiduciary_id: str, purpose_id: str, action: str 
                     )
                     FROM jsonb_array_elements(data_point_consents) AS p
                 )
-                WHERE fiduciary_id = %s
+                WHERE fiduciary_id = %s AND user_id = %s
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
                               WHERE lower(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id')) = %s)
                 """,
-                (purpose_id.lower(), marker, fiduciary_id, purpose_id.lower()),
+                (purpose_id.lower(), marker, fiduciary_id, user_id, purpose_id.lower()),
             )
         else:
             cur.execute(
@@ -317,11 +319,11 @@ def deidentify_purpose_cms_copy(fiduciary_id: str, purpose_id: str, action: str 
                     FROM jsonb_array_elements(data_point_consents) AS p
                     WHERE lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) <> %s
                 )
-                WHERE fiduciary_id = %s
+                WHERE fiduciary_id = %s AND user_id = %s
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
                               WHERE lower(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id')) = %s)
                 """,
-                (purpose_id.lower(), fiduciary_id, purpose_id.lower()),
+                (purpose_id.lower(), fiduciary_id, user_id, purpose_id.lower()),
             )
         return {"consent_records_touched": cur.rowcount}
 
@@ -489,10 +491,28 @@ class ComplianceService(Service):
         elif completed and current["purpose_id"] and current["purpose_id"] != "ALL":
             # PL-03: a PURPOSE-scoped purge (purpose closure / retention sweep)
             # completing must de-identify the CMS's own copy held under that
-            # purpose — not re-key the principal, just that purpose's footprint.
-            erased = deidentify_purpose_cms_copy(
-                fid, current["purpose_id"], action=str(current.get("action") or "ERASE").upper()
-            )
+            # purpose for THIS principal — not re-key the principal, just that
+            # purpose's footprint. P7-01: user_id is scoped (a one-tenant-wide
+            # rewrite would destroy every consent record in the fiduciary), and
+            # the legal-hold guard applies here too.
+            if current["user_id"] and current["user_id"] != "ALL":
+                still_held_purpose = db.one(
+                    "SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND user_id = %s AND status = 'LEGAL_HOLD_APPLIED' LIMIT 1",
+                    (fid, str(current["user_id"])),
+                )
+                if not still_held_purpose:
+                    erased = deidentify_purpose_cms_copy(
+                        fid,
+                        str(current["user_id"]),
+                        current["purpose_id"],
+                        action=str(current.get("action") or "ERASE").upper(),
+                    )
+                else:
+                    raise ApiError(
+                        409,
+                        "Conflict",
+                        "This principal's data is under a legal hold; the purpose cannot be de-identified yet.",
+                    )
         log_event(
             ctx.actor_email or ("INTEGRATOR" if ctx.permissions else "DPO"),
             fid,
@@ -593,12 +613,24 @@ class GrievanceService(Service):
         )
         if dpo:
             entry = self._log_entry(ctx, "ASSIGNED", None, route=f"{grievance_type} -> DPO")
+            # P7-05: keep the grievance observable in NEW — do not flip to
+            # IN_PROGRESS in the same call, or the console's NEW filter and badge
+            # become permanently empty. The DPO is notified below, so the
+            # assignment still surfaces.
             db.execute(
-                "UPDATE grievances SET assigned_dpo_user_id = %s, status = 'IN_PROGRESS', last_updated_at = NOW(),"
+                "UPDATE grievances SET assigned_dpo_user_id = %s, last_updated_at = NOW(),"
                 " communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb WHERE id = %s",
                 (str(dpo["id"]), db.as_jsonb([entry]), gid),
             )
             _notify_grievance_stage(user_id, fid, "ASSIGNED")
+            # P7-05: the ASSIGNED stage notice above goes to the PRINCIPAL. The
+            # person who must act — the DPO — gets a separate DPO notification,
+            # otherwise routing is silent to the only party it is for.
+            db.execute(
+                "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
+                " VALUES ('DPO', %s, %s, 'GRIEVANCE_ASSIGNED')",
+                (str(dpo["id"]), fid),
+            )
         db.execute(
             "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED')",
             (user_id, fid),

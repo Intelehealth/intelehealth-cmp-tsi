@@ -1727,10 +1727,47 @@ def test_p6_07_list_nominations_reports_effective_status(monkeypatch):
     monkeypatch.setattr(rights_mod, "resolve_fiduciary", lambda ctx: FID)
     ctx = _ctx(category="client", service="rights", func="list_nominations", payload={}, fiduciary_id=FID)
     out = rights_mod.RightsService().list_nominations(ctx)
-    by_id = {r["id"]: r["status"] for r in out}
-    assert by_id["n1"] == "ACTIVE"
-    assert by_id["n2"] == "PENDING"  # dated in the future is not active today
-    assert by_id["n3"] == "EXPIRED"  # window lapsed
+    # P7-03: the stored status is preserved; the derived value lives in
+    # effective_status.
+    by_id = {r["id"]: r for r in out}
+    assert by_id["n1"]["status"] == "ACTIVE"
+    assert by_id["n1"]["effective_status"] == "ACTIVE"
+    assert by_id["n2"]["status"] == "ACTIVE"  # stored, not overwritten
+    assert by_id["n2"]["effective_status"] == "PENDING"  # dated in the future is not active today
+    assert by_id["n3"]["status"] == "ACTIVE"  # stored, not overwritten
+    assert by_id["n3"]["effective_status"] == "EXPIRED"  # window lapsed
+
+
+def test_p7_03_revoked_nomination_stays_revoked(monkeypatch):
+    """P7-03: a REVOKED nomination with a future valid_from must remain REVOKED
+    (and be filterable as such) — the date derivation must not flip it back to
+    PENDING."""
+    from dpdpcms_py.services import rights as rights_mod
+
+    rows = [
+        {
+            "id": "n1",
+            "fiduciary_id": FID,
+            "nominating_principal_id": "a",
+            "nominated_principal_id": "b",
+            "status": "REVOKED",
+            "valid_from": "2030-01-01T00:00:00+00:00",
+            "valid_until": None,
+        }
+    ]
+    monkeypatch.setattr(rights_mod.db, "all", lambda sql, params=(): rows)
+    monkeypatch.setattr(rights_mod, "resolve_fiduciary", lambda ctx: FID)
+    ctx = _ctx(category="client", service="rights", func="list_nominations", payload={}, fiduciary_id=FID)
+    out = rights_mod.RightsService().list_nominations(ctx)
+    assert out[0]["status"] == "REVOKED"
+    assert out[0]["effective_status"] == "REVOKED"
+    # And expiry: an EXPIRED stored value is terminal too.
+    rows[0]["status"] = "EXPIRED"
+    rows[0]["valid_from"] = None
+    rows[0]["valid_until"] = "2099-01-01T00:00:00+00:00"
+    out = rights_mod.RightsService().list_nominations(ctx)
+    assert out[0]["status"] == "EXPIRED"
+    assert out[0]["effective_status"] == "EXPIRED"
 
 
 def test_p6_07_expire_nominations_sweep(monkeypatch):
@@ -1775,9 +1812,10 @@ def test_gr_07_submit_grievance_routes_to_dpo(monkeypatch):
     )
     out = compliance_mod.GrievanceService().submit_grievance(ctx)
     assert out["success"] is True
-    # The complaint is routed to the DPO and marked IN_PROGRESS immediately.
+    # The complaint is routed to the DPO and a DPO notification is queued.
     assert any("assigned_dpo_user_id = %s" in s for s in executed)
-    assert any("'IN_PROGRESS'" in s for s in executed)
+    # P7-05: NEW stays observable — the assignment no longer forces IN_PROGRESS.
+    assert not any("'IN_PROGRESS'" in s for s in executed)
 
 
 # ── v6 workbook — PL-03 purpose-scoped purge de-identifies the CMS copy ──────
@@ -1798,16 +1836,179 @@ def test_pl_03_purpose_purge_completion_calls_deidentify(monkeypatch):
                 "assigned_operator_id": None,
                 "action": "ERASE",
             }
-        if "LEGAL_HOLD_APPLIED" in sql:
-            return None
         return None
+
+    def fake_call(fiduciary_id, user_id, purpose_id, action="ERASE"):
+        captured["user_id"] = user_id
+        captured["purpose_id"] = purpose_id
+        return {}
 
     monkeypatch.setattr(compliance.db, "one", fake_one)
     monkeypatch.setattr(compliance.db, "execute", lambda sql, params=(): 1)
-    monkeypatch.setattr(
-        compliance, "deidentify_purpose_cms_copy", lambda *a, **k: captured.setdefault("called", True) or {}
-    )
+    # P7-01: the de-identification must be called WITH the completing principal's
+    # user_id, not tenant-wide. This test pins the call-site argument, so a
+    # future "drop user_id back out" regression fails here instead of in the
+    # field rewriting every consent record in the tenant.
+    monkeypatch.setattr(compliance, "deidentify_purpose_cms_copy", fake_call)
     monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
     ctx = _confirm_ctx()
     compliance.ComplianceService()._set_purge_status(ctx, "pr-1", "PURGE_COMPLETED", "done", None)
-    assert captured.get("called") is True
+    assert captured.get("user_id") == "u"
+    assert captured.get("purpose_id") == "care"
+
+
+def test_pl_03_deidentify_is_scoped_by_user_id(monkeypatch):
+    """P7-01 regression: the emitted UPDATEs must predicate on user_id, so one
+    processor confirmation rewrites only the principal whose purge completed —
+    never every consent record in the tenant."""
+    cursor = _ErasureCursor()
+
+    class _Conn:
+        def cursor(self):
+            return cursor
+
+    @contextlib.contextmanager
+    def fake_connection():
+        yield _Conn()
+
+    monkeypatch.setattr(compliance.db, "connection", fake_connection)
+    compliance.deidentify_purpose_cms_copy(FID, "asha", "care", action="ERASE")
+    assert any("user_id = %s" in s for s in cursor.sql), "UPDATE must be scoped by user_id"
+    assert any("fiduciary_id = %s" in s for s in cursor.sql)
+    # A tenant-wide (no user_id) UPDATE would be the regression.
+    assert not any("user_id" not in s and "UPDATE consent_records" in s for s in cursor.sql)
+
+
+# ── v7 workbook — P7-02 an unexamined tenant must NOT read "intact" ───────────
+def test_p7_02_unexamined_tenant_reports_not_intact(monkeypatch):
+    from dpdpcms_py import audit
+
+    # The window is the newest rows across ALL tenants; scamper to a tenant whose
+    # rows fall outside it: in-scope total 0 must read unexamined, not intact.
+    rows = _make_chain_rows()
+    monkeypatch.setattr(audit.db, "all", lambda *a, **k: rows)
+    res = audit.verify_chain(limit=100, fiduciary_id="TENANT-NOT-IN-WINDOW")
+    assert res["rows_checked"] == 0
+    assert res["unexamined_tenant"] is True
+    assert res["intact"] is False
+
+
+def test_p7_02_certificate_refuses_unexamined_tenant(monkeypatch):
+    from dpdpcms_py.services import governance as gov_mod
+
+    data = {"principal_id": "u", "fiduciary_id": FID, "timestamp": "2026-01-01T00:00:00+00:00"}
+    from dpdpcms_py.audit import certificate_signature
+
+    data["signature"] = certificate_signature(data)
+    monkeypatch.setattr(gov_mod.db, "one", lambda sql, params=(): {"certificate_data": data, "fiduciary_id": FID})
+    monkeypatch.setattr(gov_mod.db, "all", lambda sql, params=(): [])
+    monkeypatch.setattr(
+        gov_mod,
+        "verify_chain",
+        lambda limit=100_000, fiduciary_id=None: {
+            "intact": True, "rows_checked": 0, "unexamined_tenant": True, "truncated": False,
+        },
+    )
+    monkeypatch.setattr(gov_mod, "log_event", lambda *a, **k: None)
+    ctx = _ctx(service="legal", func="verify_certificate", payload={"id": "cert"}, fiduciary_id=FID)
+    result = gov_mod.LegalService().verify_certificate(ctx)
+    assert result["valid"] is False
+    assert "unexamined" in result["reason"]
+
+
+def test_p7_02_generate_certificate_refuses_unexamined_tenant(monkeypatch):
+    from dpdpcms_py.services import governance as gov_mod
+
+    monkeypatch.setattr(gov_mod.db, "all", lambda sql, params=(): [])  # no credit trail
+    monkeypatch.setattr(
+        gov_mod,
+        "verify_chain",
+        lambda limit=100_000, fiduciary_id=None: {
+            "intact": True, "rows_checked": 0, "unexamined_tenant": True, "truncated": False,
+        },
+    )
+    ctx = _ctx(
+        service="legal", func="generate_certificate",
+        payload={"subject_principal_id": "u", "fiduciary_id": FID},
+        fiduciary_id=FID,
+    )
+    with pytest.raises(ApiError) as exc:
+        gov_mod.LegalService().generate_certificate(ctx)
+    assert exc.value.status == 409
+
+
+# ── v7 workbook — P7-04 the delivery floor trigger also blocks TRUNCATE and
+# webhook_deliveries, and db/23 is in the upgrade list ─────────────────────────
+def test_p7_04_floor_covers_truncate_and_webhooks():
+    sql = (REPO / "db" / "23_notification_delivery_floor.sql").read_text(encoding="utf-8")
+    assert "BEFORE TRUNCATE" in sql
+    assert "trg_webhook_deliveries_floor" in sql or "webhook_deliveries" in sql
+    upgrades = (REPO / "scripts" / "local" / "shell_scripts" / "common.sh").read_text(encoding="utf-8")
+    assert "23_notification_delivery_floor.sql" in upgrades
+
+
+# ── v7 workbook — P7-05 routing notifies the DPO and keeps NEW observable ─────
+def test_p7_05_submit_grievance_notifies_dpo_and_stays_new(monkeypatch):
+    from dpdpcms_py.services import compliance as compliance_mod
+
+    dpo_row = {"id": "dpo-1"}
+    executed = []
+
+    def fake_one(sql, params=()):
+        if "FROM operators" in sql and "role = 'DPO'" in sql:
+            return dpo_row
+        return None
+
+    monkeypatch.setattr(compliance_mod, "resolve_fiduciary", lambda ctx: FID)
+    monkeypatch.setattr(compliance_mod.db, "one", fake_one)
+    monkeypatch.setattr(compliance_mod.db, "insert_returning",
+                        lambda sql, params=(): {"id": "g1", "reference_number": "GRV-2026-ABC123"})
+    monkeypatch.setattr(compliance_mod.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
+    monkeypatch.setattr(compliance_mod, "log_event", lambda *a, **k: None)
+    ctx = _ctx(
+        category="client", service="grievance", func="submit_grievance",
+        payload={"user_id": "asha", "type": "DATA_ACCESS_REQUEST", "subject": "S", "description": "D"},
+        fiduciary_id=FID,
+    )
+    compliance_mod.GrievanceService().submit_grievance(ctx)
+    # P7-05: the DPO is notified (a DPO recipient row), independently of the
+    # principal's ASSIGNED notice.
+    assert any("'DPO'" in s and "GRIEVANCE_ASSIGNED" in s for s in executed)
+    # P7-05: assignment no longer forces IN_PROGRESS — NEW stays observable.
+    assert not any("'IN_PROGRESS'" in s for s in executed)
+
+
+# ── v7 workbook — P7-06 purpose_states carries a real day count + OPEN/CLOSED ─
+def test_p7_06_purpose_states_retention_days_from_policy(monkeypatch):
+    from dpdpcms_py import jobs as jobs_mod
+    from dpdpcms_py.services import consent as consent_mod
+
+    def fake_one(sql, params=()):
+        if "FROM consent_records" in sql:
+            return {"id": "rec-1", "user_id": "asha", "fiduciary_id": FID, "policy_id": "p1",
+                    "data_point_consents": [{"data_point_id": "care", "purpose_agreed_to": "Care",
+                                             "consent_granted": True}],
+                    "timestamp": "2026-01-01"}
+        if "FROM consent_policies" in sql:
+            return {"policy_content": {"en": {"title": "P"}}}
+        return None
+
+    def fake_all(sql, params=()):
+        if "FROM ropa_entries" in sql:
+            return []  # no personas
+        if "FROM purpose_lifecycle" in sql:
+            return []  # no lifecycle rows -> OPEN default
+        return []
+
+    monkeypatch.setattr(consent_mod.db, "one", fake_one)
+    monkeypatch.setattr(consent_mod.db, "all", fake_all)
+    # P7-06: the retention day count comes from the governing policy/ROPA.
+    monkeypatch.setattr(jobs_mod, "_retention_for", lambda fid, purpose: (365, None))
+    ctx = _ctx(category="client", service="consent", func="get_consent_record_details",
+               payload={"record_id": "rec-1"}, fiduciary_id=FID, permissions={"READ"})
+    out = consent_mod.ConsentService().get_consent_record_details(ctx)
+    states = out.get("purpose_states") or []
+    care = next((s for s in states if s.get("purpose_id") == "care"), None)
+    assert care is not None
+    assert care["retention_period_days"] == 365  # a real day count, not an ISO timestamp
+    assert care["state"] in {"OPEN", "CLOSED"}  # schema vocabulary, not 'ACTIVE'

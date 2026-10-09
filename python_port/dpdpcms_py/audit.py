@@ -206,7 +206,7 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
         elif in_scope:
             legacy += 1
     return {
-        "intact": not broken,
+        "intact": not broken and not (fiduciary_id is not None and in_scope_total == 0),
         # P6-13: rows_checked now means the same thing at every scope — the
         # in-scope rows examined — and the breakdown is reported separately, so
         # a tenant DPO's figure is comparable with the ADMIN-scope figure.
@@ -215,7 +215,12 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
         "legacy_rows_linkage_only": legacy,
         "broken": broken[:100],
         "broken_count": len(broken),
+        # P7-02: the window is the newest `limit` rows across ALL tenants. A
+        # scoped DPO whose own rows fall outside it gets rows_checked 0 — that
+        # must read as "unexamined", never "intact". Report the distinction and
+        # let callers (certificate generation/verification) refuse on it.
         "truncated": len(rows) == limit,
+        "unexamined_tenant": fiduciary_id is not None and in_scope_total == 0,
     }
 
 

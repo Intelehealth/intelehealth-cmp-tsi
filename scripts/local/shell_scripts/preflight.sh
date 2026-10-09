@@ -57,6 +57,9 @@ if [ "$font_count" -ge 13 ]; then ok "$font_count Noto fonts present (PDF export
 else fail "Expected 13 fonts in python_port/dpdpcms_py/fonts, found $font_count."; failed=1; fi
 [ -f "$REPO_ROOT/db/19_audit_ledger_integrity.sql" ] && ok 'Migration 19 present.' || { fail 'db/19_audit_ledger_integrity.sql missing.'; failed=1; }
 [ -f "$REPO_ROOT/db/20_security_gaps.sql" ] && ok 'Migration 20 present.' || { fail 'db/20_security_gaps.sql missing.'; failed=1; }
+[ -f "$REPO_ROOT/db/21_defect_remediation_p6.sql" ] && ok 'Migration 21 present.' || { fail 'db/21_defect_remediation_p6.sql missing.'; failed=1; }
+[ -f "$REPO_ROOT/db/22_sec18_null_fiduciary_block.sql" ] && ok 'Migration 22 present.' || { fail 'db/22_sec18_null_fiduciary_block.sql missing.'; failed=1; }
+[ -f "$REPO_ROOT/db/23_notification_delivery_floor.sql" ] && ok 'Migration 23 present.' || { fail 'db/23_notification_delivery_floor.sql missing.'; failed=1; }
 if (cd "$REPO_ROOT" && git ls-files --others --exclude-standard -- python_port/dpdpcms_py/fonts 2>/dev/null | grep -q .); then
   warn 'fonts/ is not committed to git - fine locally, but commit it before sharing the branch.'
 fi

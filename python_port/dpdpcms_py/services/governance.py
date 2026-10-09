@@ -636,8 +636,16 @@ class LegalService(Service):
         logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": 500})
         # SEC-10: never sign a ledger that does not verify. The chain check is
         # scoped to this fiduciary so a DPO needs no global access to issue, and
-        # bounded (P6-12) so generation does not pull the whole ledger.
+        # bounded (P6-12) so generation does not pull the whole ledger. P7-02:
+        # signing on an unexamined window (zero in-scope rows, or a truncated
+        # window) is refused.
         chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=fiduciary_id)
+        if chain.get("unexamined_tenant") or (chain.get("truncated") and chain.get("rows_checked", 0) < 1):
+            raise ApiError(
+                409,
+                "Conflict",
+                "The audit chain window checked contained none of this fiduciary's rows; a certificate cannot be issued over an unexamined chain.",
+            )
         if not chain["intact"]:
             raise ApiError(
                 409,
@@ -802,7 +810,19 @@ class LegalService(Service):
         # walk is bounded (a window), not an unfiltered 2,000,000-row pull into
         # the API process. This certificate's OWN rows were just re-derived above;
         # the windowed global check still catches tampering in the recent ledger.
+        # P7-02: a scoped report that examined ZERO of this tenant's rows (rows
+        # pushed out of the window by other tenants) is not a clean bill of
+        # health — the certificate is refused rather than verified on nothing.
         chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=str(row["fiduciary_id"]))
+        if chain.get("unexamined_tenant") or (
+            chain.get("truncated") and chain.get("rows_checked", 0) < 1
+        ):
+            return {
+                "valid": False,
+                "reason": "The ledger window checked contained none of this fiduciary's rows; the certificate cannot be verified against an unexamined chain.",
+                "chain_intact": False,
+                "rows_checked": chain.get("rows_checked", 0),
+            }
         if not chain["intact"]:
             return {
                 "valid": False,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Apply upgrade migrations 13-20 to an EXISTING database volume (each script is
+# Apply upgrade migrations 13-23 to an EXISTING database volume (each script is
 # idempotent). A fresh volume runs every db/*.sql itself on first start.
-# Usage: migrate.sh [file.sql ...]   (default: all of 13-20, in order)
+# Usage: migrate.sh [file.sql ...]   (default: all of 13-23, in order)
 . "$(dirname "$0")/common.sh"
 
 user="$(env_get POSTGRES_USER tsi_admin)"

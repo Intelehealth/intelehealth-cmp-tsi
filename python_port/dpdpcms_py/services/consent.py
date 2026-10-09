@@ -588,7 +588,12 @@ class ConsentService(Service):
             # UD-02 (DD-01): the dashboard substitutes purpose-lifecycle state and
             # the governing retention period for the expiry date the BRD asked
             # for. Surface both so the principal still sees a temporal fact —
-            # just the accurate one for an open-ended consent.
+            # just the accurate one for an open-ended consent. P7-06: the
+            # retention figure comes from the governing retention policy / ROPA
+            # (day count), never from an ISO expiry timestamp, and the lifecycle
+            # badge reflects the schema's OPEN/CLOSED values.
+            from ..jobs import _retention_for
+
             lifecycle = {
                 str(r["purpose_id"]).lower(): r["state"]
                 for r in db.all(
@@ -596,6 +601,7 @@ class ConsentService(Service):
                     (str(row["fiduciary_id"]),),
                 )
             }
+            fid_for_retention = str(row["fiduciary_id"])
             purposes: list[dict] = []
             for point in row.get("data_point_consents") or []:
                 if not isinstance(point, dict):
@@ -603,12 +609,16 @@ class ConsentService(Service):
                 pid = str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "").lower()
                 if not pid:
                     continue
+                retention_days, _start = _retention_for(fid_for_retention, pid)
                 purposes.append(
                     {
                         "purpose_id": pid,
                         "name": point.get("purpose_agreed_to") or point.get("name"),
-                        "state": lifecycle.get(pid, "ACTIVE"),
-                        "retention_period_days": point.get("retention_period_days") or point.get("consent_expiry"),
+                        # P7-06: report the stored lifecycle state (OPEN/CLOSED)
+                        # verbatim; default to OPEN only when no lifecycle row
+                        # exists. 'ACTIVE' was never a real schema value.
+                        "state": lifecycle.get(pid, "OPEN"),
+                        "retention_period_days": retention_days,
                     }
                 )
             out["purpose_states"] = purposes
