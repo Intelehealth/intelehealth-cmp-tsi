@@ -16,6 +16,7 @@ import uuid
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 try:
     from dpdpcms_py import db as real_db
@@ -47,7 +48,7 @@ def _fid():
 def _scoped_connection():
     @contextlib.contextmanager
     def conn_cm():
-        with psycopg.connect(settings.db_dsn) as conn:
+        with psycopg.connect(settings.db_dsn, row_factory=dict_row) as conn:
             yield conn
 
     return conn_cm
@@ -57,33 +58,41 @@ def test_erasure_deidentify_scopes_to_the_principal():
     """P7-01 regression: de-identifying a purpose for ONE principal must not
     touch another principal's consent records in the same tenant."""
     fid = _fid()
+    pol = f"pol-{fid[:8]}"
     purpose = "care"
     conn_cm = _scoped_connection()
     with conn_cm() as conn, conn.cursor() as cur:
+        # consent_records has FKs to fiduciaries and (id, version) of
+        # consent_policies; seed single parents so the INSERTs are valid. The
+        # policy id is scoped to this test's fid — both DB-backed tests run
+        # against the SAME provisioned database, so a shared 'p1' PK would
+        # collide on the second test.
         cur.execute(
-            "INSERT INTO consent_records (id, user_id, fiduciary_id, policy_id, policy_version, timestamp, "
-            " data_point_consents, is_active_consent, jurisdiction, consent_status_general, consent_mechanism, "
-            " ip_address, created_at, last_updated_at) "
-            "VALUES (uuid_generate_v4(), %s, %s, 'p1', 'v1', NOW(), %s, TRUE, 'IN', 'CONSENT_GIVEN', 'WEB', "
-            " '1.2.3.4', NOW(), NOW())",
-            (
-                "asha",
-                fid,
-                real_db.as_jsonb([{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]),
-            ),
+            "INSERT INTO fiduciaries (id, name, primary_domain, status) VALUES (%s, %s, %s, 'ACTIVE')",
+            (fid, f"fid-{fid[:8]}", f"domain-{fid[:8]}.example"),
         )
         cur.execute(
-            "INSERT INTO consent_records (id, user_id, fiduciary_id, policy_id, policy_version, timestamp, "
-            " data_point_consents, is_active_consent, jurisdiction, consent_status_general, consent_mechanism, "
-            " ip_address, created_at, last_updated_at) "
-            "VALUES (uuid_generate_v4(), %s, %s, 'p1', 'v1', NOW(), %s, TRUE, 'IN', 'CONSENT_GIVEN', 'WEB', "
-            " '1.2.3.5', NOW(), NOW())",
-            (
-                "ramesh",
-                fid,
-                real_db.as_jsonb([{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]),
-            ),
+            "INSERT INTO consent_policies (id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content)"
+            " VALUES (%s, 'v1', %s, NOW(), 'ACTIVE', 'IN', %s)",
+            (pol, fid, real_db.as_jsonb({"en": {"title": "P", "data_processing_purposes": [{"id": purpose, "name": "Care"}]}})),
         )
+        for user, ip in (("asha", "1.2.3.4"), ("ramesh", "1.2.3.5")):
+            cur.execute(
+                "INSERT INTO consent_records (id, user_id, fiduciary_id, policy_id, policy_version, timestamp, "
+                " jurisdiction, language_selected, data_point_consents, is_active_consent, "
+                " consent_status_general, consent_mechanism, ip_address, created_at, last_updated_at) "
+                "VALUES (uuid_generate_v4(), %s, %s, %s, 'v1', NOW(), 'IN', 'en', %s, TRUE, "
+                " 'CONSENT_GIVEN', 'WEB', %s, NOW(), NOW())",
+                (
+                    user,
+                    fid,
+                    pol,
+                    real_db.as_jsonb(
+                        [{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]
+                    ),
+                    ip,
+                ),
+            )
         conn.commit()
 
     monkeypatch = pytest.MonkeyPatch()
@@ -110,17 +119,31 @@ def test_erasure_metadata_scrub_runs_on_the_original_user_id():
     """P6-06 regression against a real DB: the consent-record metadata scrub
     must actually clear ip/user_agent rather than match nothing after re-keying."""
     fid = _fid()
+    pol = f"meta-{fid[:8]}"
     conn_cm = _scoped_connection()
     with conn_cm() as conn, conn.cursor() as cur:
+        # Seed single FK parents (fiduciaries + consent_policies) so the
+        # consent_records INSERT is valid against the real schema. Unique
+        # policy id per test: both DB tests share one provisioned database.
+        cur.execute(
+            "INSERT INTO fiduciaries (id, name, primary_domain, status) VALUES (%s, %s, %s, 'ACTIVE')",
+            (fid, f"fid-{fid[:8]}", f"domain-{fid[:8]}.example"),
+        )
+        cur.execute(
+            "INSERT INTO consent_policies (id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content)"
+            " VALUES (%s, 'v1', %s, NOW(), 'ACTIVE', 'IN', %s)",
+            (pol, fid, real_db.as_jsonb({"en": {"title": "P", "data_processing_purposes": [{"id": "care", "name": "Care"}]}})),
+        )
         cur.execute(
             "INSERT INTO consent_records (id, user_id, fiduciary_id, policy_id, policy_version, timestamp, "
-            " data_point_consents, is_active_consent, jurisdiction, consent_status_general, consent_mechanism, "
-            " ip_address, user_agent, created_at, last_updated_at) "
-            "VALUES (uuid_generate_v4(), %s, %s, 'p1', 'v1', NOW(), %s, TRUE, 'IN', 'CONSENT_GIVEN', 'WEB', "
-            " '9.9.9.9', 'curl/8', NOW(), NOW())",
+            " jurisdiction, language_selected, data_point_consents, is_active_consent, "
+            " consent_status_general, consent_mechanism, ip_address, user_agent, created_at, last_updated_at) "
+            "VALUES (uuid_generate_v4(), %s, %s, %s, 'v1', NOW(), 'IN', 'en', %s, TRUE, "
+            " 'CONSENT_GIVEN', 'WEB', '9.9.9.9', 'curl/8', NOW(), NOW())",
             (
                 "asha",
                 fid,
+                pol,
                 real_db.as_jsonb([{"data_point_id": "care", "consent_granted": True}]),
             ),
         )
@@ -137,7 +160,7 @@ def test_erasure_metadata_scrub_runs_on_the_original_user_id():
 
     with conn_cm() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT ip_address, user_agent FROM consent_records WHERE fiduciary_id = %s AND user_id LIKE 'erased:%'",
+            "SELECT ip_address, user_agent FROM consent_records WHERE fiduciary_id = %s AND user_id LIKE 'erased:%%'",
             (fid,),
         )
         row = cur.fetchone()
@@ -173,11 +196,20 @@ def test_chain_verifies_intact_and_detects_tampering_on_real_rows():
     assert result["intact"] is True
     assert result["rows_checked"] >= 3
 
+    # Simulate tampering: audit_logs is append-only via a trigger (db/19), so
+    # to test that verify_chain CATCHES tampering we disable that trigger,
+    # rewrite one row's context, and re-enable it. A plain
+    # UPDATE ... ORDER BY ... LIMIT 1 is not valid PostgreSQL, so target the
+    # newest row with a subquery.
     with psycopg.connect(settings.db_dsn) as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE audit_logs DISABLE TRIGGER trg_audit_logs_no_update_delete")
         cur.execute(
-            "UPDATE audit_logs SET context_details = 'tampered' WHERE fiduciary_id = %s ORDER BY timestamp DESC LIMIT 1",
+            "UPDATE audit_logs SET context_details = 'tampered'"
+            " WHERE id = (SELECT id FROM audit_logs WHERE fiduciary_id = %s"
+            "             ORDER BY timestamp DESC, id DESC LIMIT 1)",
             (fid,),
         )
+        cur.execute("ALTER TABLE audit_logs ENABLE TRIGGER trg_audit_logs_no_update_delete")
         conn.commit()
     broken = audit.verify_chain(limit=100, fiduciary_id=fid)
     assert broken["intact"] is False, "tampering must be detected"

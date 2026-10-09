@@ -396,7 +396,13 @@ database — is being addressed with a real-Postgres CI path.
   ordering and the chain verifier against the live ledger; they skip when no DB
   is reachable so the local unit suite stays fast. This is the fix the workbook
   named as the reason each branch closes findings and opens new ones.
-- Tests: 260 passed, 4 skipped (3 DB-backed + 1 pre-existing); ruff clean.
+- Tests: 260 passed, 4 skipped (3 DB-backed + 1 pre-existing); ruff clean. First CI
+  run against the live Postgres surfaced fixture faults in the DB tests themselves
+  (`language_selected` NOT NULL, the consent_records FK parents, `UPDATE ... ORDER
+  BY ... LIMIT 1` not being valid PostgreSQL, and the db/19 append-only trigger
+  blocking the tamper step). The fixtures now seed the FK parents with per-test
+  policy ids, tamper via a trigger-disable, and query with `dict_row`. Locally
+  validated against a fresh postgres:16: 263 passed, 1 skipped.
 
 ### Upgrade notes
 
