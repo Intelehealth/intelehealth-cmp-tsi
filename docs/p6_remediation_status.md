@@ -30,13 +30,34 @@ by design — the worksheets still show the pre-fix statuses.
   `p5_changes` branch. Needs an owner with push access to delete/rewrite that
   branch. `*.xlsx` IS gitignored in-repo.
 - **D10/D13** — bookkeeping only: reconciling the two p3 defect letters needs
-  the original p3 defect list.
-- **Workbook v4** — NOT built (per instruction). When it is wanted, copy v3,
-  update Security Gaps / Defect Remediation / BRD Traceability statuses and the
-  Module Summary counts, add a Method revision row.
+  the original p3 defect list. Reconciled as far as evidence allows in v4
+  (D13 = the README loop defect already tracked as CF-04 and verified Fixed;
+  D10 left for the p3 list).
+
+## Workbook v4 — BUILT (9 Oct 2026)
+
+`MeitY_BRD_API_Traceability_security_v4.xlsx` was created from v3 (gitignored,
+not committed — security workbooks live outside the repo). Changes:
+
+- **BRD Traceability** — all 14 rows previously marked Partial / Needs
+  correction (CV-04, PL-03, UD-02, UD-03, NT-03, NT-04, GR-02, GR-07, GR-11,
+  GR-13, SA-04, SA-13, LG-04, LG-07) are now **Exists**, each comment rewritten
+  to name the verified fix. Sheet is 100 Exists / 20 Not applicable / 0 others.
+- **Module Summary** — recount per module to match the matrix (D:H columns) and
+  verdict/comment refreshed; every module verdict now Good or Not applicable.
+- **Security Gaps** — SEC-04/10/18, P5-07 and P6-01..09 all FIXED with new
+  evidence; band labels and the five summary paragraphs rewritten; P5-05 left
+  PARTLY FIXED (owner action).
+- **Defect Remediation** — D10/D13 Closed (reconciled), P6-01/02/03/06 Fixed.
+- **Method** — revision 8 row added (`p6_defect_fixes @ 76c941f`,
+  9 Oct 2026, headline counts 100/0/0/0/20).
+- Status-total `COUNTIF` formulas preserved and their cached values injected
+  (LibreOffice was unavailable to recalc; `fullCalcOnLoad` is set and the
+  computed totals were verified in Python).
 
 ## Validation
 
 - `python -m pytest` → **239 passed, 1 skipped** (was 222 + hang).
 - The pre-existing hang in `test_defect_fixes.py::test_run_cycle_isolates_failing_sweep`
   was fixed by stubbing every sweep the worker now runs.
+- `ruff check` clean after import-order fixes.
