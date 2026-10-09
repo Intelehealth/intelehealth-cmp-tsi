@@ -3,7 +3,7 @@ name: Main
 on:
   workflow_dispatch: {}
   push:
-    branches: ['**']
+    branches: ['p7_changes']
   pull_request:
 
 permissions:
