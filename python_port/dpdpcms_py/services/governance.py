@@ -814,9 +814,7 @@ class LegalService(Service):
         # pushed out of the window by other tenants) is not a clean bill of
         # health — the certificate is refused rather than verified on nothing.
         chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=str(row["fiduciary_id"]))
-        if chain.get("unexamined_tenant") or (
-            chain.get("truncated") and chain.get("rows_checked", 0) < 1
-        ):
+        if chain.get("unexamined_tenant") or (chain.get("truncated") and chain.get("rows_checked", 0) < 1):
             return {
                 "valid": False,
                 "reason": "The ledger window checked contained none of this fiduciary's rows; the certificate cannot be verified against an unexamined chain.",

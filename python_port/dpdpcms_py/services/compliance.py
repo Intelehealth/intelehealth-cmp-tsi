@@ -263,7 +263,9 @@ def _remove_unreferenced_files(paths: set[str]) -> None:
             log.warning("Could not delete erased attachment file %s", path)
 
 
-def deidentify_purpose_cms_copy(fiduciary_id: str, user_id: str, purpose_id: str, action: str = "ERASE") -> dict[str, int]:
+def deidentify_purpose_cms_copy(
+    fiduciary_id: str, user_id: str, purpose_id: str, action: str = "ERASE"
+) -> dict[str, int]:
     """PL-03: when a PURPOSE closes (not a whole account), the CMS de-identifies
     the consent records held only under it FOR THAT PRINCIPAL.
 

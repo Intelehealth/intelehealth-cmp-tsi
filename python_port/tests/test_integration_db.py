@@ -69,9 +69,7 @@ def test_erasure_deidentify_scopes_to_the_principal():
             (
                 "asha",
                 fid,
-                real_db.as_jsonb(
-                    [{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]
-                ),
+                real_db.as_jsonb([{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]),
             ),
         )
         cur.execute(
@@ -83,9 +81,7 @@ def test_erasure_deidentify_scopes_to_the_principal():
             (
                 "ramesh",
                 fid,
-                real_db.as_jsonb(
-                    [{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]
-                ),
+                real_db.as_jsonb([{"data_point_id": purpose, "purpose_agreed_to": "Care", "consent_granted": True}]),
             ),
         )
         conn.commit()

@@ -1906,7 +1906,10 @@ def test_p7_02_certificate_refuses_unexamined_tenant(monkeypatch):
         gov_mod,
         "verify_chain",
         lambda limit=100_000, fiduciary_id=None: {
-            "intact": True, "rows_checked": 0, "unexamined_tenant": True, "truncated": False,
+            "intact": True,
+            "rows_checked": 0,
+            "unexamined_tenant": True,
+            "truncated": False,
         },
     )
     monkeypatch.setattr(gov_mod, "log_event", lambda *a, **k: None)
@@ -1924,11 +1927,15 @@ def test_p7_02_generate_certificate_refuses_unexamined_tenant(monkeypatch):
         gov_mod,
         "verify_chain",
         lambda limit=100_000, fiduciary_id=None: {
-            "intact": True, "rows_checked": 0, "unexamined_tenant": True, "truncated": False,
+            "intact": True,
+            "rows_checked": 0,
+            "unexamined_tenant": True,
+            "truncated": False,
         },
     )
     ctx = _ctx(
-        service="legal", func="generate_certificate",
+        service="legal",
+        func="generate_certificate",
         payload={"subject_principal_id": "u", "fiduciary_id": FID},
         fiduciary_id=FID,
     )
@@ -1961,12 +1968,17 @@ def test_p7_05_submit_grievance_notifies_dpo_and_stays_new(monkeypatch):
 
     monkeypatch.setattr(compliance_mod, "resolve_fiduciary", lambda ctx: FID)
     monkeypatch.setattr(compliance_mod.db, "one", fake_one)
-    monkeypatch.setattr(compliance_mod.db, "insert_returning",
-                        lambda sql, params=(): {"id": "g1", "reference_number": "GRV-2026-ABC123"})
+    monkeypatch.setattr(
+        compliance_mod.db,
+        "insert_returning",
+        lambda sql, params=(): {"id": "g1", "reference_number": "GRV-2026-ABC123"},
+    )
     monkeypatch.setattr(compliance_mod.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
     monkeypatch.setattr(compliance_mod, "log_event", lambda *a, **k: None)
     ctx = _ctx(
-        category="client", service="grievance", func="submit_grievance",
+        category="client",
+        service="grievance",
+        func="submit_grievance",
         payload={"user_id": "asha", "type": "DATA_ACCESS_REQUEST", "subject": "S", "description": "D"},
         fiduciary_id=FID,
     )
@@ -1985,10 +1997,16 @@ def test_p7_06_purpose_states_retention_days_from_policy(monkeypatch):
 
     def fake_one(sql, params=()):
         if "FROM consent_records" in sql:
-            return {"id": "rec-1", "user_id": "asha", "fiduciary_id": FID, "policy_id": "p1",
-                    "data_point_consents": [{"data_point_id": "care", "purpose_agreed_to": "Care",
-                                             "consent_granted": True}],
-                    "timestamp": "2026-01-01"}
+            return {
+                "id": "rec-1",
+                "user_id": "asha",
+                "fiduciary_id": FID,
+                "policy_id": "p1",
+                "data_point_consents": [
+                    {"data_point_id": "care", "purpose_agreed_to": "Care", "consent_granted": True}
+                ],
+                "timestamp": "2026-01-01",
+            }
         if "FROM consent_policies" in sql:
             return {"policy_content": {"en": {"title": "P"}}}
         return None
@@ -2004,8 +2022,14 @@ def test_p7_06_purpose_states_retention_days_from_policy(monkeypatch):
     monkeypatch.setattr(consent_mod.db, "all", fake_all)
     # P7-06: the retention day count comes from the governing policy/ROPA.
     monkeypatch.setattr(jobs_mod, "_retention_for", lambda fid, purpose: (365, None))
-    ctx = _ctx(category="client", service="consent", func="get_consent_record_details",
-               payload={"record_id": "rec-1"}, fiduciary_id=FID, permissions={"READ"})
+    ctx = _ctx(
+        category="client",
+        service="consent",
+        func="get_consent_record_details",
+        payload={"record_id": "rec-1"},
+        fiduciary_id=FID,
+        permissions={"READ"},
+    )
     out = consent_mod.ConsentService().get_consent_record_details(ctx)
     states = out.get("purpose_states") or []
     care = next((s for s in states if s.get("purpose_id") == "care"), None)
