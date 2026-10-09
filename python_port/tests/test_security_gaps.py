@@ -818,7 +818,7 @@ def test_p6_08_tour_page_keys_lookup_off_a_map_not_escaped_id():
     from dpdpcms_py.config import WEB_ROOT
 
     page = (WEB_ROOT / "tour" / "parent-consent.html").read_text(encoding="utf-8")
-    assert "id=\"check-${esc(" not in page
+    assert 'id="check-${esc(' not in page
     assert "learnerChoices[p.id]" in page
     assert "document.getElementById(`check-" not in page
 
@@ -1604,8 +1604,14 @@ def test_sec18_authenticate_refuses_non_admin_without_fiduciary(monkeypatch):
     # authenticate, not silently treated as a global account.
     def fake_one(sql, params=()):
         if "FROM operators" in sql:
-            return {"id": "op-1", "role": "DPO", "fiduciary_id": None, "mfa_enabled": False,
-                    "valid_after": None, "revoked": False}
+            return {
+                "id": "op-1",
+                "role": "DPO",
+                "fiduciary_id": None,
+                "mfa_enabled": False,
+                "valid_after": None,
+                "revoked": False,
+            }
         return None
 
     monkeypatch.setattr(main_mod.db, "one", fake_one)
@@ -1637,7 +1643,7 @@ def test_p6_10_validate_consent_is_not_get_eligible():
 # ── v6 workbook — P6-11 CI runs on every branch, not a per-branch allow-list ──
 def test_p6_11_ci_triggers_all_branches():
     wf = (REPO / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-    assert "branches: ['**']" in wf or "branches: [\"**\"]" in wf
+    assert "branches: ['**']" in wf or 'branches: ["**"]' in wf
     assert "p6_changes" not in wf, "per-branch allow-list silently disables CI"
 
 
@@ -1678,12 +1684,33 @@ def test_p6_07_list_nominations_reports_effective_status(monkeypatch):
     from dpdpcms_py.services import rights as rights_mod
 
     rows = [
-        {"id": "n1", "fiduciary_id": FID, "nominating_principal_id": "a", "nominated_principal_id": "b",
-         "status": "ACTIVE", "valid_from": None, "valid_until": None},
-        {"id": "n2", "fiduciary_id": FID, "nominating_principal_id": "a", "nominated_principal_id": "b",
-         "status": "ACTIVE", "valid_from": "2030-01-01T00:00:00+00:00", "valid_until": None},
-        {"id": "n3", "fiduciary_id": FID, "nominating_principal_id": "a", "nominated_principal_id": "b",
-         "status": "ACTIVE", "valid_from": None, "valid_until": "2020-01-01T00:00:00+00:00"},
+        {
+            "id": "n1",
+            "fiduciary_id": FID,
+            "nominating_principal_id": "a",
+            "nominated_principal_id": "b",
+            "status": "ACTIVE",
+            "valid_from": None,
+            "valid_until": None,
+        },
+        {
+            "id": "n2",
+            "fiduciary_id": FID,
+            "nominating_principal_id": "a",
+            "nominated_principal_id": "b",
+            "status": "ACTIVE",
+            "valid_from": "2030-01-01T00:00:00+00:00",
+            "valid_until": None,
+        },
+        {
+            "id": "n3",
+            "fiduciary_id": FID,
+            "nominating_principal_id": "a",
+            "nominated_principal_id": "b",
+            "status": "ACTIVE",
+            "valid_from": None,
+            "valid_until": "2020-01-01T00:00:00+00:00",
+        },
     ]
     monkeypatch.setattr(rights_mod.db, "all", lambda sql, params=(): rows)
     monkeypatch.setattr(rights_mod, "resolve_fiduciary", lambda ctx: FID)
@@ -1691,8 +1718,8 @@ def test_p6_07_list_nominations_reports_effective_status(monkeypatch):
     out = rights_mod.RightsService().list_nominations(ctx)
     by_id = {r["id"]: r["status"] for r in out}
     assert by_id["n1"] == "ACTIVE"
-    assert by_id["n2"] == "PENDING"   # dated in the future is not active today
-    assert by_id["n3"] == "EXPIRED"   # window lapsed
+    assert by_id["n2"] == "PENDING"  # dated in the future is not active today
+    assert by_id["n3"] == "EXPIRED"  # window lapsed
 
 
 def test_p6_07_expire_nominations_sweep(monkeypatch):
@@ -1721,12 +1748,17 @@ def test_gr_07_submit_grievance_routes_to_dpo(monkeypatch):
 
     monkeypatch.setattr(compliance_mod, "resolve_fiduciary", lambda ctx: FID)
     monkeypatch.setattr(compliance_mod.db, "one", fake_one)
-    monkeypatch.setattr(compliance_mod.db, "insert_returning",
-                        lambda sql, params=(): {"id": "g1", "reference_number": "GRV-2026-ABC123"})
+    monkeypatch.setattr(
+        compliance_mod.db,
+        "insert_returning",
+        lambda sql, params=(): {"id": "g1", "reference_number": "GRV-2026-ABC123"},
+    )
     monkeypatch.setattr(compliance_mod.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
     monkeypatch.setattr(compliance_mod, "log_event", lambda *a, **k: None)
     ctx = _ctx(
-        category="client", service="grievance", func="submit_grievance",
+        category="client",
+        service="grievance",
+        func="submit_grievance",
         payload={"user_id": "asha", "type": "DATA_ACCESS_REQUEST", "subject": "S", "description": "D"},
         fiduciary_id=FID,
     )
@@ -1744,9 +1776,16 @@ def test_pl_03_purpose_purge_completion_calls_deidentify(monkeypatch):
     def fake_one(sql, params=()):
         if "FROM purge_requests" in sql and "app_id" in sql:
             return {
-                "id": "pr-1", "user_id": "u", "fiduciary_id": FID, "purpose_id": "care",
-                "trigger_event": "RetentionPolicyExpiry", "status": "PENDING", "hold_until": None,
-                "app_id": None, "assigned_operator_id": None, "action": "ERASE",
+                "id": "pr-1",
+                "user_id": "u",
+                "fiduciary_id": FID,
+                "purpose_id": "care",
+                "trigger_event": "RetentionPolicyExpiry",
+                "status": "PENDING",
+                "hold_until": None,
+                "app_id": None,
+                "assigned_operator_id": None,
+                "action": "ERASE",
             }
         if "LEGAL_HOLD_APPLIED" in sql:
             return None
@@ -1754,8 +1793,9 @@ def test_pl_03_purpose_purge_completion_calls_deidentify(monkeypatch):
 
     monkeypatch.setattr(compliance.db, "one", fake_one)
     monkeypatch.setattr(compliance.db, "execute", lambda sql, params=(): 1)
-    monkeypatch.setattr(compliance, "deidentify_purpose_cms_copy",
-                        lambda *a, **k: captured.setdefault("called", True) or {})
+    monkeypatch.setattr(
+        compliance, "deidentify_purpose_cms_copy", lambda *a, **k: captured.setdefault("called", True) or {}
+    )
     monkeypatch.setattr(compliance, "log_event", lambda *a, **k: None)
     ctx = _confirm_ctx()
     compliance.ComplianceService()._set_purge_status(ctx, "pr-1", "PURGE_COMPLETED", "done", None)

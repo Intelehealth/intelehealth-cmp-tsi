@@ -58,7 +58,8 @@ class RightsService(Service):
                 # P6-07: a nomination whose valid_from is still in the future is
                 # stored PENDING, never ACTIVE.
                 "PENDING"
-                if _parse_ts(ctx.payload.get("valid_from")) and _parse_ts(ctx.payload.get("valid_from")) > datetime.now(UTC)
+                if _parse_ts(ctx.payload.get("valid_from"))
+                and _parse_ts(ctx.payload.get("valid_from")) > datetime.now(UTC)
                 else "ACTIVE",
             ),
         )
@@ -97,7 +98,9 @@ class RightsService(Service):
             )
             params.append(status_filter)
         params.append(int(ctx.payload.get("limit") or 50))
-        rows = db.all(f"SELECT * FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params)
+        rows = db.all(
+            f"SELECT * FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params
+        )
         # P6-07: compute the effective status in Python so the contract is explicit
         # and testable — never trust a stored literal a future date makes stale.
         now = datetime.now(UTC)

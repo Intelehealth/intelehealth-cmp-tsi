@@ -790,7 +790,7 @@ class LegalService(Service):
             # ledger's timestamp order for those same rows.
             ledger_order = sorted(
                 (str(r["current_log_hash"]) for r in found.values()),
-                key=lambda h: (found[h]["timestamp"] or ""),
+                key=lambda h: found[h]["timestamp"] or "",
                 reverse=True,
             )
             if ledger_order != claimed:
