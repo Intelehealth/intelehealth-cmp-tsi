@@ -492,7 +492,9 @@ class OperatorService(Service):
             params.append(new_fid)
         scope, scope_params = tenant_filter(ctx)
         params.extend([uid, *scope_params])
-        updated = db.execute(f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'{scope}", params)
+        updated = db.execute(
+            f"UPDATE operators SET {', '.join(fields)} WHERE id = %s AND role != 'ADMIN'{scope}", params
+        )
         # SEC-12: an update that did not happen (unknown id, ADMIN target, or a
         # cross-tenant id) is not logged or reported as done.
         if updated == 0:

@@ -73,7 +73,9 @@ def decrypt_code(ciphertext: str | None) -> str | None:
     from . import db
 
     try:
-        row = db.one("SELECT pgp_sym_decrypt(decode(%s, 'base64'), %s) AS code", (ciphertext, settings.db_encryption_key))
+        row = db.one(
+            "SELECT pgp_sym_decrypt(decode(%s, 'base64'), %s) AS code", (ciphertext, settings.db_encryption_key)
+        )
     except Exception:  # pragma: no cover - a corrupt payload must not crash the sweep
         return None
     return str(row["code"]) if row else None

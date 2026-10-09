@@ -61,7 +61,9 @@ def require_allowed(scope: str, key: str) -> None:
         raise ApiError(429, "Too Many Requests", "Too many failed attempts. Try again later.")
 
 
-def record_failure(scope: str, key: str, max_failures: int = MAX_FAILURES, lockout_minutes: int = LOCKOUT_MINUTES) -> None:
+def record_failure(
+    scope: str, key: str, max_failures: int = MAX_FAILURES, lockout_minutes: int = LOCKOUT_MINUTES
+) -> None:
     """Record one failed attempt; lock the key out once the cap is reached.
 
     P6-04: the counter increment is issued server-side in one UPSERT

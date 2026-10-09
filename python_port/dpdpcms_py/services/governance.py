@@ -751,7 +751,9 @@ class LegalService(Service):
         # the certificate claims to crystallise must still exist in audit_logs,
         # and the fiduciary's chain must still verify.
         trail = data.get("evidence_trail") or []
-        claimed = [str(entry.get("hash") or "").strip() for entry in trail if isinstance(entry, dict) and entry.get("hash")]
+        claimed = [
+            str(entry.get("hash") or "").strip() for entry in trail if isinstance(entry, dict) and entry.get("hash")
+        ]
         missing = []
         if claimed:
             missing = [

@@ -46,7 +46,13 @@ class _CapturedDb:
 
 def _ctx(category="admin", service="operator", func="list_users", payload=None, **kwargs):
     body = {"_func": func, **(payload or {})}
-    defaults = {"path": f"/api/v1/{category}/{service}", "category": category, "service": service, "payload": body, "headers": {}}
+    defaults = {
+        "path": f"/api/v1/{category}/{service}",
+        "category": category,
+        "service": service,
+        "payload": body,
+        "headers": {},
+    }
     defaults.update(kwargs)
     return RequestContext(**defaults)
 
@@ -54,7 +60,9 @@ def _ctx(category="admin", service="operator", func="list_users", payload=None, 
 # ── SEC-01 unauthenticated recovery path is throttled, audited, floored ─────
 def test_recovery_verify_throttled_and_audited(monkeypatch):
     called = {"throttle": [], "log": []}
-    monkeypatch.setattr("dpdpcms_py.throttle.require_allowed", lambda scope, key: called["throttle"].append((scope, key)))
+    monkeypatch.setattr(
+        "dpdpcms_py.throttle.require_allowed", lambda scope, key: called["throttle"].append((scope, key))
+    )
     monkeypatch.setattr("dpdpcms_py.throttle.record_failure", lambda *a, **k: None)
     monkeypatch.setattr("dpdpcms_py.throttle.record_success", lambda *a, **k: None)
     monkeypatch.setattr(admin.db, "one", lambda *a, **k: {"recovery_key_hash": "badhash"})
@@ -283,7 +291,9 @@ def test_link_user_does_not_accept_age_or_verification(monkeypatch):
         assert "EXCLUDED.age_category" not in sql
         assert "EXCLUDED.verification_status" not in sql
         assert "age_category = EXCLUDED" not in sql
-        assert sql.lstrip().startswith(("UPDATE consent_records", "INSERT INTO data_principal", "UPDATE data_principal"))
+        assert sql.lstrip().startswith(
+            ("UPDATE consent_records", "INSERT INTO data_principal", "UPDATE data_principal")
+        )
 
 
 # ── SEC-06 dashboard metrics are tenant-scoped ───────────────────────────────
@@ -440,7 +450,9 @@ def test_erasure_targets_cover_every_principal_identifier_column():
     for table, column in compliance.ERASURE_TARGETS:
         covered.setdefault(table, set()).add(column)
     for table, columns in expected.items():
-        assert columns <= covered.get(table, set()), f"{table} columns not fully erased: {columns - covered.get(table, set())}"
+        assert columns <= covered.get(table, set()), (
+            f"{table} columns not fully erased: {columns - covered.get(table, set())}"
+        )
 
 
 # ── SEC-14 rights app default / DUMMY_OTP switch ─────────────────────────────
@@ -530,7 +542,12 @@ def test_render_otp_materialises_code_only_now(monkeypatch):
     from dpdpcms_py import webhooks
 
     monkeypatch.setattr("dpdpcms_py.principal_otp.decrypt_code", lambda cipher: "123456")
-    payload = {"channel": "EMAIL", "otp_enc": "cipher:123456", "message_template": "Code {{otp}}", "expires_in_minutes": 5}
+    payload = {
+        "channel": "EMAIL",
+        "otp_enc": "cipher:123456",
+        "message_template": "Code {{otp}}",
+        "expires_in_minutes": 5,
+    }
     out = webhooks._render_otp(payload)
     assert out["otp"] == "123456"
     assert out["message"] == "Code 123456"
@@ -810,9 +827,7 @@ def test_erasure_orders_grievance_statements_before_the_loop(monkeypatch, tmp_pa
     # match the ORIGINAL user_id.
     del_idx = next(i for i, s in enumerate(cursor.sql) if "DELETE FROM grievance_attachments" in s)
     upd_idx = next(i for i, s in enumerate(cursor.sql) if "attachments = '[]'::jsonb" in s)
-    generic_idx = next(
-        i for i, s in enumerate(cursor.sql) if s.lstrip().startswith("UPDATE") and "grievances" not in s
-    )
+    generic_idx = next(i for i, s in enumerate(cursor.sql) if s.lstrip().startswith("UPDATE") and "grievances" not in s)
     assert del_idx < generic_idx and upd_idx < generic_idx
     # The generic loop no longer re-keys grievances a second time.
     grievance_updates = [s for s in cursor.sql if s.lstrip().startswith("UPDATE grievances")]
@@ -869,9 +884,7 @@ def test_throttle_lapsed_lock_starts_a_fresh_window(monkeypatch):
     # POST-increment row: the serialised counter already read 5, with the last
     # lock lapsed — the 5th/6th attempt starts a fresh window rather than
     # re-locking a saturated counter forever.
-    captured, fake_connection = _throttle_capture(
-        {"failures": 5, "locked_until": lapsed, "lockout_minutes": 30}
-    )
+    captured, fake_connection = _throttle_capture({"failures": 5, "locked_until": lapsed, "lockout_minutes": 30})
     monkeypatch.setattr(throttle.db, "connection", fake_connection)
     throttle.record_failure("login:ip", "1.2.3.4")
     # P5-02: after a lapsed lock the counter restarts at 1 (not 6) and no lock
@@ -887,9 +900,7 @@ def test_throttle_lock_escalates_geometrically(monkeypatch):
     now = datetime.now(UTC)
     # POST-increment row: the counter just became 5 (4 prior failures + this
     # one), no active lock, previous escalation stage 30 minutes.
-    captured, fake_connection = _throttle_capture(
-        {"failures": 5, "locked_until": None, "lockout_minutes": 30}
-    )
+    captured, fake_connection = _throttle_capture({"failures": 5, "locked_until": None, "lockout_minutes": 30})
     monkeypatch.setattr(throttle.db, "connection", fake_connection)
     throttle.record_failure("login:ip", "1.2.3.4")
     # The 5th failure sets a lock whose duration doubles the previous one
@@ -1201,14 +1212,25 @@ def test_p6_02_policy_id_branch_requires_user_id_for_key_callers(monkeypatch):
 
     def fake_one(sql, params=()):
         if "FROM consent_records" in sql:
-            return {"id": "rec-1", "user_id": "asha", "fiduciary_id": FID, "policy_id": "p1",
-                    "data_point_consents": [], "timestamp": "2026-01-01"}
+            return {
+                "id": "rec-1",
+                "user_id": "asha",
+                "fiduciary_id": FID,
+                "policy_id": "p1",
+                "data_point_consents": [],
+                "timestamp": "2026-01-01",
+            }
         return {}
+
     monkeypatch.setattr(consent_mod.db, "one", fake_one)
     monkeypatch.setattr(consent_mod.db, "all", lambda *a, **k: [])
     ctx = _ctx(
-        category="client", service="consent", func="get_consent_record_details",
-        payload={"policy_id": "p1"}, fiduciary_id=FID, permissions={"READ"},
+        category="client",
+        service="consent",
+        func="get_consent_record_details",
+        payload={"policy_id": "p1"},
+        fiduciary_id=FID,
+        permissions={"READ"},
     )
     with pytest.raises(ApiError) as exc:
         consent_mod.ConsentService().get_consent_record_details(ctx)
@@ -1224,14 +1246,25 @@ def test_p6_02_policy_id_branch_binds_user_id(monkeypatch):
     def fake_one(sql, params=()):
         if "FROM consent_records" in sql:
             captured["params"] = params
-            return {"id": "rec-1", "user_id": "asha", "fiduciary_id": FID, "policy_id": "p1",
-                    "data_point_consents": [], "timestamp": "2026-01-01"}
+            return {
+                "id": "rec-1",
+                "user_id": "asha",
+                "fiduciary_id": FID,
+                "policy_id": "p1",
+                "data_point_consents": [],
+                "timestamp": "2026-01-01",
+            }
         return {}
+
     monkeypatch.setattr(consent_mod.db, "one", fake_one)
     monkeypatch.setattr(consent_mod.db, "all", lambda *a, **k: [])
     ctx = _ctx(
-        category="client", service="consent", func="get_consent_record_details",
-        payload={"policy_id": "p1", "user_id": "asha"}, fiduciary_id=FID, permissions={"READ"},
+        category="client",
+        service="consent",
+        func="get_consent_record_details",
+        payload={"policy_id": "p1", "user_id": "asha"},
+        fiduciary_id=FID,
+        permissions={"READ"},
     )
     out = consent_mod.ConsentService().get_consent_record_details(ctx)
     assert out["id"] == "rec-1"
@@ -1289,9 +1322,11 @@ def test_p6_04_client_ip_uses_rightmost_untrusted_hop(monkeypatch):
     # A spoofed hop at the FRONT of the chain must lose to the hop the proxy
     # appended at the RIGHT (the real client).
     req = client.build_request("GET", "/healthz", headers={"X-Forwarded-For": "6.6.6.6, 10.0.0.1"})
+
     # simulate the immediate peer being the trusted proxy 10.0.0.1
     class _Fake:
         host = "10.0.0.1"
+
     req.client = _Fake()
     out = main_mod.client_ip(req)
     assert out == "6.6.6.6"
@@ -1346,7 +1381,9 @@ def test_p6_07_nomination_binds_valid_from(monkeypatch):
     monkeypatch.setattr(rights_mod, "log_event", lambda *a, **k: None)
     monkeypatch.setattr(rights_mod, "resolve_fiduciary", lambda ctx: FID)
     ctx = _ctx(
-        category="client", service="rights", func="create_nomination",
+        category="client",
+        service="rights",
+        func="create_nomination",
         payload={"nominating_principal_id": "a", "nominated_principal_id": "b", "valid_from": "2030-01-01"},
         fiduciary_id=FID,
     )
@@ -1383,7 +1420,9 @@ def test_p6_sec18_update_user_requires_fiduciary_when_present(monkeypatch):
     admin_mod.OperatorService().update_user(ctx)
     assert not any("fiduciary_id" in s for s in executed), "omit must not touch fiduciary_id"
     # Explicitly sending an empty/none fiduciary is refused.
-    ctx2 = _ctx(service="operator", func="update_user", payload={"user_id": "u1", "username": "new", "fiduciary_id": ""})
+    ctx2 = _ctx(
+        service="operator", func="update_user", payload={"user_id": "u1", "username": "new", "fiduciary_id": ""}
+    )
     with pytest.raises(ApiError) as exc:
         admin_mod.OperatorService().update_user(ctx2)
     assert exc.value.status == 400

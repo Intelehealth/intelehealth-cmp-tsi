@@ -314,9 +314,7 @@ class ConsentService(Service):
             "SELECT age_category FROM data_principal WHERE user_id = %s AND fiduciary_id = %s",
             (user_id, fid),
         )
-        stored_age = (
-            str(stored["age_category"]).strip().upper() if stored and stored.get("age_category") else None
-        )
+        stored_age = str(stored["age_category"]).strip().upper() if stored and stored.get("age_category") else None
         if stored_age == "MINOR" and age_category == "ADULT":
             raise ApiError(
                 403,
@@ -571,9 +569,9 @@ class ConsentService(Service):
             )
             content = (policy or {}).get("policy_content") or {}
             lang_block = next(iter(content.values()), {})
-            out["policy_title"] = (
-                lang_block.get("title") if isinstance(lang_block, dict) else None
-            ) or str(row["policy_id"])
+            out["policy_title"] = (lang_block.get("title") if isinstance(lang_block, dict) else None) or str(
+                row["policy_id"]
+            )
             out["personas"] = db.to_jsonable(
                 db.all(
                     """
@@ -610,8 +608,7 @@ class ConsentService(Service):
                         "purpose_id": pid,
                         "name": point.get("purpose_agreed_to") or point.get("name"),
                         "state": lifecycle.get(pid, "ACTIVE"),
-                        "retention_period_days": point.get("retention_period_days")
-                        or point.get("consent_expiry"),
+                        "retention_period_days": point.get("retention_period_days") or point.get("consent_expiry"),
                     }
                 )
             out["purpose_states"] = purposes

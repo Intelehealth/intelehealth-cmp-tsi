@@ -151,9 +151,7 @@ class Settings:
             attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
             certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
-            trusted_proxy_ips=tuple(
-                ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()
-            ),
+            trusted_proxy_ips=tuple(ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()),
         )
 
 

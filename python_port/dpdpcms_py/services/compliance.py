@@ -370,7 +370,9 @@ class ComplianceService(Service):
                     raise ApiError(403, "Forbidden", "This API key is not assigned to the purge request.")
             elif current.get("assigned_operator_id"):
                 raise ApiError(
-                    403, "Forbidden", "This purge request is assigned to an operator; it cannot be closed by an API key."
+                    403,
+                    "Forbidden",
+                    "This purge request is assigned to an operator; it cannot be closed by an API key.",
                 )
         elif ctx.operator_id and current.get("assigned_operator_id"):
             # SEC-04: the delegation binds the console too — an operator other

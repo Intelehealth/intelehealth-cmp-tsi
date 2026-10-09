@@ -147,9 +147,7 @@ def certificate_signature(data: dict) -> str:
 
     payload = {key: value for key, value in data.items() if key != "signature"}
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return hmac.new(
-        settings.certificate_signing_key.encode("utf-8"), canonical, hashlib.sha256
-    ).hexdigest()
+    return hmac.new(settings.certificate_signing_key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
 
 
 def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
