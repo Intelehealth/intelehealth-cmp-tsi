@@ -592,7 +592,7 @@ class ConsentService(Service):
             # retention figure comes from the governing retention policy / ROPA
             # (day count), never from an ISO expiry timestamp, and the lifecycle
             # badge reflects the schema's OPEN/CLOSED values.
-            from ..jobs import _retention_for
+            from .retention import retention_for_purposes
 
             lifecycle = {
                 str(r["purpose_id"]).lower(): r["state"]
@@ -601,15 +601,18 @@ class ConsentService(Service):
                     (str(row["fiduciary_id"]),),
                 )
             }
-            fid_for_retention = str(row["fiduciary_id"])
+            points = [
+                (point, str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "").lower())
+                for point in row.get("data_point_consents") or []
+                if isinstance(point, dict)
+            ]
+            # P8-07: one batched lookup for every purpose, not 1-2 queries each.
+            retention = retention_for_purposes(str(row["fiduciary_id"]), [pid for _p, pid in points if pid])
             purposes: list[dict] = []
-            for point in row.get("data_point_consents") or []:
-                if not isinstance(point, dict):
-                    continue
-                pid = str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "").lower()
+            for point, pid in points:
                 if not pid:
                     continue
-                retention_days, _start = _retention_for(fid_for_retention, pid)
+                retention_days, _start = retention[pid]
                 purposes.append(
                     {
                         "purpose_id": pid,
@@ -1001,6 +1004,15 @@ class ConsentService(Service):
         record_id = None
         held: list[dict] = []
         with db.connection() as conn, conn.cursor() as cur:
+            # Legal-hold race: serialise with _set_purge_status for this
+            # principal, so a purge being confirmed either sees the hold rows
+            # written below or completes before they are. Taken FIRST, before any
+            # consent_records row lock, and for plain withdrawals too: the purge
+            # path rewrites the same consent_records rows, so both sides take the
+            # advisory lock before any row lock and cannot deadlock.
+            from .compliance import lock_principal_purges
+
+            lock_principal_purges(cur, fid, str(user_id))
             # CW-03: one active record per policy. Withdraw from every active record
             # (optionally only the named policy's) that holds a named purpose.
             policy_filter = ctx.payload.get("policy_id")

@@ -49,6 +49,9 @@ READ_PREFIXES = ("list_", "get_", "download_", "export_")
 FUNC_PERMISSIONS = {
     ("admindash", "list_access_logs"): "audit:read",
     ("audit", "verify_audit_chain"): "audit:read",
+    # GR-07: rerouting complaint categories is a DPO/admin decision; an OPERATOR
+    # (grievance:write) must not divert DPO-owned complaints to itself.
+    ("grievance", "set_grievance_routing"): "operator:write",
     ("ropa", "validate_completeness"): "ropa:read",
     ("retention", "validate_completeness"): "retention:read",
     ("role", "create_role"): "role:manage",

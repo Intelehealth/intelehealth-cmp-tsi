@@ -15,23 +15,68 @@ log = logging.getLogger("dpdpcms.delivery")
 CHANNELS = ("IN_APP", "EMAIL", "SMS", "PUSH")
 
 
-def render_message(fiduciary_id: str, notification_type: str, recipient_type: str) -> tuple[str, str]:
+def render_message(
+    fiduciary_id: str,
+    notification_type: str,
+    recipient_type: str,
+    context: dict | None = None,
+    language: str | None = None,
+) -> tuple[str, str]:
     """Return (subject, body) for a notification type.
 
     Uses the DPO-configured template (notification_message_templates), falling
     back to the built-in English defaults. Message lookup is live — editing the
-    template changes how newly delivered notifications read.
+    template changes how newly delivered notifications read. NT-03: the
+    template's text in `language` (an Eighth Schedule code the principal chose)
+    is used when the DPO has written one, else English. P7-05: `{field}`
+    placeholders are filled from the notification's own context (a grievance
+    reference, say); an unknown placeholder is left as written.
     """
-    fallback = DEFAULT_NOTIFICATION_MESSAGES.get(notification_type, {}).get("en") or notification_type
+    body = DEFAULT_NOTIFICATION_MESSAGES.get(notification_type, {}).get("en") or notification_type
     template = db.one(
         "SELECT messages FROM notification_message_templates WHERE fiduciary_id = %s AND notification_type = %s",
         (fiduciary_id, notification_type),
     )
     if template:
         messages = template.get("messages") or {}
-        if isinstance(messages, dict) and messages.get("en"):
-            fallback = str(messages["en"])
-    return f"TSI DPDP CMS — {notification_type}", fallback
+        if isinstance(messages, dict):
+            chosen = (language and messages.get(language)) or messages.get("en")
+            if chosen:
+                body = str(chosen)
+    return f"TSI DPDP CMS — {notification_type}", fill_placeholders(body, context)
+
+
+def principal_language(fiduciary_id: str, user_id: str) -> str | None:
+    """NT-03: the language the principal last chose when giving consent."""
+    if not fiduciary_id or not user_id:
+        return None
+    row = db.one(
+        "SELECT language_selected FROM consent_records WHERE fiduciary_id = %s AND user_id = %s"
+        " ORDER BY created_at DESC LIMIT 1",
+        (fiduciary_id, user_id),
+    )
+    return str(row["language_selected"]) if row and row.get("language_selected") else None
+
+
+class _KeepMissing(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def fill_placeholders(text: str, context: dict | None) -> str:
+    if not context or not isinstance(context, dict):
+        return text
+    try:
+        return text.format_map(_KeepMissing({k: str(v) for k, v in context.items()}))
+    except Exception:  # noqa: BLE001 - a malformed DPO template must not halt delivery
+        return text
+
+
+def delivery_retention_days() -> int:
+    """SA-13: notification delivery retention, never below the Rule 6(1)(e) floor."""
+    from .jobs import RULE_6_1_E_MIN_RETENTION_DAYS
+
+    return max(int(settings.notification_delivery_retention_days), RULE_6_1_E_MIN_RETENTION_DAYS)
 
 
 def _enqueue(notification_id: str, channel: str, recipient: str | None, status: str = "PENDING") -> None:
@@ -77,10 +122,13 @@ def _backfill_deliveries(limit: int) -> int:
         FROM notifications n
         LEFT JOIN notification_deliveries d ON d.notification_id = n.id
         WHERE d.id IS NULL
+          AND n.created_at > NOW() - make_interval(days => %s)
         ORDER BY n.created_at
         LIMIT %s
         """,
-        (limit,),
+        # SA-13: a notification older than the delivery retention has had its
+        # delivery rows pruned on purpose; it must not be dispatched again.
+        (delivery_retention_days(), limit),
     )
     count = 0
     for row in rows:
@@ -184,7 +232,7 @@ def _deliver_pending(limit: int) -> dict[str, int]:
     rows = db.all(
         """
         SELECT d.id, d.notification_id, d.channel, d.recipient, d.attempt_count,
-               n.fiduciary_id, n.notification_type, n.recipient_type, n.recipient_id
+               n.fiduciary_id, n.notification_type, n.recipient_type, n.recipient_id, n.context
         FROM notification_deliveries d
         JOIN notifications n ON n.id = d.notification_id
         WHERE d.status = 'PENDING'
@@ -201,7 +249,14 @@ def _deliver_pending(limit: int) -> dict[str, int]:
         channel = str(row["channel"] or "").upper()
         attempt = int(row["attempt_count"] or 0) + 1
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ""
-        subject, body = render_message(fid, row["notification_type"], row["recipient_type"])
+        language = (
+            principal_language(fid, str(row.get("recipient_id") or ""))
+            if str(row["recipient_type"] or "").upper() == "PRINCIPAL"
+            else None
+        )
+        subject, body = render_message(
+            fid, row["notification_type"], row["recipient_type"], row.get("context"), language=language
+        )
         error: str | None
         if channel == "IN_APP":
             error, _ = None, None

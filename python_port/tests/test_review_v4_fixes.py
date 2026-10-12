@@ -255,3 +255,36 @@ def test_erasure_deletes_attachments_but_keeps_shared_files(monkeypatch, tmp_pat
     assert any("attachments = '[]'::jsonb" in s for s in cursor.sql)
     assert not mine.exists()
     assert shared.exists()
+
+
+# ── D13 (scripted path) the deploy scripts' upgrade list covers every migration
+def test_upgrade_script_list_covers_every_migration():
+    common = (REPO / "scripts" / "local" / "shell_scripts" / "common.sh").read_text(encoding="utf-8")
+    block = common.split("UPGRADE_MIGRATIONS=(", 1)[1].split(")", 1)[0]
+    listed = set(re.findall(r"(\d{2})_[\w.]+\.sql", block))
+    on_disk = {p.name[:2] for p in (REPO / "db").glob("*.sql") if int(p.name[:2]) >= 13}
+    assert on_disk <= listed, f"migrations missing from UPGRADE_MIGRATIONS: {sorted(on_disk - listed)}"
+
+
+# ── D10 the CHANGELOG's test claim is true and CI cannot skip the suite ──────
+def test_changelog_test_claims_are_true_and_ci_never_skips(request):
+    changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    tests_dir = REPO / "python_port" / "tests"
+    for name in set(re.findall(r"`(test_\w+\.py)`", changelog)):
+        assert (tests_dir / name).exists(), f"CHANGELOG names {name}, which does not exist"
+    claimed = re.search(r"Unit tests under `python_port/tests/` \((\d+) tests", changelog)
+    assert claimed, "the CHANGELOG states how many tests the suite has"
+    collected = len(request.session.items)
+    files_run = {item.path.name for item in request.session.items}
+    full_run = (
+        not request.config.getoption("keyword")
+        and not request.config.getoption("markexpr")
+        and files_run == {p.name for p in tests_dir.glob("test_*.py")}
+    )
+    if full_run:  # only an unfiltered run of every test file can check the count
+        assert int(claimed.group(1)) == collected, (
+            f"CHANGELOG claims {claimed.group(1)} tests; the suite collects {collected}"
+        )
+    workflow = (REPO / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+    assert "No tests yet" not in workflow
+    assert re.search(r"run: python -m pytest -q tests\s*$", workflow, re.M), "CI runs pytest unconditionally"

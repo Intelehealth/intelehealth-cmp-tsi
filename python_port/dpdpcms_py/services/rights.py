@@ -117,10 +117,13 @@ class RightsService(Service):
             if stored not in {"REVOKED", "EXPIRED"}:
                 from_ = item.get("valid_from")
                 until = item.get("valid_until")
-                if until and _parse_ts(until) < now:
-                    effective = "EXPIRED"
-                elif from_ and _parse_ts(from_) > now:
+                # P7-03: the same precedence as the SQL filter above (valid_from
+                # before valid_until), so a row is reported with the status it
+                # was selected by.
+                if from_ and _parse_ts(from_) > now:
                     effective = "PENDING"
+                elif until and _parse_ts(until) < now:
+                    effective = "EXPIRED"
             item["effective_status"] = effective
             out.append(item)
         return out

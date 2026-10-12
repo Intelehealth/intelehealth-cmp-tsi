@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from .. import db
@@ -59,7 +61,75 @@ def _notify_grievance_stage(user_id: str, fiduciary_id: str, stage: str) -> None
         )
 
 
-def erase_cms_copy(fiduciary_id: str, user_id: str, action: str = "ERASE") -> dict[str, int]:
+def lock_principal_purges(cur, fiduciary_id: str, user_id: str) -> None:
+    """Serialise every purge-state change for one principal.
+
+    Taken (transaction-scoped) by _set_purge_status and by the erasure-request
+    path that writes LEGAL_HOLD_APPLIED rows, so a hold applied concurrently is
+    either visible to the purge's hold check or waits until the purge commits —
+    never lands in the gap between the check and the de-identification.
+    """
+    # Normalise the fiduciary UUID: a payload may send it upper-case while the
+    # purge path reads it back lower-case, and both must hash to ONE lock.
+    try:
+        fiduciary_id = str(uuid.UUID(str(fiduciary_id)))
+    except ValueError:
+        fiduciary_id = str(fiduciary_id)
+    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"purge:{fiduciary_id}:{str(user_id)}",))
+
+
+def officer_can_handle_grievances(role: str | None, fiduciary_id: str | None) -> bool:
+    """GR-07: an officer a grievance is routed or assigned to must hold
+    grievance:write, or the complaint lands with someone who cannot act on it."""
+    from .roles import has_permission, role_permissions
+
+    officer_ctx = RequestContext(
+        path="",
+        category="admin",
+        service="grievance",
+        payload={},
+        headers={},
+        auth_token={"role": role},
+        fiduciary_id=fiduciary_id,
+    )
+    return has_permission(role_permissions(officer_ctx), "grievance:write")
+
+
+@contextmanager
+def _cursor(cur=None):
+    """Use the caller's cursor (and so its transaction) when given one."""
+    if cur is not None:
+        yield cur
+        return
+    with db.connection() as conn, conn.cursor() as own:
+        yield own
+
+
+def _notify_grievance_assignee(
+    operator_id: str, fiduciary_id: str, grievance_id: str, reference_number: str | None, grievance_type: str | None
+) -> None:
+    """P7-05: the officer a grievance is routed to gets their OWN notice (not the
+    principal's copy) naming the grievance, so they know which complaint to act on."""
+    db.execute(
+        "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
+        " VALUES ('DPO', %s, %s, 'GRIEVANCE_ROUTED', %s)",
+        (
+            operator_id,
+            fiduciary_id,
+            db.as_jsonb(
+                {
+                    "grievance_id": grievance_id,
+                    "reference_number": reference_number or grievance_id,
+                    "grievance_type": grievance_type or "",
+                }
+            ),
+        ),
+    )
+
+
+def erase_cms_copy(
+    fiduciary_id: str, user_id: str, action: str = "ERASE", *, cur=None, pending_files: set[str] | None = None
+) -> dict[str, int]:
     """SA-13: irreversibly de-identify what the CMS itself holds about a principal.
 
     The processor deletes the business data; this removes the CMS's own copy of
@@ -75,12 +145,21 @@ def erase_cms_copy(fiduciary_id: str, user_id: str, action: str = "ERASE") -> di
     profile outright; DE_IDENTIFY re-keys it to the pseudonym instead, so the
     two BRD dispositions genuinely behave differently in the CMS rather than
     both boiling down to the same hard delete.
+
+    `cur` runs the erasure inside the caller's transaction (the legal-hold
+    race fix in _set_purge_status). Attachment files are then only deleted
+    after that transaction commits: the caller passes `pending_files` and
+    removes them itself.
     """
     from ..security import pseudonym
 
+    if cur is not None and pending_files is None:
+        # Unlinking files inside the caller's uncommitted transaction would test
+        # "still referenced?" against rows this transaction has not yet deleted.
+        raise ValueError("erase_cms_copy(cur=...) needs pending_files; remove the files after commit.")
     token = f"erased:{pseudonym(f'{fiduciary_id}:{user_id}')}"
     counts: dict[str, int] = {}
-    with db.connection() as conn, conn.cursor() as cur:
+    with _cursor(cur) as cur:
         # P5-01: grievance handling runs BEFORE the generic loop below. The
         # generic loop re-keys grievances.user_id to the pseudonym; the DELETE
         # and UPDATE here both predicate on the ORIGINAL user_id, so running
@@ -217,7 +296,10 @@ def erase_cms_copy(fiduciary_id: str, user_id: str, action: str = "ERASE") -> di
             "UPDATE purge_requests SET cms_erased_at = NOW() WHERE fiduciary_id = %s AND user_id = %s",
             (fiduciary_id, token),
         )
-    _remove_unreferenced_files(attachment_paths)
+    if pending_files is not None:
+        pending_files.update(attachment_paths)
+    else:
+        _remove_unreferenced_files(attachment_paths)
     return counts
 
 
@@ -264,7 +346,7 @@ def _remove_unreferenced_files(paths: set[str]) -> None:
 
 
 def deidentify_purpose_cms_copy(
-    fiduciary_id: str, user_id: str, purpose_id: str, action: str = "ERASE"
+    fiduciary_id: str, user_id: str, purpose_id: str, action: str = "ERASE", *, cur=None
 ) -> dict[str, int]:
     """PL-03: when a PURPOSE closes (not a whole account), the CMS de-identifies
     the consent records held only under it FOR THAT PRINCIPAL.
@@ -282,7 +364,7 @@ def deidentify_purpose_cms_copy(
     from ..security import pseudonym
 
     marker = f"erased:{pseudonym(f'{fiduciary_id}:{purpose_id}')}"
-    with db.connection() as conn, conn.cursor() as cur:
+    with _cursor(cur) as cur:
         # DE_IDENTIFY: keep the entry so the consent's history is intact, but
         # blank the fields that name the purpose or the principal's choices.
         # ERASE: drop the entry entirely.
@@ -295,7 +377,7 @@ def deidentify_purpose_cms_copy(
                         CASE
                           WHEN lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) = %s
                           THEN jsonb_build_object(
-                                 'data_point_id', %s,
+                                 'data_point_id', %s::text,
                                  'consent_granted', false,
                                  'status', 'de_identified',
                                  'purpose_agreed_to', '[erased]',
@@ -319,7 +401,7 @@ def deidentify_purpose_cms_copy(
                 SET data_point_consents = (
                     SELECT COALESCE(jsonb_agg(p), '[]'::jsonb)
                     FROM jsonb_array_elements(data_point_consents) AS p
-                    WHERE lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) <> %s
+                    WHERE lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) IS DISTINCT FROM %s
                 )
                 WHERE fiduciary_id = %s AND user_id = %s
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
@@ -458,70 +540,106 @@ class ComplianceService(Service):
             # than the assignee may not update or confirm the request.
             if str(current["assigned_operator_id"]) != ctx.operator_id:
                 raise ApiError(403, "Forbidden", "This purge request is assigned to another operator.")
-        # CW-11: data under an unexpired legal hold may not be reported deleted.
-        if (
-            current["status"] == "LEGAL_HOLD_APPLIED"
-            and status in {"PURGE_COMPLETED", "COMPLETED"}
-            and current.get("hold_until")
-            and current["hold_until"] > datetime.now(UTC)
-        ):
-            raise ApiError(409, "Conflict", "This request is under a legal hold until its retention period ends.")
         completed = status in {"PURGE_COMPLETED", "COMPLETED"}
-        db.execute(
-            """
-            UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW(),
-                   completion_evidence = COALESCE(%s, completion_evidence),
-                   completed_at = CASE WHEN %s THEN NOW() ELSE completed_at END
-            WHERE id = %s
-            """,
-            (status, details, db.as_jsonb(evidence) if evidence else None, completed, request_id),
-        )
         fid, user_id = str(current["fiduciary_id"]), str(current["user_id"])
+        purpose_scoped = bool(
+            completed
+            and current["purpose_id"]
+            and current["purpose_id"] != "ALL"
+            and current["user_id"]
+            and current["user_id"] != "ALL"
+        )
+        whole_account = bool(
+            completed and current["trigger_event"] == "ErasureRequest" and current["purpose_id"] == "ALL"
+        )
+        action = str(current.get("action") or "ERASE").upper()
         erased = None
-        # SA-13: once a whole-account erasure is confirmed done (and nothing for
-        # this principal is still held by law), the CMS de-identifies its own copy.
-        # PL-03: the disposition comes from the purge request's own `action` —
-        # ERASE deletes the profile, DE_IDENTIFY keeps the pseudonym — so the CMS
-        # no longer treats both as identical.
-        if completed and current["trigger_event"] == "ErasureRequest" and current["purpose_id"] == "ALL":
-            still_held = db.one(
-                "SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND user_id = %s AND status = 'LEGAL_HOLD_APPLIED' LIMIT 1",
-                (fid, user_id),
+        pending_files: set[str] = set()
+        # Legal-hold race: the hold checks, the status UPDATE and the CMS
+        # de-identification run in ONE transaction, serialised per principal
+        # with the erasure-request path that writes LEGAL_HOLD_APPLIED rows
+        # (lock_principal_purges). A hold applied concurrently is therefore
+        # either seen by the checks below or waits until this commits; it can
+        # no longer land between the check and the erasure. A refusal raises
+        # inside the transaction, so nothing is written (P8-02).
+        with db.connection() as conn, conn.cursor() as cur:
+            lock_principal_purges(cur, fid, user_id)
+            cur.execute(
+                "SELECT status, hold_until, app_id, assigned_operator_id FROM purge_requests WHERE id = %s FOR UPDATE",
+                (request_id,),
             )
-            if not still_held:
-                erased = erase_cms_copy(fid, user_id, action=str(current.get("action") or "ERASE").upper())
-        elif completed and current["purpose_id"] and current["purpose_id"] != "ALL":
-            # PL-03: a PURPOSE-scoped purge (purpose closure / retention sweep)
-            # completing must de-identify the CMS's own copy held under that
-            # purpose for THIS principal — not re-key the principal, just that
-            # purpose's footprint. P7-01: user_id is scoped (a one-tenant-wide
-            # rewrite would destroy every consent record in the fiduciary), and
-            # the legal-hold guard applies here too.
-            if current["user_id"] and current["user_id"] != "ALL":
-                still_held_purpose = db.one(
-                    "SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND user_id = %s AND status = 'LEGAL_HOLD_APPLIED' LIMIT 1",
-                    (fid, str(current["user_id"])),
+            locked = cur.fetchone() or {}
+            # SEC-04: the binding checks above ran on an unlocked read. If the
+            # request was reassigned (assign_purge_request) or rebound since,
+            # refuse rather than act on authorisation that no longer holds.
+            if str(locked.get("app_id") or "") != str(current.get("app_id") or "") or str(
+                locked.get("assigned_operator_id") or ""
+            ) != str(current.get("assigned_operator_id") or ""):
+                raise ApiError(
+                    409, "Conflict", "The purge request was reassigned while this update was in flight; retry."
                 )
-                if not still_held_purpose:
-                    erased = deidentify_purpose_cms_copy(
-                        fid,
-                        str(current["user_id"]),
-                        current["purpose_id"],
-                        action=str(current.get("action") or "ERASE").upper(),
-                    )
-                else:
-                    raise ApiError(
-                        409,
-                        "Conflict",
-                        "This principal's data is under a legal hold; the purpose cannot be de-identified yet.",
-                    )
+            # CW-11: data under an unexpired legal hold may not be reported
+            # deleted. Judged on the locked row, not the earlier unlocked read.
+            if (
+                completed
+                and locked.get("status") == "LEGAL_HOLD_APPLIED"
+                and locked.get("hold_until")
+                and locked["hold_until"] > datetime.now(UTC)
+            ):
+                raise ApiError(409, "Conflict", "This request is under a legal hold until its retention period ends.")
+            other_hold = None
+            if purpose_scoped or whole_account:
+                # Any OTHER unexpired hold on this principal (this request's own
+                # row is about to change status, and an expired hold on it
+                # passed the CW-11 check above).
+                cur.execute(
+                    "SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND user_id = %s AND id <> %s"
+                    " AND status = 'LEGAL_HOLD_APPLIED' AND (hold_until IS NULL OR hold_until > NOW()) LIMIT 1",
+                    (fid, user_id, request_id),
+                )
+                other_hold = cur.fetchone()
+            if purpose_scoped and other_hold:
+                raise ApiError(
+                    409,
+                    "Conflict",
+                    "This principal's data is under a legal hold; the purpose cannot be de-identified yet.",
+                )
+            cur.execute(
+                """
+                UPDATE purge_requests SET status = %s, details = COALESCE(%s, details), last_updated_at = NOW(),
+                       completion_evidence = COALESCE(%s, completion_evidence),
+                       completed_at = CASE WHEN %s THEN NOW() ELSE completed_at END
+                WHERE id = %s
+                """,
+                (status, details, db.as_jsonb(evidence) if evidence else None, completed, request_id),
+            )
+            # SA-13: once a whole-account erasure is confirmed done (and nothing
+            # for this principal is still held by law), the CMS de-identifies its
+            # own copy. PL-03: ERASE deletes the profile, DE_IDENTIFY keeps the
+            # pseudonym, per the purge request's own `action`.
+            if whole_account and not other_hold:
+                erased = erase_cms_copy(fid, user_id, action=action, cur=cur, pending_files=pending_files)
+            elif purpose_scoped:
+                # PL-03: a PURPOSE-scoped purge de-identifies that purpose's
+                # footprint for THIS principal only (P7-01).
+                erased = deidentify_purpose_cms_copy(fid, user_id, current["purpose_id"], action=action, cur=cur)
+        # Files go only after the erasure they belong to has committed.
+        _remove_unreferenced_files(pending_files)
         log_event(
             ctx.actor_email or ("INTEGRATOR" if ctx.permissions else "DPO"),
             fid,
             "DPO_CONSOLE" if ctx.category == "admin" else "APP",
             None,
             "PURGE_STATUS_UPDATED",
-            {"purge_request_id": request_id, "status": status, "evidence": evidence, "cms_copy_erased": bool(erased)},
+            {
+                "purge_request_id": request_id,
+                "status": status,
+                "evidence": evidence,
+                "cms_copy_erased": bool(erased),
+                # A whole-account completion while another hold stands keeps the
+                # CMS copy; say so in the trail rather than skipping silently.
+                "cms_erasure_deferred_by_legal_hold": bool(whole_account and other_hold),
+            },
             purpose_id=current["purpose_id"],
             source_ip=ctx.source_ip,
         )
@@ -600,39 +718,40 @@ class GrievanceService(Service):
             ),
         )
         gid = str(row["id"])
-        # GR-07: route by complaint CATEGORY to the fiduciary's DPO — the
-        # department the BRD's "appropriate department or DPO" is satisfied by.
-        # Every type is a DPDP data-rights grievance, so the DPO office is the
-        # target for all of them; if the fiduciary has an ACTIVE DPO, the
-        # complaint is assigned and marked IN_PROGRESS immediately, and the DPO
-        # is notified. This gives category-based routing without a waiting-for-
-        # assignment step. (A fiduciary without a DPO stays NEW in the unassigned
-        # queue.)
-        dpo = db.one(
-            "SELECT id FROM operators WHERE fiduciary_id = %s AND role = 'DPO' AND status = 'ACTIVE'"
-            " ORDER BY created_at LIMIT 1",
+        # GR-07: route by complaint CATEGORY. A fiduciary-configured rule
+        # (set_grievance_routing) sends the category to a named department and
+        # its officer; a category with no rule — or whose officer is no longer
+        # ACTIVE — goes to the fiduciary's DPO. A fiduciary with neither leaves
+        # the complaint NEW in the unassigned queue.
+        target = db.one(
+            """
+            SELECT o.id, r.department FROM grievance_routing_rules r
+            JOIN operators o ON o.id = r.operator_id AND o.status = 'ACTIVE'
+            WHERE r.fiduciary_id = %s AND r.grievance_type = %s
+            """,
+            (fid, grievance_type),
+        ) or db.one(
+            "SELECT id, 'DPO' AS department FROM operators WHERE fiduciary_id = %s AND role = 'DPO'"
+            " AND status = 'ACTIVE' ORDER BY created_at LIMIT 1",
             (fid,),
         )
-        if dpo:
-            entry = self._log_entry(ctx, "ASSIGNED", None, route=f"{grievance_type} -> DPO")
+        if target:
+            department = str(target.get("department") or "DPO")
+            entry = self._log_entry(ctx, "ASSIGNED", None, route=f"{grievance_type} -> {department}")
             # P7-05: keep the grievance observable in NEW — do not flip to
             # IN_PROGRESS in the same call, or the console's NEW filter and badge
-            # become permanently empty. The DPO is notified below, so the
+            # become permanently empty. The assignee is notified below, so the
             # assignment still surfaces.
             db.execute(
-                "UPDATE grievances SET assigned_dpo_user_id = %s, last_updated_at = NOW(),"
+                "UPDATE grievances SET assigned_dpo_user_id = %s, department = %s, last_updated_at = NOW(),"
                 " communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb WHERE id = %s",
-                (str(dpo["id"]), db.as_jsonb([entry]), gid),
+                (str(target["id"]), department, db.as_jsonb([entry]), gid),
             )
             _notify_grievance_stage(user_id, fid, "ASSIGNED")
             # P7-05: the ASSIGNED stage notice above goes to the PRINCIPAL. The
-            # person who must act — the DPO — gets a separate DPO notification,
-            # otherwise routing is silent to the only party it is for.
-            db.execute(
-                "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
-                " VALUES ('DPO', %s, %s, 'GRIEVANCE_ASSIGNED')",
-                (str(dpo["id"]), fid),
-            )
+            # person who must act gets a separate, officer-facing notice carrying
+            # the grievance reference.
+            _notify_grievance_assignee(str(target["id"]), fid, gid, reference_number, grievance_type)
         db.execute(
             "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED')",
             (user_id, fid),
@@ -774,23 +893,113 @@ class GrievanceService(Service):
         # The grievance and the assignee must both belong to the grievance's tenant.
         gid = require(ctx.payload.get("grievance_id"), "grievance_id")
         operator_id = require(ctx.payload.get("operator_id"), "operator_id")
+        officer = db.one("SELECT role, fiduciary_id FROM operators WHERE id = %s AND status = 'ACTIVE'", (operator_id,))
+        if officer and not officer_can_handle_grievances(
+            officer["role"], str(officer.get("fiduciary_id") or ctx.fiduciary_id or "") or None
+        ):
+            raise ApiError(400, "Bad Request", "The officer's role cannot act on grievances (needs grievance:write).")
         entry = self._log_entry(ctx, "ASSIGNED", None, operator_id=str(operator_id))
+        # P7-05: assignment leaves the status as it is — the same outcome as the
+        # auto-route in submit_grievance — so both paths agree. Work starting is a
+        # separate, explicit update_grievance_status to IN_PROGRESS.
         row = db.one(
             """
-            UPDATE grievances g SET assigned_dpo_user_id = o.id, status = 'IN_PROGRESS', last_updated_at = NOW(),
+            UPDATE grievances g SET assigned_dpo_user_id = o.id, last_updated_at = NOW(),
                    communication_log = COALESCE(g.communication_log, '[]'::jsonb) || %s::jsonb
             FROM operators o
             WHERE g.id = %s AND o.id = %s AND o.status = 'ACTIVE'
               AND (o.fiduciary_id = g.fiduciary_id OR o.role = 'ADMIN')
               AND (%s::uuid IS NULL OR g.fiduciary_id = %s::uuid)
-            RETURNING g.user_id, g.fiduciary_id
+            RETURNING g.user_id, g.fiduciary_id, g.reference_number, g.type, g.status, o.id AS operator_id
             """,
             (db.as_jsonb([entry]), gid, operator_id, ctx.fiduciary_id, ctx.fiduciary_id),
         )
         if not row:
             raise ApiError(404, "Not Found", "Grievance or operator not found.")
-        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), "ASSIGNED")
-        return {"success": True}
+        fid = str(row["fiduciary_id"])
+        _notify_grievance_stage(str(row["user_id"]), fid, "ASSIGNED")
+        # P7-05: the assignee hears about it too, with the grievance reference.
+        _notify_grievance_assignee(str(row["operator_id"]), fid, str(gid), row.get("reference_number"), row.get("type"))
+        log_event(
+            ctx.actor_email or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "GRIEVANCE_ASSIGNED",
+            {"grievance_id": str(gid), "operator_id": str(row["operator_id"])},
+            source_ip=ctx.source_ip,
+        )
+        return {"success": True, "status": row["status"]}
+
+    def set_grievance_routing(self, ctx: RequestContext) -> dict:
+        """GR-07: route a complaint category to a department and its officer.
+
+        `remove: true` deletes the rule, so the category falls back to the DPO.
+        The officer must be ACTIVE and belong to the fiduciary.
+        """
+        fid = str(require(resolve_fiduciary(ctx), "fiduciary_id"))
+        grievance_type = str(require(ctx.payload.get("grievance_type"), "grievance_type")).strip().upper()
+        if grievance_type not in GRIEVANCE_TYPES:
+            raise ApiError(400, "Bad Request", f"grievance_type must be one of {sorted(GRIEVANCE_TYPES)}.")
+        if ctx.payload.get("remove") is True:
+            removed = db.execute(
+                "DELETE FROM grievance_routing_rules WHERE fiduciary_id = %s AND grievance_type = %s",
+                (fid, grievance_type),
+            )
+            details = {"grievance_type": grievance_type, "removed": bool(removed)}
+        else:
+            department = str(require(ctx.payload.get("department"), "department")).strip()
+            if not department or len(department) > 100:
+                raise ApiError(400, "Bad Request", "department must be 1 to 100 characters.")
+            operator_id = require(ctx.payload.get("operator_id"), "operator_id")
+            officer = db.one(
+                "SELECT id, role FROM operators WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE'",
+                (operator_id, fid),
+            )
+            if not officer:
+                raise ApiError(404, "Not Found", "Operator not found among this fiduciary's active operators.")
+            if not officer_can_handle_grievances(officer["role"], fid):
+                raise ApiError(
+                    400, "Bad Request", "The officer's role cannot act on grievances (needs grievance:write)."
+                )
+            db.execute(
+                """
+                INSERT INTO grievance_routing_rules (fiduciary_id, grievance_type, department, operator_id, updated_by)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (fiduciary_id, grievance_type) DO UPDATE
+                    SET department = EXCLUDED.department, operator_id = EXCLUDED.operator_id,
+                        updated_by = EXCLUDED.updated_by, updated_at = NOW()
+                """,
+                (fid, grievance_type, department, str(officer["id"]), ctx.actor_email),
+            )
+            details = {"grievance_type": grievance_type, "department": department, "operator_id": str(officer["id"])}
+        log_event(
+            ctx.actor_email or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "GRIEVANCE_ROUTING_UPDATED",
+            details,
+            source_ip=ctx.source_ip,
+        )
+        return {"success": True, **details}
+
+    def list_grievance_routing(self, ctx: RequestContext) -> list[dict]:
+        """GR-07: every category with its department and officer; unrouted
+        categories are reported with the DPO fallback."""
+        fid = str(require(resolve_fiduciary(ctx), "fiduciary_id"))
+        rules = {
+            r["grievance_type"]: r
+            for r in db.all(
+                "SELECT grievance_type, department, operator_id, updated_at FROM grievance_routing_rules"
+                " WHERE fiduciary_id = %s",
+                (fid,),
+            )
+        }
+        return [
+            db.to_jsonable(rules[t]) if t in rules else {"grievance_type": t, "department": "DPO", "operator_id": None}
+            for t in sorted(GRIEVANCE_TYPES)
+        ]
 
     def add_grievance_communication(self, ctx: RequestContext) -> dict:
         """GR-13: append a threaded entry (a message, a note, an action taken) to the

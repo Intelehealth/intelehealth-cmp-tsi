@@ -79,6 +79,9 @@ class Settings:
     # P5-07: Rule 6(1)(e) log-retention floor for webhook_deliveries (the
     # channel of record for consent events and OTP dispatch), in days.
     webhook_delivery_retention_days: int = 365
+    # SA-13: the same floor-bounded retention for notification_deliveries
+    # (recipient address / device + delivery outcome).
+    notification_delivery_retention_days: int = 365
     # SA-14: key that signs evidence certificates. Defaults to the DB encryption
     # key so nothing new needs provisioning; a deployment may set its own
     # CERTIFICATE_SIGNING_KEY (still a server secret, never a client one).
@@ -151,6 +154,7 @@ class Settings:
             attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
             certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
+            notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),
             trusted_proxy_ips=tuple(ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()),
         )
 

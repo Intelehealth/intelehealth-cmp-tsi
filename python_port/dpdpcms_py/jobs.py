@@ -125,40 +125,13 @@ def escalate_overdue_grievances() -> dict[str, int]:
 def _retention_for(fiduciary_id: str, purpose_id: str) -> tuple[int | None, str | None]:
     """(retention_period_days, retention_start_event) for a closed purpose.
 
-    DD-03: the administrator-configured retention policy is the primary clock.
-    Falls back to the fiduciary's active ROPA when no policy applies.
+    P8-07: the lookup lives in services.retention (retention_for /
+    retention_for_purposes) so request handlers do not reach into the jobs
+    module; kept here for the sweep's existing call sites.
     """
-    row = db.one(
-        """
-        SELECT retention_duration_value, retention_duration_unit, retention_start_event, legal_reference
-        FROM retention_policies
-        WHERE fiduciary_id = %s AND status = 'ACTIVE'
-          AND (applicable_purposes = '[]'::jsonb OR applicable_purposes ? %s)
-        ORDER BY (applicable_purposes = '[]'::jsonb) ASC, created_at DESC
-        LIMIT 1
-        """,
-        (fiduciary_id, purpose_id),
-    )
-    if row:
-        days = int(row["retention_duration_value"] or 0) * {
-            "DAYS": 1,
-            "MONTHS": 30,
-            "YEARS": 365,
-        }.get(str(row["retention_duration_unit"] or "DAYS").upper(), 1)
-        return (days or None, row.get("retention_start_event"))
-    row = db.one(
-        """
-        SELECT retention_period_days, retention_start_event
-        FROM ropa_entries
-        WHERE fiduciary_id = %s AND source_purpose_id = %s AND status = 'active'
-        ORDER BY (retention_start_event = 'CESSATION') DESC, updated_at DESC
-        LIMIT 1
-        """,
-        (fiduciary_id, purpose_id),
-    )
-    if not row:
-        return None, None
-    return (row.get("retention_period_days"), row.get("retention_start_event"))
+    from .services.retention import retention_for
+
+    return retention_for(fiduciary_id, purpose_id)
 
 
 def _cessation_for(fiduciary_id: str, purpose_id: str) -> datetime | None:
@@ -317,6 +290,29 @@ def prune_old_webhook_deliveries(days: int | None = None) -> dict[str, int]:
     pruned = (
         db.execute(
             "DELETE FROM webhook_deliveries WHERE status IN ('DISPATCHED', 'FAILED', 'SKIPPED')"
+            " AND created_at < NOW() - make_interval(days => %s)",
+            (effective,),
+        )
+        or 0
+    )
+    return {"pruned": pruned, "retention_days": effective, "floor_enforced": effective == floor}
+
+
+def prune_old_notification_deliveries(days: int | None = None) -> dict[str, int]:
+    """SA-13: retention on notification_deliveries, which had none.
+
+    Terminal delivery rows (SENT, FAILED, SKIPPED) carry the recipient address
+    or device; they are removed once older than NOTIFICATION_DELIVERY_RETENTION_DAYS,
+    never sooner than the Rule 6(1)(e) one-year floor (which db/23 also
+    enforces in the database). The notifications row — the in-app record — is
+    kept.
+    """
+    floor = RULE_6_1_E_MIN_RETENTION_DAYS
+    requested = days or settings.notification_delivery_retention_days
+    effective = max(int(requested), floor)
+    pruned = (
+        db.execute(
+            "DELETE FROM notification_deliveries WHERE status IN ('SENT', 'FAILED', 'SKIPPED')"
             " AND created_at < NOW() - make_interval(days => %s)",
             (effective,),
         )

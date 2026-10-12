@@ -3,12 +3,17 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+
+import psycopg
 
 from . import db
 from .context import ADMIN_FIDUCIARY_ID
 from .security import pseudonym
+
+log = logging.getLogger("dpdpcms.audit")
 
 # Serialises the read-last-hash / insert pair so concurrent writers chain from the
 # same predecessor rather than forking the chain. Held for the length of the
@@ -150,7 +155,7 @@ def certificate_signature(data: dict) -> str:
     return hmac.new(settings.certificate_signing_key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
 
 
-def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
+def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None, since: datetime | str | None = None) -> dict:
     """LG-04: walk the ledger and recompute it.
 
     The walk is NEWEST-first and stops at `limit` rows, so the most recent
@@ -161,23 +166,49 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
 
     P6-01: the linkage check ALWAYS runs against the unfiltered chain, because
     the chain is global — `log_event` picks its predecessor with no fiduciary
-    filter, and ADMIN events are normalised to a NULL fiduciary. Filtering the
-    *query* by `fiduciary_id` previously turned a perfectly intact ledger into a
-    LINK_MISMATCH on every pair. The unfiltered walk fixes that; `fiduciary_id`
-    now only narrows the REPORT, so a tenant-scoped DPO verifies its own ledger
-    (and learns no other tenant's row ids) while the adjacency asserted is the
-    one the chain actually encodes.
+    filter, and ADMIN events are normalised to a NULL fiduciary. `fiduciary_id`
+    only narrows the REPORT, so a tenant-scoped DPO verifies its own ledger and
+    learns no other tenant's row ids.
+
+    SEC-10: a break in ANOTHER tenant's rows still breaks the chain a scoped
+    tenant's evidence rests on, so it makes `intact` false; it is reported as a
+    count (`foreign_broken_count`) without ids.
+
+    P7-02 / P8-04: `since` anchors the window on a timestamp (a certificate's
+    oldest trail entry) instead of a row count, so every row from the anchor to
+    the head — and the anchor row's link to its predecessor — is examined.
+    `coverage_complete` says whether every in-scope row the question covers was
+    examined: with `since`, that the window was not truncated; without it, that
+    rows_checked equals the scope's real row count. Callers that certify refuse
+    on an incomplete window rather than on the old (unreachable) truncation test.
     """
     cols = ", ".join(_HASHED_COLUMNS)
-    rows = db.all(
-        f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
-        "ORDER BY timestamp DESC, id DESC LIMIT %s",
-        (limit,),
-    )
+    select = f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
+    if since is not None:
+        fetched = db.all(
+            select + "WHERE timestamp >= %s::timestamp ORDER BY timestamp DESC, id DESC LIMIT %s",
+            (_naive_utc(since), limit + 1),
+        )
+    else:
+        fetched = db.all(select + "ORDER BY timestamp DESC, id DESC LIMIT %s", (limit + 1,))
+    truncated = len(fetched) > limit
+    rows = fetched[:limit]
     broken: list[dict] = []
+    foreign_broken = 0
     legacy = 0
     tenant_checked = 0
     in_scope_total = 0
+
+    def scoped(row: dict) -> bool:
+        return fiduciary_id is None or str(row.get("fiduciary_id") or "") == str(fiduciary_id)
+
+    def flag(row: dict, reason: str) -> None:
+        nonlocal foreign_broken
+        if scoped(row):
+            broken.append({"id": str(row["id"]), "reason": reason})
+        else:
+            foreign_broken += 1
+
     for index, row in enumerate(rows):
         meta = row.get("system_metadata") or {}
         if isinstance(meta, str):
@@ -185,43 +216,138 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None) -> dict:
                 meta = json.loads(meta)
             except ValueError:
                 meta = {}
-        # Report only the requested tenant's rows; a scoped DPO never sees a
-        # row id that belongs to another fiduciary.
-        in_scope = fiduciary_id is None or str(row.get("fiduciary_id") or "") == str(fiduciary_id)
+        in_scope = scoped(row)
         if in_scope:
             in_scope_total += 1
         # `row` is older than `rows[index - 1]` (we walk newest first): the
         # newer row's prev_log_hash must equal this row's current_log_hash.
         if index > 0 and (rows[index - 1].get("prev_log_hash") or "") != (row.get("current_log_hash") or ""):
-            newer = rows[index - 1]
-            newer_scoped = fiduciary_id is None or str(newer.get("fiduciary_id") or "") == str(fiduciary_id)
-            if newer_scoped:
-                broken.append({"id": str(newer["id"]), "reason": "LINK_MISMATCH"})
+            flag(rows[index - 1], "LINK_MISMATCH")
         if meta.get("hash_v") == HASH_VERSION:
             if row_hash(row.get("prev_log_hash"), row) != row.get("current_log_hash"):
-                if in_scope:
-                    broken.append({"id": str(row["id"]), "reason": "CONTENT_MISMATCH"})
+                flag(row, "CONTENT_MISMATCH")
             if in_scope:
                 tenant_checked += 1
         elif in_scope:
             legacy += 1
+    # The oldest row of an anchored window must still link to its predecessor,
+    # or a row deleted just below the anchor would go unnoticed.
+    if since is not None and rows and not truncated:
+        oldest = rows[-1]
+        predecessor = db.one(
+            "SELECT current_log_hash FROM audit_logs WHERE (timestamp, id) < (%s, %s)"
+            " ORDER BY timestamp DESC, id DESC LIMIT 1",
+            (oldest["timestamp"], oldest["id"]),
+        )
+        if predecessor and (oldest.get("prev_log_hash") or "") != (predecessor.get("current_log_hash") or ""):
+            flag(oldest, "LINK_MISMATCH")
+
+    # An untruncated window holds every row in scope by construction; only a
+    # truncated one needs the scope's real row count to say what was missed.
+    scope_total = _count_rows(fiduciary_id, since) if truncated else in_scope_total
+    # Zero in-scope rows is never a clean bill of health (P7-02).
+    unexamined_tenant = fiduciary_id is not None and in_scope_total == 0
+    coverage_complete = not truncated if since is not None else in_scope_total >= scope_total
     return {
-        "intact": not broken and not (fiduciary_id is not None and in_scope_total == 0),
-        # P6-13: rows_checked now means the same thing at every scope — the
-        # in-scope rows examined — and the breakdown is reported separately, so
-        # a tenant DPO's figure is comparable with the ADMIN-scope figure.
+        "intact": not broken and not foreign_broken and not unexamined_tenant,
+        # P6-13: rows_checked means the same thing at every scope — the in-scope
+        # rows examined — and the breakdown is reported separately.
         "rows_checked": in_scope_total,
         "rows_verified": tenant_checked,
+        "rows_in_scope_total": scope_total,
+        "rows_unexamined": max(scope_total - in_scope_total, 0),
         "legacy_rows_linkage_only": legacy,
         "broken": broken[:100],
         "broken_count": len(broken),
-        # P7-02: the window is the newest `limit` rows across ALL tenants. A
-        # scoped DPO whose own rows fall outside it gets rows_checked 0 — that
-        # must read as "unexamined", never "intact". Report the distinction and
-        # let callers (certificate generation/verification) refuse on it.
-        "truncated": len(rows) == limit,
-        "unexamined_tenant": fiduciary_id is not None and in_scope_total == 0,
+        "foreign_broken_count": foreign_broken,
+        "truncated": truncated,
+        "coverage_complete": coverage_complete,
+        "unexamined_tenant": unexamined_tenant,
+        "anchored_since": _naive_utc(since).isoformat() if since is not None else None,
     }
+
+
+def _naive_utc(value: datetime | str) -> datetime:
+    """audit_logs.timestamp is TIMESTAMP (no zone) holding naive UTC."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
+def _count_rows(fiduciary_id: str | None, since: datetime | str | None) -> int:
+    where, params = [], []
+    if fiduciary_id is not None:
+        where.append("fiduciary_id = %s")
+        params.append(fiduciary_id)
+    if since is not None:
+        where.append("timestamp >= %s::timestamp")
+        params.append(_naive_utc(since))
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+    row = db.one(f"SELECT count(*) AS n FROM audit_logs{clause}", params)
+    return int((row or {}).get("n") or 0)
+
+
+def record_chain_verification(limit: int = 5_000_000) -> dict:
+    """P6-12: the full-ledger walk runs in the worker, not the request thread.
+
+    Claims at most one run per day (job_schedule_state), walks the whole
+    unfiltered chain and stores the verdict, so a DPO reads the latest
+    platform-wide result without hashing every tenant's rows on request.
+    """
+    claimed = db.one(
+        """
+        INSERT INTO job_schedule_state (job_name, last_run_date) VALUES ('audit_chain_verification', CURRENT_DATE)
+        ON CONFLICT (job_name) DO UPDATE SET last_run_date = EXCLUDED.last_run_date
+            WHERE job_schedule_state.last_run_date < EXCLUDED.last_run_date
+        RETURNING job_name
+        """
+    )
+    if not claimed:
+        return {"skipped": True}
+    try:
+        result = verify_chain(limit)
+        _store_chain_verdict(result)
+    except Exception:
+        # Release today's claim so the next worker cycle retries the walk.
+        db.execute(
+            "UPDATE job_schedule_state SET last_run_date = CURRENT_DATE - 1 WHERE job_name = 'audit_chain_verification'"
+        )
+        raise
+    return {"intact": result["intact"], "rows_checked": result["rows_checked"], "broken_count": result["broken_count"]}
+
+
+def _store_chain_verdict(result: dict) -> None:
+    db.execute(
+        """
+        INSERT INTO audit_chain_verifications (intact, rows_checked, broken_count, truncated, coverage_complete, result)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            result["intact"],
+            result["rows_checked"],
+            result["broken_count"],
+            result["truncated"],
+            result["coverage_complete"],
+            db.as_jsonb({key: value for key, value in result.items() if key != "broken"}),
+        ),
+    )
+
+
+def latest_chain_verification() -> dict | None:
+    """P6-12: the most recent background full-ledger verdict, if any."""
+    try:
+        row = db.one(
+            "SELECT verified_at, intact, rows_checked, broken_count, truncated, coverage_complete"
+            " FROM audit_chain_verifications ORDER BY verified_at DESC LIMIT 1"
+        )
+    except psycopg.Error:
+        # db/24 not applied yet: report no background verdict rather than fail
+        # the on-demand verification it accompanies.
+        log.warning("audit_chain_verifications unavailable; apply db/24_p8_remediation.sql", exc_info=True)
+        return None
+    return db.to_jsonable(row) if row else None
 
 
 def list_logs(payload: dict) -> list[dict]:

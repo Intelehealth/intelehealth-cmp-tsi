@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (205 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, and the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`).
+- Unit tests under `python_port/tests/` (293 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -404,10 +404,144 @@ database — is being addressed with a real-Postgres CI path.
   policy ids, tamper via a trigger-disable, and query with `dict_row`. Locally
   validated against a fresh postgres:16: 263 passed, 1 skipped.
 
+### Fixed (Security workbook v6, p9 remediation round)
+
+Re-review against `b0bb35c` (workbook v6) left two blockers (P8-01, P8-02), six
+further P8 findings, and residuals on P7-02..P7-06, SEC-10 and P6-12. All are
+closed in code and each has a DB-backed regression test that runs against the
+real schema.
+
+- **P8-01** `deidentify_purpose_cms_copy` DE_IDENTIFY branch casts the pseudonym
+  marker (`%s::text`) so `jsonb_build_object` no longer raises
+  `IndeterminateDatatype`. Covered for the one principal, a second principal and
+  a second tenant, and end to end from purpose closure through the retention
+  sweep to the purge confirmation (PL-03).
+- **P8-02** The legal-hold refusal for a purpose-scoped purge is evaluated
+  BEFORE the status UPDATE, so a held request is no longer recorded
+  PURGE_COMPLETED with nothing de-identified and no audit event. The request's
+  own (expired) hold row is excluded so it cannot block itself.
+- **P8-03** db/23 drops its previous version's trigger
+  (`notification_deliveries_floor`) and function
+  (`enforce_notification_delivery_floor()`), so re-applying it leaves exactly the
+  current triggers. Deleting a young `notifications` row now fails with a message
+  naming the real cause (db/24) instead of raising from the cascaded table.
+- **P7-04 residuals** db/24 adds BEFORE UPDATE floors: inside the one-year floor
+  `notification_deliveries.recipient` and `webhook_deliveries.payload` may change
+  only to the erasure pseudonym (`erased:...`), and the identity columns are
+  immutable. `migrate.sh` now verifies all seven Rule 6(1)(e) floor triggers and
+  the absence of the pre-rename trigger, so a partial install fails.
+- **P7-02 / P8-04** `verify_chain` reports `coverage_complete`,
+  `rows_in_scope_total` and `rows_unexamined`; a truncated window is measured
+  against the scope's real row count instead of the unreachable
+  `rows_checked < 1` test. Certificate generation and verification anchor the
+  walk on the certificate's own oldest trail entry (`since=`), examine every row
+  from there to the head, and refuse rather than certify when that walk is
+  incomplete. The anchored walk also checks the anchor row's link to its
+  predecessor.
+- **SEC-10** Linkage and content are verified on the unfiltered chain and a
+  break in another tenant's rows now makes a scoped result not intact (reported
+  as `foreign_broken_count`, without the other tenant's ids). `verify_certificate`
+  compares the trail against the principal's actual ledger for the period it
+  covers, so an omitted event invalidates the certificate.
+- **P6-12** New index `idx_audit_logs_chain_order (timestamp DESC, id DESC)` (built CONCURRENTLY; do not run db/24 with `psql -1`)
+  removes the Seq Scan + Sort. The full-ledger walk moves to a once-a-day worker
+  sweep (`audit.record_chain_verification`, table `audit_chain_verifications`),
+  and `verify_audit_chain` reports its latest verdict as `last_full_verification`.
+- **P8-05** The DPO console tells "not verified" (no rows of yours in the
+  window), "verified but incomplete" and "broken outside your records" apart
+  from "verified broken", and shows the last full-ledger check.
+- **P8-06** DB-backed tests run inside one transaction that is rolled back, so
+  seeded rows and the tamper step no longer leave the shared database dirty.
+- **P8-07** Retention periods for every purpose on the consent dashboard are
+  resolved in two queries (`services.retention.retention_for_purposes`), and
+  request handlers no longer import the private helper from `jobs`.
+- **P7-03 residual** The Python effective-status derivation uses the SQL
+  filter's precedence (valid_from before valid_until), so a row is reported with
+  the status it was selected by.
+- **P7-05 / GR-07** `assign_grievance` no longer forces IN_PROGRESS (both
+  assignment paths now leave the status as is) and notifies the assignee. The
+  assignee's notice is a new officer-facing type, `GRIEVANCE_ROUTED`, that
+  carries the grievance reference and category through the new
+  `notifications.context` column. Category routing to a department: new admin
+  functions `set_grievance_routing` / `list_grievance_routing` and table
+  `grievance_routing_rules`. A category without a rule falls back to the DPO,
+  and `grievances.department` records where the grievance went.
+- **SA-13 residual** New worker sweep `prune_old_notification_deliveries`
+  (`NOTIFICATION_DELIVERY_RETENTION_DAYS`, never below the one-year floor) gives
+  `notification_deliveries` a retention policy.
+- **NT-03** Principal notifications are rendered in the language the principal
+  last chose (the template's text for that Eighth Schedule code, else English).
+- **CF-03** Extended DB coverage: DE_IDENTIFY, a second tenant,
+  `_set_purge_status`, the db/23 and db/24 triggers and their idempotency,
+  certificate anchoring and completeness, and the index plan.
+- New `db/24_p8_remediation.sql`, added to `UPGRADE_MIGRATIONS`, `preflight.sh`,
+  `deploy.sh` (01-24) and the README.
+- Review follow-ups. The notification backfill skips notifications older than
+  the delivery retention, so pruned deliveries are never re-sent. A malformed
+  template can no longer abort a delivery batch. The daily chain-verification
+  claim is released if the walk fails. The ERASE branch keeps consent entries
+  that carry no purpose id. An expired hold no longer blocks purpose
+  de-identification. `set_grievance_routing` needs `operator:write`, and the
+  officer must hold `grievance:write`. Certificates record `trail_truncated`,
+  and verification rejects a trail that leaves out earlier events without
+  declaring truncation. The chain index is built `CONCURRENTLY`.
+- **Legal-hold race** `_set_purge_status` now runs the hold checks, the status
+  UPDATE and the CMS de-identification (`erase_cms_copy` /
+  `deidentify_purpose_cms_copy`, which accept the caller's cursor) in ONE
+  transaction. The transaction holds a per-principal advisory lock
+  (`lock_principal_purges`) and locks the request row with `FOR UPDATE`.
+  `erasure_request` takes the same lock first, before any row lock, so the two
+  paths cannot deadlock. A hold written concurrently is either seen by the
+  check or waits for the purge to commit; it can no longer land between the
+  check and the erasure. A refusal rolls back, and attachment files are removed
+  only after the commit. The whole-account path now also ignores expired holds,
+  as the purpose path does. A two-connection test proves the confirmation waits
+  for an in-flight hold and then refuses.
+- **D10 / D13 reconciled** against the p3 defect list
+  (`MeitY_BRD_API_Traceability_v4.xlsx`, Defect Remediation, rows 10 and 13).
+  D10 ("CHANGELOG claims tests that do not exist; CI skips pytest") is fixed:
+  CI runs pytest unconditionally, and the stale "205 tests" claim is corrected
+  to the collected 287. D13 ("README upgrade loop omits db/17 and db/18") is
+  fixed: the README loop and `UPGRADE_MIGRATIONS` list `db/13..24`. New guard
+  tests fail if the CHANGELOG's count or file names drift from the suite, if CI
+  regains a skip, or if a migration is missing from the scripted upgrade list.
+- **Re-review follow-ups (race fix):**
+  - The per-principal lock key normalises the fiduciary UUID, so a payload-cased
+    id and the DB-cased id share one lock.
+  - The SEC-04 app/operator binding is re-checked on the locked row. A request
+    reassigned while the update is in flight now gets 409 instead of being
+    closed by a key it no longer belongs to.
+  - Every withdrawal, not only an erasure, takes the lock before any
+    `consent_records` row lock, so no lock-order deadlock remains.
+  - A whole-account completion kept by another hold is now recorded in the
+    audit trail (`cms_erasure_deferred_by_legal_hold`).
+  - `erase_cms_copy(cur=...)` requires `pending_files`.
+  - `set_grievance_routing` deletes only on `remove: true`, and
+    `assign_grievance` applies the same `grievance:write` officer check.
+  - Legacy certificates without `trail_truncated` are not failed by the
+    below-anchor check.
+  - The daily chain-verdict insert is inside the claim-release `try`.
+  - db/24 drops an INVALID leftover from an interrupted CONCURRENTLY build.
+  - The DB test fixture uses a savepoint per block.
+  - The race test joins its thread before cleanup.
+  - The D10 count guard runs only on an unfiltered run of every test file.
+- **P5-05 closed.** The `origin/p5_changes` history was rewritten to drop
+  `MeitY_BRD_API_Traceability_security.xlsx` (tip `07f1179` -> `365a9d3`, tree
+  unchanged, now-empty delete commit pruned) and force-pushed with lease. No
+  other branch or PR ref ever contained it. GitHub still serves the
+  unreferenced commit `d096530` by SHA from its cache until GitHub Support
+  purges it.
+- Tests: 292 passed, 1 skipped (293 collected) against a fresh postgres:16 with
+  `db/01..24` applied. The database is empty after the run. ruff check clean.
+- **Known limits (performance, not correctness):** `verify_chain` holds the
+  walked window in memory: up to 1M rows for a certificate anchor, and the
+  ledger cap for the worker's daily walk. Streaming it in keyset batches is the
+  next step for very large ledgers.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/21` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Existing database:** Run `db/13` through `db/24` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
 - **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

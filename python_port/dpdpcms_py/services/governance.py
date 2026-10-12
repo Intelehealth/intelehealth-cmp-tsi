@@ -7,12 +7,12 @@ import json
 from datetime import UTC, datetime
 
 from .. import db
-from ..audit import certificate_signature, get_log, list_logs, log_event, verify_chain
+from ..audit import certificate_signature, get_log, latest_chain_verification, list_logs, log_event, verify_chain
 from ..config import settings
 from ..context import RequestContext
 from ..errors import ApiError
 from ..netutil import validate_outbound_url
-from ..security import hash_password, random_secret
+from ..security import hash_password, pseudonym, random_secret
 from .base import Service, bind_principal_field, principal_list_filter, require, tenant_filter
 from .catalog import resolve_fiduciary
 
@@ -27,6 +27,24 @@ API_KEY_COLUMNS = (
 # bounded to this window (the most recent rows, where tampering is attempted and
 # noticed). Sized to be a cheap in-process scan, not a whole-ledger dump.
 WINDOWED_CHAIN_CHECK_ROWS = 100_000
+# P7-02: certificate paths anchor the walk on the certificate's own oldest trail
+# entry and must examine every row from there to the head. This is the ceiling
+# on that anchored walk; beyond it the certificate is refused as unverifiable
+# (never certified on a partial window). The full ledger is walked off the
+# request path by the worker (audit.record_chain_verification).
+ANCHORED_CHAIN_CHECK_ROWS = 1_000_000
+# The most events a certificate embeds; older ones are flagged as truncated.
+CERTIFICATE_TRAIL_LIMIT = 500
+
+
+def _refuse_reason(chain: dict) -> str | None:
+    """P7-02 / P8-04: why a chain result cannot back a certificate, if it cannot."""
+    if chain.get("unexamined_tenant") or not chain.get("coverage_complete"):
+        return (
+            f"The audit chain walk examined {chain.get('rows_checked', 0)} of "
+            f"{chain.get('rows_in_scope_total', 0)} rows in scope; a certificate cannot rest on an unexamined or partially examined chain."
+        )
+    return None
 
 
 def api_key_id(payload: dict) -> str:
@@ -156,7 +174,11 @@ class AuditService(Service):
 
         require_audit_access(ctx)
         limit = min(max(int(ctx.payload.get("limit") or 100_000), 1), 1_000_000)
-        return verify_chain(limit, fiduciary_id=ctx.fiduciary_id)
+        result = verify_chain(limit, fiduciary_id=ctx.fiduciary_id)
+        # P6-12: the full-ledger walk runs in the worker; report its latest
+        # verdict alongside this bounded on-demand window.
+        result["last_full_verification"] = latest_chain_verification()
+        return result
 
     def list_recent_audit_logs(self, ctx: RequestContext) -> list[dict]:
         from .roles import require_audit_access
@@ -633,19 +655,22 @@ class LegalService(Service):
         principal = require(ctx.payload.get("subject_principal_id"), "subject_principal_id")
         fiduciary_id = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         case_ref = ctx.payload.get("case_ref_id")
-        logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": 500})
-        # SEC-10: never sign a ledger that does not verify. The chain check is
-        # scoped to this fiduciary so a DPO needs no global access to issue, and
-        # bounded (P6-12) so generation does not pull the whole ledger. P7-02:
-        # signing on an unexamined window (zero in-scope rows, or a truncated
-        # window) is refused.
-        chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=fiduciary_id)
-        if chain.get("unexamined_tenant") or (chain.get("truncated") and chain.get("rows_checked", 0) < 1):
-            raise ApiError(
-                409,
-                "Conflict",
-                "The audit chain window checked contained none of this fiduciary's rows; a certificate cannot be issued over an unexamined chain.",
-            )
+        logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": CERTIFICATE_TRAIL_LIMIT + 1})
+        # The trail is the newest CERTIFICATE_TRAIL_LIMIT events; the signed
+        # payload says so when older events exist, so the certificate never
+        # silently presents a partial history as complete.
+        trail_truncated = len(logs) > CERTIFICATE_TRAIL_LIMIT
+        logs = logs[:CERTIFICATE_TRAIL_LIMIT]
+        if not logs:
+            raise ApiError(409, "Conflict", "No audit events exist for this principal; there is no trail to certify.")
+        # SEC-10: never sign a ledger that does not verify. P7-02 / P8-04: the
+        # walk is anchored on the oldest event the certificate embeds, so EVERY
+        # row from there to the head (all tenants, for linkage) is examined; a
+        # walk that could not reach the anchor is refused, not certified.
+        chain = verify_chain(limit=ANCHORED_CHAIN_CHECK_ROWS, fiduciary_id=fiduciary_id, since=logs[-1]["timestamp"])
+        refusal = _refuse_reason(chain)
+        if refusal:
+            raise ApiError(409, "Conflict", refusal)
         if not chain["intact"]:
             raise ApiError(
                 409,
@@ -674,9 +699,13 @@ class LegalService(Service):
                 "generated_by": "TSI DPDP CMS",
                 "node": "python_port",
                 "chain_verified_at": generated_at.isoformat(),
-                "summary": {key: chain[key] for key in ("rows_checked", "legacy_rows_linkage_only", "truncated")},
+                "summary": {
+                    key: chain.get(key)
+                    for key in ("rows_checked", "legacy_rows_linkage_only", "truncated", "anchored_since")
+                },
             },
             "evidence_trail": evidence_trail,
+            "trail_truncated": trail_truncated,
             "signature_algorithm": "HMAC-SHA256",
         }
         # SEC-10: generation and verification share one canonicalisation rule.
@@ -806,6 +835,44 @@ class LegalService(Service):
                     "valid": False,
                     "reason": "Certificate trail is not in the ledger's order — events were reordered after signing.",
                 }
+            # SEC-10 completeness: compare against the principal's ACTUAL trail
+            # in the certificate's time range, not against the certificate's own
+            # hashes. An event of this principal inside the signed range that is
+            # missing from the trail means the trail is incomplete.
+            principal_id = data.get("principal_id")
+            if principal_id:
+                ledger_trail = [
+                    str(r["current_log_hash"])
+                    for r in db.all(
+                        "SELECT current_log_hash FROM audit_logs WHERE fiduciary_id = %s AND user_id = %s"
+                        " AND timestamp >= %s AND timestamp <= %s ORDER BY timestamp DESC, id DESC",
+                        (
+                            str(row["fiduciary_id"]),
+                            pseudonym(str(principal_id)),
+                            found[claimed[-1]]["timestamp"],
+                            found[claimed[0]]["timestamp"],
+                        ),
+                    )
+                ]
+                if ledger_trail != claimed:
+                    return {
+                        "valid": False,
+                        "reason": "Certificate trail does not match the principal's ledger for the period it covers — events are missing or extra.",
+                    }
+                # Below the anchor: a trail that does not declare itself
+                # truncated claims the principal's WHOLE history, so no earlier
+                # event of theirs may exist.
+                # Certificates issued before the marker existed carry no key and
+                # may hold a capped trail, so the check applies only when the
+                # signed payload explicitly says the trail is complete.
+                if data.get("trail_truncated") is False and db.one(
+                    "SELECT 1 FROM audit_logs WHERE fiduciary_id = %s AND user_id = %s AND timestamp < %s LIMIT 1",
+                    (str(row["fiduciary_id"]), pseudonym(str(principal_id)), found[claimed[-1]]["timestamp"]),
+                ):
+                    return {
+                        "valid": False,
+                        "reason": "Certificate trail omits the principal's earlier events without declaring itself truncated.",
+                    }
         # SEC-10: the chain these hashes anchor to must still verify. P6-12: the
         # walk is bounded (a window), not an unfiltered 2,000,000-row pull into
         # the API process. This certificate's OWN rows were just re-derived above;
@@ -813,13 +880,31 @@ class LegalService(Service):
         # P7-02: a scoped report that examined ZERO of this tenant's rows (rows
         # pushed out of the window by other tenants) is not a clean bill of
         # health — the certificate is refused rather than verified on nothing.
-        chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=str(row["fiduciary_id"]))
-        if chain.get("unexamined_tenant") or (chain.get("truncated") and chain.get("rows_checked", 0) < 1):
+        # P7-02 / P8-04: anchored on the certificate's oldest trail entry, so the
+        # walk covers every row the certificate rests on; an incomplete walk is
+        # "not verified", never "valid".
+        if claimed:
+            chain = verify_chain(
+                limit=ANCHORED_CHAIN_CHECK_ROWS,
+                fiduciary_id=str(row["fiduciary_id"]),
+                since=found[claimed[-1]]["timestamp"],
+            )
+            refusal = _refuse_reason(chain)
+        else:
+            chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=str(row["fiduciary_id"]))
+            refusal = (
+                "The ledger window checked contained none of this fiduciary's rows; the certificate cannot be verified against an unexamined chain."
+                if chain.get("unexamined_tenant")
+                else None
+            )
+        if refusal:
             return {
                 "valid": False,
-                "reason": "The ledger window checked contained none of this fiduciary's rows; the certificate cannot be verified against an unexamined chain.",
-                "chain_intact": False,
+                "verified": False,
+                "reason": refusal,
+                "chain_intact": None,
                 "rows_checked": chain.get("rows_checked", 0),
+                "rows_in_scope_total": chain.get("rows_in_scope_total", 0),
             }
         if not chain["intact"]:
             return {
@@ -827,6 +912,7 @@ class LegalService(Service):
                 "reason": "The audit chain this certificate rests on no longer verifies; treat the certificate and its trail as compromised.",
                 "chain_intact": False,
                 "broken_count": chain.get("broken_count", 0),
+                "foreign_broken_count": chain.get("foreign_broken_count", 0),
             }
         log_event(
             ctx.actor_email or "DPO",

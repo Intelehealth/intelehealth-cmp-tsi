@@ -16,6 +16,9 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "NOTIFICATION_ACKNOWLEDGED": {"en": "You acknowledged a notification."},
     # GR-10: one notice per grievance stage.
     "GRIEVANCE_ASSIGNED": {"en": "Your grievance has been assigned to an officer."},
+    # P7-05: the DPO/officer-facing notice, distinct from the principal's copy,
+    # carrying the grievance reference so the assignee knows which complaint.
+    "GRIEVANCE_ROUTED": {"en": "Grievance {reference_number} ({grievance_type}) has been assigned to you for action."},
     "GRIEVANCE_IN_PROGRESS": {"en": "Your grievance is being worked on."},
     "GRIEVANCE_ESCALATED": {"en": "Your grievance has been escalated because it passed its response deadline."},
     "GRIEVANCE_RESOLVED": {

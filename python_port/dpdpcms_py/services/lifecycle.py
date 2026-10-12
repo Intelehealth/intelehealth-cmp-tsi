@@ -184,9 +184,9 @@ def close_purpose_exec(
     # governs this purpose (configured policy, else the ROPA — the same lookup the
     # sweep uses), closure starts that clock and the sweep raises the purge when
     # it elapses; only an unretained purpose is purged at closure.
-    from ..jobs import _retention_for
+    from .retention import retention_for
 
-    retention_days, _start = _retention_for(fiduciary_id, purpose_id)
+    retention_days, _start = retention_for(fiduciary_id, purpose_id)
     created = 0
     skipped = 0
     actor = _operator_uuid(closed_by)

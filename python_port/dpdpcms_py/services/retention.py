@@ -73,6 +73,62 @@ def applicable_policy(fiduciary_id: str, purpose_id: str | None) -> dict | None:
     )
 
 
+_UNIT_DAYS = {"DAYS": 1, "MONTHS": 30, "YEARS": 365}
+
+
+def retention_for_purposes(fiduciary_id: str, purpose_ids: list[str]) -> dict[str, tuple[int | None, str | None]]:
+    """(retention_period_days, retention_start_event) for each purpose.
+
+    DD-03: the administrator-configured retention policy is the primary clock
+    (a purpose-specific policy beats the catch-all); the fiduciary's active ROPA
+    is the fallback. P8-07: resolved in two queries for ALL the purposes, so a
+    per-purpose request loop does not issue one or two queries per purpose.
+    """
+    wanted = list(dict.fromkeys(pid for pid in purpose_ids if pid))
+    out: dict[str, tuple[int | None, str | None]] = {pid: (None, None) for pid in wanted}
+    if not wanted:
+        return out
+    policies = db.all(
+        """
+        SELECT applicable_purposes, retention_duration_value, retention_duration_unit, retention_start_event
+        FROM retention_policies
+        WHERE fiduciary_id = %s AND status = 'ACTIVE'
+        ORDER BY (applicable_purposes = '[]'::jsonb) ASC, created_at DESC
+        """,
+        (fiduciary_id,),
+    )
+    unresolved = []
+    for pid in wanted:
+        for policy in policies:
+            applies = policy.get("applicable_purposes") or []
+            if not applies or pid in applies:
+                days = int(policy["retention_duration_value"] or 0) * _UNIT_DAYS.get(
+                    str(policy["retention_duration_unit"] or "DAYS").upper(), 1
+                )
+                out[pid] = (days or None, policy.get("retention_start_event"))
+                break
+        else:
+            unresolved.append(pid)
+    if unresolved:
+        ropa = db.all(
+            """
+            SELECT DISTINCT ON (source_purpose_id) source_purpose_id, retention_period_days, retention_start_event
+            FROM ropa_entries
+            WHERE fiduciary_id = %s AND source_purpose_id = ANY(%s) AND status = 'active'
+            ORDER BY source_purpose_id, (retention_start_event = 'CESSATION') DESC, updated_at DESC
+            """,
+            (fiduciary_id, unresolved),
+        )
+        for row in ropa:
+            out[str(row["source_purpose_id"])] = (row.get("retention_period_days"), row.get("retention_start_event"))
+    return out
+
+
+def retention_for(fiduciary_id: str, purpose_id: str) -> tuple[int | None, str | None]:
+    """(retention_period_days, retention_start_event) for one purpose."""
+    return retention_for_purposes(fiduciary_id, [purpose_id]).get(purpose_id, (None, None))
+
+
 def legal_hold_for(fiduciary_id: str, purpose_id: str | None) -> dict | None:
     """CW-11/SA-10: {"legal_reference", "days"} when the law requires keeping the
     data under `purpose_id`, else None. Evaluated when erasure is requested."""

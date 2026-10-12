@@ -459,13 +459,26 @@
             const body = await response.json();
             if (response.status === 403) {
                 result.textContent = 'Verify Chain requires a global administrator session.';
+            } else if (response.ok && body.unexamined_tenant) {
+                // P8-05: "not verified" is not "verified broken". The window held
+                // none of this tenant's rows, so nothing was examined.
+                result.textContent = `NOT VERIFIED: the checked window held none of your ${body.rows_in_scope_total || 0} audit rows`;
+            } else if (response.ok && body.intact && body.coverage_complete === false) {
+                result.textContent = `Chain intact for the window checked, but INCOMPLETE: ${body.rows_checked} of ${body.rows_in_scope_total} rows examined`;
             } else if (response.ok && body.intact) {
                 result.textContent = `Chain intact: ${body.rows_checked} rows checked`
                     + (body.legacy_rows_linkage_only ? ` (${body.legacy_rows_linkage_only} legacy linkage-only)` : '');
+            } else if (response.ok && !body.broken_count && body.foreign_broken_count) {
+                result.textContent = `Chain BROKEN outside your records: ${body.foreign_broken_count} break(s) in the shared ledger your entries link through`;
+                console.warn('Audit chain verification failed', body);
             } else {
                 const failed = body && body.broken_count !== undefined ? body.broken_count : (body.message || 'failed');
                 result.textContent = `Chain BROKEN: ${failed}`;
                 console.warn('Audit chain verification failed', body);
+            }
+            const full = body && body.last_full_verification;
+            if (response.ok && full) {
+                result.textContent += ` · last full-ledger check ${full.verified_at}: ${full.intact ? 'intact' : 'BROKEN'}`;
             }
         } catch (e) {
             result.textContent = 'Verification failed: ' + esc(e.message);

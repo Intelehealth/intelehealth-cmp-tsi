@@ -16,7 +16,14 @@
 -- append-only (UPDATE/DELETE/TRUNCATE) trigger.
 --
 -- Idempotent: functions and triggers are created/dropped conditionally.
+-- P8-03: also idempotent across this file's OWN previous version, which named
+-- its function enforce_notification_delivery_floor() and its trigger
+-- notification_deliveries_floor. A database that applied that version would
+-- otherwise keep the old trigger (double-firing) and an orphaned function.
 -- ============================================================================
+
+DROP TRIGGER IF EXISTS notification_deliveries_floor ON notification_deliveries;
+DROP FUNCTION IF EXISTS enforce_notification_delivery_floor();
 
 CREATE OR REPLACE FUNCTION enforce_delivery_retention_floor() RETURNS trigger AS $$
 BEGIN

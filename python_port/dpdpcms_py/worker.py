@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from . import delivery, jobs, throttle, webhooks
+from . import audit, delivery, jobs, throttle, webhooks
 
 log = logging.getLogger("dpdpcms.worker")
 
@@ -35,6 +35,8 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "sso_nonces": jobs.prune_sso_nonces,
         "nominations": jobs.expire_nominations,
         "webhook_deliveries": jobs.prune_old_webhook_deliveries,
+        "notification_deliveries": jobs.prune_old_notification_deliveries,
+        "audit_chain": audit.record_chain_verification,
     }
     # Each sweep is isolated: one failing sweep is logged and reported, and the
     # rest of the cycle still runs.
@@ -65,6 +67,8 @@ def list_sweeps() -> list[str]:
         "jobs.prune_sso_nonces                    (SEC-14 one-time SSO nonces)",
         "jobs.expire_nominations                  (P6-07 nomination window expiry)",
         "jobs.prune_old_webhook_deliveries          (SEC-13/P5-07 webhook retention)",
+        "jobs.prune_old_notification_deliveries   (SA-13 notification delivery retention)",
+        "audit.record_chain_verification         (P6-12 daily full-ledger verification)",
     ]
 
 
