@@ -420,13 +420,18 @@
             // P9-08 / LG-07: the remaining hashed columns and both hashes, so the
             // exported ledger can be re-verified by whoever receives it.
             "Log ID": log.id,
+            "Fiduciary ID": log.fiduciary_id,
             "Purpose ID": log.purpose_id,
             "Consent Status": log.consent_status,
             "Initiator": log.initiator,
             "Source IP": log.source_ip,
             "Raw Timestamp (UTC)": log.timestamp,
             "Previous Log Hash": log.prev_log_hash,
-            "Current Log Hash": log.current_log_hash
+            "Current Log Hash": log.current_log_hash,
+            // P10-06 / LG-07: system_metadata carries the hash version the row
+            // was sealed under; without it the row cannot be re-verified.
+            "System Metadata": log.system_metadata == null ? ''
+                : (typeof log.system_metadata === 'object' ? JSON.stringify(log.system_metadata) : log.system_metadata)
         }));
 
         // Generate worksheet and workbook

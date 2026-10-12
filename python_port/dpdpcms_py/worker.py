@@ -37,6 +37,7 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "webhook_deliveries": jobs.prune_old_webhook_deliveries,
         "notification_deliveries": jobs.prune_old_notification_deliveries,
         "audit_chain": audit.record_chain_verification,
+        "security_monitor": jobs.flag_security_anomalies,
     }
     # Each sweep is isolated: one failing sweep is logged and reported, and the
     # rest of the cycle still runs.
@@ -69,6 +70,7 @@ def list_sweeps() -> list[str]:
         "jobs.prune_old_webhook_deliveries          (SEC-13/P5-07 webhook retention)",
         "jobs.prune_old_notification_deliveries   (SA-13 notification delivery retention)",
         "audit.record_chain_verification         (P6-12 daily full-ledger verification)",
+        "jobs.flag_security_anomalies            (Rule 6(1)(c) failed sign-in bursts)",
     ]
 
 

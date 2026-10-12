@@ -6,7 +6,7 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, page_limit, require, tenant_filter
+from .base import Service, canonical_purpose_id, page_limit, require, tenant_filter
 from .catalog import resolve_fiduciary
 
 VALID_UNITS = {"DAYS", "MONTHS", "YEARS"}
@@ -52,7 +52,8 @@ def applicable_policy(fiduciary_id: str, purpose_id: str | None) -> dict | None:
     """The ACTIVE retention policy governing `purpose_id`: a purpose-specific one
     beats the fiduciary's catch-all (empty applicable_purposes). For "ALL" (a
     whole-account erasure) any policy with a legal basis governs."""
-    if purpose_id in (None, "", "ALL"):
+    purpose_id = canonical_purpose_id(purpose_id)
+    if purpose_id in ("", "ALL"):
         return db.one(
             """
             SELECT * FROM retention_policies
@@ -65,12 +66,23 @@ def applicable_policy(fiduciary_id: str, purpose_id: str | None) -> dict | None:
         """
         SELECT * FROM retention_policies
         WHERE fiduciary_id = %s AND status = 'ACTIVE'
-          AND (applicable_purposes = '[]'::jsonb OR applicable_purposes ? %s)
+          AND (applicable_purposes = '[]'::jsonb
+               OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(applicable_purposes) AS a
+                          WHERE lower(btrim(a)) = %s))
         ORDER BY (applicable_purposes = '[]'::jsonb) ASC, created_at DESC
         LIMIT 1
         """,
         (fiduciary_id, purpose_id),
     )
+
+
+def _canonical_purposes(raw: object) -> list[str]:
+    """P10-04: applicable_purposes are stored canonical, like every purpose id."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ApiError(400, "Bad Request", "applicable_purposes must be an array of purpose ids.")
+    return list(dict.fromkeys(canonical_purpose_id(p) for p in raw if str(p or "").strip()))
 
 
 _UNIT_DAYS = {"DAYS": 1, "MONTHS": 30, "YEARS": 365}
@@ -84,8 +96,12 @@ def retention_for_purposes(fiduciary_id: str, purpose_ids: list[str]) -> dict[st
     is the fallback. P8-07: resolved in two queries for ALL the purposes, so a
     per-purpose request loop does not issue one or two queries per purpose.
     """
-    wanted = list(dict.fromkeys(pid for pid in purpose_ids if pid))
-    out: dict[str, tuple[int | None, str | None]] = {pid: (None, None) for pid in wanted}
+    # P10-04: resolved on the canonical id, so 'Marketing' finds the hold
+    # authored for 'marketing'. The result is keyed by the ids as passed.
+    asked = list(dict.fromkeys(pid for pid in purpose_ids if pid))
+    out: dict[str, tuple[int | None, str | None]] = {pid: (None, None) for pid in asked}
+    wanted = list(dict.fromkeys(canonical_purpose_id(pid) for pid in asked))
+    resolved: dict[str, tuple[int | None, str | None]] = {}
     if not wanted:
         return out
     policies = db.all(
@@ -100,27 +116,33 @@ def retention_for_purposes(fiduciary_id: str, purpose_ids: list[str]) -> dict[st
     unresolved = []
     for pid in wanted:
         for policy in policies:
-            applies = policy.get("applicable_purposes") or []
+            applies = {canonical_purpose_id(a) for a in policy.get("applicable_purposes") or []}
             if not applies or pid in applies:
                 days = int(policy["retention_duration_value"] or 0) * _UNIT_DAYS.get(
                     str(policy["retention_duration_unit"] or "DAYS").upper(), 1
                 )
-                out[pid] = (days or None, policy.get("retention_start_event"))
+                resolved[pid] = (days or None, policy.get("retention_start_event"))
                 break
         else:
             unresolved.append(pid)
     if unresolved:
         ropa = db.all(
             """
-            SELECT DISTINCT ON (source_purpose_id) source_purpose_id, retention_period_days, retention_start_event
+            SELECT DISTINCT ON (lower(btrim(source_purpose_id)))
+                   lower(btrim(source_purpose_id)) AS source_purpose_id, retention_period_days, retention_start_event
             FROM ropa_entries
-            WHERE fiduciary_id = %s AND source_purpose_id = ANY(%s) AND status = 'active'
-            ORDER BY source_purpose_id, (retention_start_event = 'CESSATION') DESC, updated_at DESC
+            WHERE fiduciary_id = %s AND lower(btrim(source_purpose_id)) = ANY(%s) AND status = 'active'
+            ORDER BY lower(btrim(source_purpose_id)), (retention_start_event = 'CESSATION') DESC, updated_at DESC
             """,
             (fiduciary_id, unresolved),
         )
         for row in ropa:
-            out[str(row["source_purpose_id"])] = (row.get("retention_period_days"), row.get("retention_start_event"))
+            resolved[str(row["source_purpose_id"])] = (
+                row.get("retention_period_days"),
+                row.get("retention_start_event"),
+            )
+    for pid in asked:
+        out[pid] = resolved.get(canonical_purpose_id(pid), (None, None))
     return out
 
 
@@ -197,7 +219,7 @@ class RetentionService(Service):
                 (
                     name,
                     payload.get("description"),
-                    db.as_jsonb(payload.get("applicable_purposes") or []),
+                    db.as_jsonb(_canonical_purposes(payload.get("applicable_purposes"))),
                     db.as_jsonb(payload.get("applicable_data_categories") or []),
                     value,
                     unit,
@@ -222,7 +244,7 @@ class RetentionService(Service):
                 fid,
                 name,
                 payload.get("description"),
-                db.as_jsonb(payload.get("applicable_purposes") or []),
+                db.as_jsonb(_canonical_purposes(payload.get("applicable_purposes"))),
                 db.as_jsonb(payload.get("applicable_data_categories") or []),
                 value,
                 unit,

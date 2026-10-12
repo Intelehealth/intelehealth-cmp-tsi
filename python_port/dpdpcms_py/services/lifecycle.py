@@ -7,7 +7,7 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, require
+from .base import Service, canonical_purpose_id, require
 
 VALID_DURATION_TYPES = {"OPEN_ENDED", "TIME_BOUND"}
 VALID_STATES = {"OPEN", "CLOSED"}
@@ -35,7 +35,7 @@ def extract_purposes(policy_content: Any) -> list[dict[str, Any]]:
         for purpose in block.get("data_processing_purposes") or []:
             if not isinstance(purpose, dict) or not purpose.get("id"):
                 continue
-            seen[str(purpose["id"])] = purpose
+            seen[canonical_purpose_id(purpose["id"])] = purpose
     return list(seen.values())
 
 
@@ -84,7 +84,8 @@ def sync_purpose_lifecycle(fiduciary_id: str, policy_content: Any) -> None:
     if not purposes:
         return
     for purpose in purposes:
-        pid = str(purpose["id"])
+        # P10-04: one lifecycle row per purpose, under its canonical id.
+        pid = canonical_purpose_id(purpose["id"])
         duration = str(purpose.get("duration_type") or "").replace("-", "_").upper()
         if duration not in VALID_DURATION_TYPES:
             continue
@@ -109,19 +110,33 @@ def sync_purpose_lifecycle(fiduciary_id: str, policy_content: Any) -> None:
 
 
 def record_alert(
-    fiduciary_id: str, alert_type: str, event_ref_id: str | None = None, payload: dict | None = None
+    fiduciary_id: str,
+    alert_type: str,
+    event_ref_id: str | None = None,
+    payload: dict | None = None,
+    *,
+    recipient_type: str = "FIDUCIARY",
+    recipient_id: str | None = None,
 ) -> str | None:
-    """Insert an alert row for a fiduciary (NT-06). Used by close_purpose and the alert API."""
+    """Insert an alert row (NT-06): for the fiduciary by default, or for one
+    PROCESSOR app (CW-08). Used by close_purpose, withdrawal and the alert API."""
     if not fiduciary_id or not alert_type:
         return None
     try:
         row = db.insert_returning(
             """
             INSERT INTO alerts (fiduciary_id, recipient_type, recipient_id, alert_type, event_ref_id, payload)
-            VALUES (%s, 'FIDUCIARY', %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (str(fiduciary_id), str(fiduciary_id), alert_type, event_ref_id, db.as_jsonb(payload or {})),
+            (
+                str(fiduciary_id),
+                recipient_type,
+                str(recipient_id or fiduciary_id),
+                alert_type,
+                event_ref_id,
+                db.as_jsonb(payload or {}),
+            ),
         )
     except Exception:
         return None
@@ -138,6 +153,8 @@ def record_alert(
             {
                 "alert_id": alert_id,
                 "alert_type": alert_type,
+                "recipient_type": recipient_type,
+                "recipient_id": str(recipient_id) if recipient_id else None,
                 "event_ref_id": str(event_ref_id) if event_ref_id else None,
                 "purpose_id": (payload or {}).get("purpose_id"),
             },
@@ -145,6 +162,28 @@ def record_alert(
     except Exception:  # pragma: no cover - auditing must not lose the alert
         pass
     return alert_id
+
+
+def notify_processors(
+    fiduciary_id: str,
+    alert_type: str,
+    event_ref_id: str | None,
+    payload: dict,
+    category: str = "NOTIFICATION",
+) -> list[str]:
+    """CW-08: every linked processor hears about a withdrawal, an erasure or a
+    purpose closure on its own endpoint, and gets its own acknowledgeable
+    PROCESSOR alert - one endpoint per category no longer stands in for all of
+    them. Returns the processor app ids notified."""
+    from ..webhooks import fan_out_to_processors
+
+    try:
+        apps = fan_out_to_processors(fiduciary_id, alert_type, payload, category=category)
+    except Exception:  # pragma: no cover - a fan-out failure never undoes the action
+        return []
+    for app_id in apps:
+        record_alert(fiduciary_id, alert_type, event_ref_id, payload, recipient_type="PROCESSOR", recipient_id=app_id)
+    return apps
 
 
 def close_purpose_exec(
@@ -165,7 +204,7 @@ def close_purpose_exec(
     """
     if not fiduciary_id or not purpose_id:
         raise ApiError(400, "Bad Request", "fiduciary_id and purpose_id are required.")
-    purpose_id = str(purpose_id)
+    purpose_id = canonical_purpose_id(purpose_id)
     action = str(deidentification_action or "ERASE").replace("-", "_").upper()
     if action not in VALID_DEIDENTIFICATION_ACTIONS:
         raise ApiError(
@@ -181,15 +220,17 @@ def close_purpose_exec(
     if row["state"] == "CLOSED":
         raise ApiError(409, "Conflict", f"Purpose '{purpose_id}' is already closed.")
 
-    # Distinct principals who currently hold an active grant for this purpose.
+    # Distinct principals whose data was ever collected under this purpose:
+    # every principal who granted it in ANY record, active or retired. PL-03:
+    # a principal who already WITHDREW the purpose still has data held under
+    # it, and closure is what orders that data erased.
     holders = db.all(
         """
         SELECT DISTINCT cr.user_id
         FROM consent_records cr,
              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
         WHERE cr.fiduciary_id = %s
-          AND cr.is_active_consent IS TRUE
-          AND lower(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id')) = lower(%s)
+          AND lower(btrim(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id'))) = %s
           AND (
                 p ->> 'consent_granted' = 'true'
                 OR lower(p ->> 'status') IN ('granted', 'consent_given')
@@ -280,6 +321,13 @@ def close_purpose_exec(
             enqueue_alert_dispatch(fiduciary_id, alert_id)
         except Exception:  # pragma: no cover
             pass
+    processors = notify_processors(
+        fiduciary_id,
+        "PURPOSE_CLOSED",
+        purpose_id,
+        {"purpose_id": purpose_id, "action": action, "retention_days": retention_days},
+        category="PURGE",
+    )
 
     log_event(
         closed_by or "DPO",
@@ -300,6 +348,7 @@ def close_purpose_exec(
         # Non-null = data is kept for this many days from closure, then purged by the sweep.
         "retention_deferred_days": retention_days,
         "alert_id": alert_id,
+        "processors_notified": len(processors),
     }
 
 
@@ -318,7 +367,7 @@ class PurposeLifecycleService(Service):
             params.append(state)
         if ctx.payload.get("purpose_id"):
             where.append("purpose_id = %s")
-            params.append(ctx.payload["purpose_id"])
+            params.append(canonical_purpose_id(ctx.payload["purpose_id"]))
         params.append(int(ctx.payload.get("limit") or 100))
         return db.to_jsonable(
             db.all(
@@ -330,7 +379,7 @@ class PurposeLifecycleService(Service):
     def set_purpose_state(self, ctx: RequestContext) -> dict:
         """PL-02: hold the open/closed state of a purpose."""
         fid = str(require(ctx.payload.get("fiduciary_id") or ctx.fiduciary_id, "fiduciary_id"))
-        purpose_id = require(ctx.payload.get("purpose_id"), "purpose_id")
+        purpose_id = canonical_purpose_id(require(ctx.payload.get("purpose_id"), "purpose_id"))
         state = str(require(ctx.payload.get("state"), "state")).upper()
         if state not in VALID_STATES:
             raise ApiError(400, "Bad Request", "state must be OPEN or CLOSED.")
@@ -346,7 +395,8 @@ class PurposeLifecycleService(Service):
                 closed_by=actor,
             )
         row = db.one(
-            "SELECT state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s", (fid, purpose_id)
+            "SELECT state, closed_at FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
+            (fid, purpose_id),
         )
         if not row:
             raise ApiError(404, "Not Found", f"Purpose '{purpose_id}' is not declared for this fiduciary.")
@@ -362,15 +412,29 @@ class PurposeLifecycleService(Service):
             # P9-04: the purges the closure (or its retention clock) raised are
             # moot once the purpose is open again. Cancel the ones no processor
             # has started, so nobody erases data for a purpose that is live.
+            # P10-05: only THIS purpose's purges (canonical id, so never a
+            # case-variant one), only those raised since this closure, and only
+            # for principals whose consent to it is still active - a principal
+            # who withdrew is still owed the erasure the closure ordered.
             cur.execute(
                 """
-                UPDATE purge_requests SET status = 'CANCELLED', last_updated_at = NOW()
-                WHERE fiduciary_id = %s AND lower(purpose_id) = lower(%s)
-                  AND trigger_event IN ('PurposeClosed', 'RetentionPolicyExpiry')
-                  AND status = 'PENDING'
+                UPDATE purge_requests pr SET status = 'CANCELLED', last_updated_at = NOW()
+                WHERE pr.fiduciary_id = %s AND pr.purpose_id = %s
+                  AND pr.trigger_event IN ('PurposeClosed', 'RetentionPolicyExpiry')
+                  AND pr.status = 'PENDING'
+                  AND (%s::timestamptz IS NULL OR pr.initiated_at >= %s::timestamptz)
+                  AND EXISTS (
+                        SELECT 1
+                        FROM consent_records cr,
+                             LATERAL jsonb_array_elements(cr.data_point_consents) AS p
+                        WHERE cr.fiduciary_id = pr.fiduciary_id AND cr.user_id = pr.user_id
+                          AND cr.is_active_consent IS TRUE
+                          AND lower(btrim(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id'))) = pr.purpose_id
+                          AND (p ->> 'consent_granted' = 'true' OR lower(p ->> 'status') IN ('granted', 'consent_given'))
+                      )
                 RETURNING id
                 """,
-                (fid, purpose_id),
+                (fid, purpose_id, row.get("closed_at"), row.get("closed_at")),
             )
             cancelled = len(cur.fetchall())
         log_event(
@@ -390,7 +454,7 @@ class PurposeLifecycleService(Service):
 
         return close_purpose_exec(
             fid,
-            require(ctx.payload.get("purpose_id"), "purpose_id"),
+            canonical_purpose_id(require(ctx.payload.get("purpose_id"), "purpose_id")),
             reason=ctx.payload.get("reason"),
             deidentification_action=ctx.payload.get("deidentification_action", "ERASE"),
             closed_by=authenticated_user_id(ctx),

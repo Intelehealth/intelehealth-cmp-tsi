@@ -18,28 +18,61 @@ DEFAULT_CATEGORY = "NOTIFICATION"
 
 
 def queue_webhook(
-    fiduciary_id: str, event_type: str, payload: dict[str, Any], category: str = DEFAULT_CATEGORY
+    fiduciary_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    category: str = DEFAULT_CATEGORY,
+    app_id: str | None = None,
 ) -> None:
     """Record an outbound webhook event for the dispatcher worker to deliver.
 
     The event is queued here (inline on the request thread) and delivered
     asynchronously by the worker. Delivery failures are retried up to the
     configured limit without blocking the API call that raised the event.
+    `app_id` addresses the event to one processor's own endpoint (CW-08)
+    instead of the fiduciary's.
     """
     if not fiduciary_id or not event_type:
         return
     try:
         db.execute(
             """
-            INSERT INTO webhook_deliveries (fiduciary_id, category, event_type, payload)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO webhook_deliveries (fiduciary_id, category, event_type, payload, app_id)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (str(fiduciary_id), category or DEFAULT_CATEGORY, event_type, db.as_jsonb(payload)),
+            (str(fiduciary_id), category or DEFAULT_CATEGORY, event_type, db.as_jsonb(payload), app_id),
         )
     except Exception:
         # A failed webhook queue must never break the consent action that
         # produced the event. The event is still reachable through audit.
         log.exception("Failed to queue webhook event %s for %s", event_type, fiduciary_id)
+
+
+def linked_processors(fiduciary_id: str) -> list[str]:
+    """CW-08: the processors (apps) acting for a fiduciary - every ACTIVE app."""
+    try:
+        rows = db.all("SELECT id FROM apps WHERE fiduciary_id = %s AND status = 'ACTIVE'", (str(fiduciary_id),))
+    except Exception:
+        log.exception("Could not list processors for %s", fiduciary_id)
+        return []
+    return [str(row["id"]) for row in rows]
+
+
+def fan_out_to_processors(
+    fiduciary_id: str, event_type: str, payload: dict[str, Any], category: str = DEFAULT_CATEGORY
+) -> list[str]:
+    """CW-08: tell every linked processor, not only the fiduciary.
+
+    One delivery per processor, addressed to that processor's own endpoint
+    (processor_webhook_configs); a processor with no endpoint configured is
+    recorded as SKIPPED by the dispatcher, and still has the PROCESSOR alert
+    the caller raises, which it can poll and must acknowledge. Returns the
+    processor app ids notified.
+    """
+    apps = linked_processors(fiduciary_id)
+    for app_id in apps:
+        queue_webhook(fiduciary_id, event_type, payload, category=category, app_id=app_id)
+    return apps
 
 
 def _decrypt_secret(secret_enc: str | None) -> str:
@@ -132,7 +165,7 @@ def process_pending_webhooks(limit: int | None = None) -> dict[str, int]:
     )
     deliveries = db.all(
         """
-        SELECT id, fiduciary_id, category, event_type, payload, attempt_count
+        SELECT id, fiduciary_id, category, event_type, payload, attempt_count, app_id
         FROM webhook_deliveries
         WHERE status = 'PENDING'
         ORDER BY created_at
@@ -157,14 +190,26 @@ def process_pending_webhooks(limit: int | None = None) -> dict[str, int]:
             continue
         fid = str(delivery["fiduciary_id"])
         category = delivery["category"] or DEFAULT_CATEGORY
-        configs = db.all(
-            """
-            SELECT fiduciary_id, category, webhook_url, secret_enc, enabled
-            FROM webhook_configs
-            WHERE fiduciary_id = %s AND category = %s AND enabled IS TRUE
-            """,
-            (fid, category),
-        )
+        if delivery.get("app_id"):
+            # CW-08: a processor-addressed event goes to that processor's own
+            # endpoint only - never to the fiduciary's or another processor's.
+            configs = db.all(
+                """
+                SELECT fiduciary_id, category, webhook_url, secret_enc, enabled
+                FROM processor_webhook_configs
+                WHERE fiduciary_id = %s AND app_id = %s AND category = %s AND enabled IS TRUE
+                """,
+                (fid, str(delivery["app_id"]), category),
+            )
+        else:
+            configs = db.all(
+                """
+                SELECT fiduciary_id, category, webhook_url, secret_enc, enabled
+                FROM webhook_configs
+                WHERE fiduciary_id = %s AND category = %s AND enabled IS TRUE
+                """,
+                (fid, category),
+            )
         if not configs:
             # No enabled webhook for this event — nothing to deliver.
             db.execute("UPDATE webhook_deliveries SET status = 'SKIPPED' WHERE id = %s", (delivery_id,))

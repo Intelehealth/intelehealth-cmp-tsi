@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -9,7 +10,15 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
-from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, require, tenant_filter
+from .base import (
+    Service,
+    bind_principal_field,
+    canonical_purpose_id,
+    ensure_principal_owns,
+    page_limit,
+    require,
+    tenant_filter,
+)
 from .catalog import resolve_fiduciary
 
 log = logging.getLogger("dpdpcms.compliance")
@@ -52,8 +61,14 @@ GRIEVANCE_STAGE_NOTICES = {
 }
 
 
-def _notify_grievance_stage(user_id: str, fiduciary_id: str, stage: str, context: dict | None = None) -> None:
+def _notify_grievance_stage(
+    user_id: str, fiduciary_id: str, stage: str, context: dict | None = None, language: str | None = None
+) -> None:
     notice = GRIEVANCE_STAGE_NOTICES.get(stage)
+    # GR-03: the principal is answered in the language they filed in, not the
+    # language of their last consent; delivery reads context.language first.
+    if language:
+        context = {**(context or {}), "language": language}
     if notice:
         db.execute(
             "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
@@ -134,8 +149,8 @@ def erase_cms_copy(
     """SA-13: irreversibly de-identify what the CMS itself holds about a principal.
 
     The processor deletes the business data; this removes the CMS's own copy of
-    the identifier. Every row keyed by the principal is re-keyed to a keyed hash
-    (HMAC with the deployment's lookup salt), so the consent evidence trail stays
+    the identifier. Every row keyed by the principal is re-keyed to one random
+    token per erasure (no key maps it back), so the consent evidence trail stays
     countable but no longer names anyone, and free-text grievance content is
     blanked. SEC-15: the covered set is every table/schema column that stores a
     principal identifier (see ERASURE_TARGETS, kept next to the test that
@@ -152,13 +167,15 @@ def erase_cms_copy(
     after that transaction commits: the caller passes `pending_files` and
     removes them itself.
     """
-    from ..security import pseudonym
-
     if cur is not None and pending_files is None:
         # Unlinking files inside the caller's uncommitted transaction would test
         # "still referenced?" against rows this transaction has not yet deleted.
         raise ValueError("erase_cms_copy(cur=...) needs pending_files; remove the files after commit.")
-    token = f"erased:{pseudonym(f'{fiduciary_id}:{user_id}')}"
+    # SA-13: cryptographic erasure. The replacement token is random, not a
+    # keyed hash of the identifier, so nobody - not even a holder of the lookup
+    # salt - can recompute it from the original id and re-link the evidence
+    # rows to the person. The rows stay countable; they no longer name anyone.
+    token = f"erased:{secrets.token_hex(16)}"
     counts: dict[str, int] = {}
     with _cursor(cur) as cur:
         # P5-01: grievance handling runs BEFORE the generic loop below. The
@@ -386,7 +403,7 @@ def deidentify_purpose_cms_copy(
                 SET data_point_consents = (
                     SELECT jsonb_agg(
                         CASE
-                          WHEN lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) = %s
+                          WHEN lower(btrim(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id'))) = %s
                           THEN jsonb_build_object(
                                  'data_point_id', %s::text,
                                  'consent_granted', false,
@@ -401,9 +418,9 @@ def deidentify_purpose_cms_copy(
                 )
                 WHERE fiduciary_id = %s AND user_id = %s
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
-                              WHERE lower(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id')) = %s)
+                              WHERE lower(btrim(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id'))) = %s)
                 """,
-                (purpose_id.lower(), marker, fiduciary_id, user_id, purpose_id.lower()),
+                (canonical_purpose_id(purpose_id), marker, fiduciary_id, user_id, canonical_purpose_id(purpose_id)),
             )
         else:
             cur.execute(
@@ -412,13 +429,13 @@ def deidentify_purpose_cms_copy(
                 SET data_point_consents = (
                     SELECT COALESCE(jsonb_agg(p), '[]'::jsonb)
                     FROM jsonb_array_elements(data_point_consents) AS p
-                    WHERE lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) IS DISTINCT FROM %s
+                    WHERE lower(btrim(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id'))) IS DISTINCT FROM %s
                 )
                 WHERE fiduciary_id = %s AND user_id = %s
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
-                              WHERE lower(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id')) = %s)
+                              WHERE lower(btrim(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id'))) = %s)
                 """,
-                (purpose_id.lower(), fiduciary_id, user_id, purpose_id.lower()),
+                (canonical_purpose_id(purpose_id), fiduciary_id, user_id, canonical_purpose_id(purpose_id)),
             )
         return {"consent_records_touched": cur.rowcount}
 
@@ -764,14 +781,15 @@ class GrievanceService(Service):
                 " communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb WHERE id = %s",
                 (str(target["id"]), department, db.as_jsonb([entry]), gid),
             )
-            _notify_grievance_stage(user_id, fid, "ASSIGNED")
+            _notify_grievance_stage(user_id, fid, "ASSIGNED", language=language)
             # P7-05: the ASSIGNED stage notice above goes to the PRINCIPAL. The
             # person who must act gets a separate, officer-facing notice carrying
             # the grievance reference.
             _notify_grievance_assignee(str(target["id"]), fid, gid, reference_number, grievance_type)
         db.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED')",
-            (user_id, fid),
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
+            " VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_SUBMITTED', %s)",
+            (user_id, fid, db.as_jsonb({"reference_number": reference_number, "language": language})),
         )
         log_event(
             user_id,
@@ -889,7 +907,7 @@ class GrievanceService(Service):
                    communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb,
                    last_updated_at = NOW()
             WHERE id = %s{scope}
-            RETURNING user_id, fiduciary_id, reference_number, resolution_details
+            RETURNING user_id, fiduciary_id, reference_number, resolution_details, language
             """,
             (status, resolution, status, db.as_jsonb([entry]), gid, *scope_params),
         )
@@ -905,7 +923,7 @@ class GrievanceService(Service):
                 "status_word": status.lower(),
                 "resolution_details": row.get("resolution_details") or "",
             }
-        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), status, context)
+        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), status, context, row.get("language"))
         log_event(
             ctx.actor_email or "DPO",
             str(row["fiduciary_id"]),
@@ -938,14 +956,14 @@ class GrievanceService(Service):
             WHERE g.id = %s AND o.id = %s AND o.status = 'ACTIVE'
               AND (o.fiduciary_id = g.fiduciary_id OR o.role = 'ADMIN')
               AND (%s::uuid IS NULL OR g.fiduciary_id = %s::uuid)
-            RETURNING g.user_id, g.fiduciary_id, g.reference_number, g.type, g.status, o.id AS operator_id
+            RETURNING g.user_id, g.fiduciary_id, g.reference_number, g.type, g.status, g.language, o.id AS operator_id
             """,
             (db.as_jsonb([entry]), gid, operator_id, ctx.fiduciary_id, ctx.fiduciary_id),
         )
         if not row:
             raise ApiError(404, "Not Found", "Grievance or operator not found.")
         fid = str(row["fiduciary_id"])
-        _notify_grievance_stage(str(row["user_id"]), fid, "ASSIGNED")
+        _notify_grievance_stage(str(row["user_id"]), fid, "ASSIGNED", language=row.get("language"))
         # P7-05: the assignee hears about it too, with the grievance reference.
         _notify_grievance_assignee(str(row["operator_id"]), fid, str(gid), row.get("reference_number"), row.get("type"))
         log_event(

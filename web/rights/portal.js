@@ -121,6 +121,41 @@ async function publicApiCall(path, func, bodyExtra) {
     return await res.json();
 }
 
+/**
+ * Downloads a file-returning call (UD-04 consent history CSV / PDF) as a file.
+ * Returns true when a file was saved.
+ */
+async function apiDownload(path, func, bodyExtra, filename) {
+    const session = getSession();
+    const headers = { 'Content-Type': 'application/json; charset=UTF-8' };
+    if (session) headers['Authorization'] = 'Bearer ' + session.token;
+    try {
+        const res = await fetch(PORTAL_BASE_URL + path, {
+            method: 'POST', headers, body: JSON.stringify({ _func: func, ...bodyExtra })
+        });
+        if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return false; }
+        if (!res.ok) return false;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return true;
+    } catch (e) {
+        console.error('Portal download error:', e);
+        return false;
+    }
+}
+
+/** Purpose ids are case-insensitive machine ids (P10-04): compare them canonically. */
+function purposeKey(id) {
+    return String(id == null ? '' : id).trim().toLowerCase();
+}
+
 function esc(s) {
     if (s == null) return '';
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');

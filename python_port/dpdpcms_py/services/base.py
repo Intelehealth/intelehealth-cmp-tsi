@@ -20,6 +20,65 @@ def require(value: Any, name: str) -> Any:
     return value
 
 
+def canonical_purpose_id(value: Any) -> str:
+    """P10-04: the one spelling a purpose id is stored and compared under.
+
+    Purpose ids are machine identifiers, so 'Marketing' and 'marketing' are the
+    same purpose to the consent gate, the lifecycle, the retention clock and the
+    legal hold alike. Canonicalising on write (and db/26 on the stored rows) is
+    what keeps those four from disagreeing. 'ALL' is the whole-account sentinel
+    and is left as written.
+    """
+    text = str(value if value is not None else "").strip()
+    return text if text == "ALL" else text.lower()
+
+
+# P10-01: the aliases a consent decision may name its purpose by, in the one
+# order every reader uses - the same order as the SQL COALESCE in the erasure,
+# closure and retention queries.
+POINT_ID_KEYS = ("data_point_id", "purpose_id", "id")
+
+
+def point_purpose_id(point: Any) -> str:
+    """The canonical purpose id a stored consent decision names ('' if none)."""
+    if not isinstance(point, dict):
+        return ""
+    for key in POINT_ID_KEYS:
+        if point.get(key) not in (None, ""):
+            return canonical_purpose_id(point[key])
+    return ""
+
+
+def canonical_consent_points(points: Any) -> Any:
+    """P10-01: rewrite consent decisions onto data_point_id alone, canonical.
+
+    A decision that names two DIFFERENT purposes through two aliases (e.g.
+    {purpose_id: 'care', id: 'research'}) is refused: the declaration gate and
+    the validator could otherwise read it as two different purposes. Anything
+    that is not a list of objects is returned unchanged for the callers' own
+    validation to reject.
+    """
+    if not isinstance(points, list):
+        return points
+    out: list[Any] = []
+    for point in points:
+        if not isinstance(point, dict):
+            out.append(point)
+            continue
+        named = {canonical_purpose_id(point[k]) for k in POINT_ID_KEYS if point.get(k) not in (None, "")}
+        if len(named) > 1:
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"A consent decision names more than one purpose ({sorted(named)}); use data_point_id only.",
+            )
+        clean = {k: v for k, v in point.items() if k not in ("purpose_id", "id")}
+        if named:
+            clean["data_point_id"] = named.pop()
+        out.append(clean)
+    return out
+
+
 def page_limit(payload: dict, default: int = 10) -> tuple[int, int]:
     page = max(1, int(payload.get("page") or 1))
     limit = min(500, max(1, int(payload.get("limit") or default)))

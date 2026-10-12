@@ -101,7 +101,7 @@ More detail: [python_port/README.md](python_port/README.md).
 
 ## Database upgrades
 
-Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `25_p9_remediation.sql`).
+Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `26_p10_remediation.sql`).
 
 | Script | Purpose |
 | --- | --- |
@@ -118,6 +118,7 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `23_notification_delivery_floor.sql` | Database-enforced one-year DELETE floor on `notification_deliveries` (P5-07) |
 | `24_p8_remediation.sql` | UPDATE floor on delivery personal-data columns, notification delete floor, audit chain index and background verification table, notification context |
 | `25_p9_remediation.sql` | Append-only trigger on `consent_records` (P9-05), `CANCELLED` purge status (P9-04), grievance `language` column (GR-03) |
+| `26_p10_remediation.sql` | Canonical purpose ids with canonicalising triggers (P10-04/05/09), one active consent per principal per policy (P10-11), per-processor webhooks (CW-08), legacy template names merged (NT-02), narrower `consent_records` maintenance opt-in (P9-05) |
 
 **Existing deployments** that already have a Postgres volume must apply `13`–`25` manually (each script is idempotent). Example:
 
@@ -127,7 +128,8 @@ for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction
          db/17_defect_fixes.sql db/18_brd_traceability.sql \
          db/19_audit_ledger_integrity.sql db/20_security_gaps.sql \
          db/21_defect_remediation_p6.sql db/22_sec18_null_fiduciary_block.sql \
-         db/23_notification_delivery_floor.sql db/24_p8_remediation.sql          db/25_p9_remediation.sql; do
+         db/23_notification_delivery_floor.sql db/24_p8_remediation.sql          db/25_p9_remediation.sql \
+         db/26_p10_remediation.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```

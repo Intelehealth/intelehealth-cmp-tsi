@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 from email.message import EmailMessage
 
 from . import db
 from .audit import log_event
 from .config import settings
-from .defaults import DEFAULT_NOTIFICATION_MESSAGES
+from .defaults import (
+    DEFAULT_NOTIFICATION_MESSAGES,
+    OUT_OF_BAND_PLACEHOLDER,
+    PLAIN_NOTIFICATION_MESSAGES,
+    SENSITIVE_CONTEXT_KEYS,
+)
 from .netutil import post_json
 
 log = logging.getLogger("dpdpcms.delivery")
@@ -21,6 +27,7 @@ def render_message(
     recipient_type: str,
     context: dict | None = None,
     language: str | None = None,
+    channel: str = "IN_APP",
 ) -> tuple[str, str]:
     """Return (subject, body) for a notification type.
 
@@ -30,9 +37,16 @@ def render_message(
     template's text in `language` (an Eighth Schedule code the principal chose)
     is used when the DPO has written one, else English. P7-05: `{field}`
     placeholders are filled from the notification's own context (a grievance
-    reference, say); an unknown placeholder is left as written.
+    reference, say).
+
+    P10-10: a placeholder the context cannot fill never reaches the recipient -
+    the type's plain wording is used instead, or the placeholder is dropped.
+    P10-07: outside the app (any channel but IN_APP) free-text context such as
+    a grievance resolution summary is replaced by a pointer to the app, since
+    SMS and push gateways are third parties and the text is often clinical.
     """
-    body = DEFAULT_NOTIFICATION_MESSAGES.get(notification_type, {}).get("en") or notification_type
+    defaults = DEFAULT_NOTIFICATION_MESSAGES.get(notification_type, {})
+    body = (language and defaults.get(language)) or defaults.get("en") or _humanise(notification_type)
     template = db.one(
         "SELECT messages FROM notification_message_templates WHERE fiduciary_id = %s AND notification_type = %s",
         (fiduciary_id, notification_type),
@@ -40,10 +54,34 @@ def render_message(
     if template:
         messages = template.get("messages") or {}
         if isinstance(messages, dict):
-            chosen = (language and messages.get(language)) or messages.get("en")
+            # NT-03: the DPO's text in the principal's language, else the
+            # built-in text in that language, else the DPO's English.
+            chosen = (
+                (language and messages.get(language)) or (language and defaults.get(language)) or messages.get("en")
+            )
             if chosen:
                 body = str(chosen)
-    return f"TSI DPDP CMS — {notification_type}", fill_placeholders(body, context)
+    values = dict(context) if isinstance(context, dict) else {}
+    if str(channel or "IN_APP").upper() != "IN_APP":
+        pointer = (language and OUT_OF_BAND_PLACEHOLDER.get(language)) or OUT_OF_BAND_PLACEHOLDER["en"]
+        for key in SENSITIVE_CONTEXT_KEYS:
+            if key in values or "{" + key + "}" in body:
+                values[key] = pointer
+    filled = fill_placeholders(body, values)
+    if _UNFILLED.search(filled):
+        plain = PLAIN_NOTIFICATION_MESSAGES.get(notification_type) or {}
+        fallback = (language and plain.get(language)) or plain.get("en")
+        filled = fallback if fallback else " ".join(_UNFILLED.sub("", filled).split())
+    return f"TSI DPDP CMS — {notification_type}", filled
+
+
+_UNFILLED = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _humanise(notification_type: str) -> str:
+    """Last-resort body for a type with no template: words, never the enum."""
+    words = str(notification_type or "notification").replace("_", " ").strip().lower()
+    return f"You have a new notice: {words}."
 
 
 def principal_language(fiduciary_id: str, user_id: str) -> str | None:
@@ -64,7 +102,7 @@ class _KeepMissing(dict):
 
 
 def fill_placeholders(text: str, context: dict | None) -> str:
-    if not context or not isinstance(context, dict):
+    if not context or not isinstance(context, dict) or "{" not in text:
         return text
     try:
         return text.format_map(_KeepMissing({k: str(v) for k, v in context.items()}))
@@ -249,13 +287,16 @@ def _deliver_pending(limit: int) -> dict[str, int]:
         channel = str(row["channel"] or "").upper()
         attempt = int(row["attempt_count"] or 0) + 1
         fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ""
-        language = (
+        # GR-03: a notice about a grievance carries the language it was filed
+        # in; otherwise a principal hears in the language of their last consent.
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        language = context.get("language") or (
             principal_language(fid, str(row.get("recipient_id") or ""))
             if str(row["recipient_type"] or "").upper() == "PRINCIPAL"
             else None
         )
         subject, body = render_message(
-            fid, row["notification_type"], row["recipient_type"], row.get("context"), language=language
+            fid, row["notification_type"], row["recipient_type"], row.get("context"), language=language, channel=channel
         )
         error: str | None
         if channel == "IN_APP":

@@ -447,6 +447,10 @@ class OperatorService(Service):
             fid = operator_fiduciary_id(login_uid)
         else:
             fid = payload.get("fiduciary_id") or None
+        # P10-03: the new account's role may carry no permission the caller lacks.
+        from .roles import ensure_role_assignable
+
+        ensure_role_assignable(ctx, role, ctx.fiduciary_id or fid)
         # SEC-18: a non-ADMIN operator with a NULL fiduciary_id defeats every
         # tenancy check in the system, so that account shape is refused at
         # creation instead of patching each caller. Only a global ADMIN may hold
@@ -495,13 +499,15 @@ class OperatorService(Service):
             target = db.one("SELECT fiduciary_id, role FROM operators WHERE id = %s", (uid,))
             if caller_role == "DPO" and target and str(target.get("role") or "").upper() != "OPERATOR":
                 raise ApiError(403, "Forbidden", "DPO users may only change the role of OPERATOR accounts.")
-            role_fid = ctx.payload.get("fiduciary_id") or ctx.fiduciary_id or (target or {}).get("fiduciary_id")
-            known = db.one(
-                "SELECT 1 FROM roles WHERE code = %s AND (fiduciary_id IS NULL OR fiduciary_id = %s::uuid)",
-                (new_role, str(role_fid) if role_fid else None),
-            )
-            if not known:
-                raise ApiError(400, "Bad Request", f"Unknown role '{new_role}'. See list_roles.")
+            # P10-03: no operator changes its own role - promotion is always
+            # someone else's decision - and the role assigned may carry no
+            # permission the caller does not itself hold.
+            if str(uid) == str(authenticated_user_id(ctx) or ""):
+                raise ApiError(403, "Forbidden", "Operators cannot change their own role.")
+            role_fid = ctx.fiduciary_id or ctx.payload.get("fiduciary_id") or (target or {}).get("fiduciary_id")
+            from .roles import ensure_role_assignable
+
+            ensure_role_assignable(ctx, new_role, str(role_fid) if role_fid else None)
             # A role change takes effect on the next request; end old sessions too.
             fields.append("role = %s")
             params.append(new_role)
@@ -749,7 +755,7 @@ class AdminDashService(Service):
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         return db.to_jsonable(
             db.all(
-                "SELECT * FROM grievances WHERE fiduciary_id = %s AND status IN ('NEW','IN_PROGRESS','ESCALATED') ORDER BY due_date ASC NULLS LAST LIMIT %s",
+                "SELECT *, id AS grievance_id FROM grievances WHERE fiduciary_id = %s AND status IN ('NEW','IN_PROGRESS','ESCALATED') ORDER BY due_date ASC NULLS LAST LIMIT %s",
                 (fid, int(ctx.payload.get("limit") or 10)),
             )
         )

@@ -197,6 +197,11 @@
                 Leave a language blank to fall back to the default label for that event. Changes apply immediately -
                 including to notifications already sent.
             </p>
+            <div class="flex items-center gap-2 mb-4">
+                <select id="add-language-select" class="p-2 border border-gray-300 rounded-md text-sm"></select>
+                <button class="primary-bg text-white px-3 py-2 rounded-md text-sm font-medium" onclick="addNotificationLanguage()">Add language</button>
+                <span class="text-xs text-slate-500">English and all 22 Eighth Schedule languages are supported.</span>
+            </div>
             <div id="settings-container" class="space-y-4">
                 <div class="card text-center text-gray-500">Loading notification types and supported languages...</div>
             </div>
@@ -216,6 +221,15 @@
             </p>
             <div id="webhook-configs-container" class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="card text-center text-gray-500 col-span-2">Loading webhook configuration...</div>
+            </div>
+            <h3 class="text-sm font-bold text-slate-700 mt-6 mb-1">Processor endpoints</h3>
+            <p class="text-xs text-slate-500 mb-3">
+                Each processor (app) can receive withdrawals, erasure requests and purpose closures on its own
+                endpoint, and must acknowledge its own alert. A processor without an endpoint can still poll
+                its alerts with its API key.
+            </p>
+            <div id="processor-webhooks-container" class="space-y-3">
+                <div class="card text-center text-gray-500">Loading processors...</div>
             </div>
         </div>
     </details>
@@ -253,20 +267,28 @@
     const USER_NAME = localStorage.getItem('username');
     document.getElementById('username').textContent = USER_NAME || 'DPO User';
 
-    // Same notification types/labels used by examples/integration/notifications/NotificationListener.java.
-    // Breach categories are managed separately below, since the DPO can define new ones at any time.
+    // NT-02: exactly the notification types the services write, so a localised
+    // message is the one the delivery engine looks up. `placeholders` are the
+    // {fields} the notice is filled with. Breach categories are managed below.
     const NOTIFICATION_TYPES = [
         { type: 'CONSENT_GIVEN_NOTIFICATION', label: 'Consent Given' },
         { type: 'WITHDRAWAL_ACKNOWLEDGMENT', label: 'Consent Withdrawn' },
         { type: 'ERASURE_REQUESTED_NOTIFICATION', label: 'Erasure Requested' },
-        { type: 'PURGE_INIT_NOTIFICATION', label: 'Purge Initiated' },
-        { type: 'PURGE_CONFIRM_NOTIFICATION', label: 'Purge Confirmed' },
-        { type: 'PURGE_ONHOLD_NOTIFICATION', label: 'Purge On Legal Hold' },
-        { type: 'EXPIRY_NOTIFICATION', label: 'Retention/Consent Expiry Reminder' },
-        { type: 'GRIEVANCE_SUBMITTED_NOTIFICATION', label: 'Grievance Submitted' },
-        { type: 'GRIEVANCE_RESOLVED_NOTIFICATION', label: 'Grievance Resolved' },
-        { type: 'GRIEVANCE_ESCALATED_NOTIFICATION', label: 'Grievance Escalated' }
+        { type: 'CONSENT_VALIDATION_DENIED', label: 'Processing Denied (no active consent)' },
+        { type: 'POLICY_CHANGE_RECONSENT_REQUIRED', label: 'Notice Changed - Re-consent Required' },
+        { type: 'PURPOSE_CLOSED', label: 'Purpose Ended' },
+        { type: 'GRIEVANCE_SUBMITTED', label: 'Grievance Submitted', placeholders: ['reference_number'] },
+        { type: 'GRIEVANCE_ASSIGNED', label: 'Grievance Assigned' },
+        { type: 'GRIEVANCE_IN_PROGRESS', label: 'Grievance In Progress' },
+        { type: 'GRIEVANCE_ESCALATED', label: 'Grievance Escalated', placeholders: ['reference_number'] },
+        { type: 'GRIEVANCE_RESOLVED', label: 'Grievance Resolved', placeholders: ['reference_number', 'status_word', 'resolution_details'] },
+        { type: 'GRIEVANCE_ROUTED', label: 'Grievance Routed to Officer (staff)', placeholders: ['reference_number', 'grievance_type'] },
+        { type: 'PURGE_SCHEDULED', label: 'Deletion Scheduled (DPO)' },
+        { type: 'PURGE_EXECUTED', label: 'Deletion Requests Raised (DPO)' },
+        { type: 'PURGE_OVERDUE', label: 'Deletion Overdue (DPO)' },
+        { type: 'SECURITY_AUTH_FAILURE_BURST', label: 'Failed Sign-in Burst (DPO)', placeholders: ['failures', 'window_minutes'] }
     ];
+    const PLACEHOLDERS_BY_TYPE = Object.fromEntries(NOTIFICATION_TYPES.map(t => [t.type, t.placeholders || []]));
 
     const LANGUAGE_NAMES = { en: 'English', as: 'Assamese', bn: 'Bengali', brx: 'Bodo', doi: 'Dogri', gu: 'Gujarati', hi: 'Hindi', kn: 'Kannada', ks: 'Kashmiri', kok: 'Konkani', mai: 'Maithili', ml: 'Malayalam', mni: 'Manipuri', mr: 'Marathi', ne: 'Nepali', or: 'Odia', pa: 'Punjabi', sa: 'Sanskrit', sat: 'Santali', sd: 'Sindhi', ta: 'Tamil', te: 'Telugu', ur: 'Urdu' };
     const BREACH_TYPE_PREFIX = 'BREACH_NOTIFICATION_';
@@ -280,6 +302,32 @@
     function toggleMenu() {
         document.getElementById('sidebar').classList.toggle('open');
         document.getElementById('sidebar-backdrop').classList.toggle('hidden');
+    }
+
+    // NT-03: a notice may be written in English or any Eighth Schedule language,
+    // not only the languages the active policy happens to carry.
+    function languagesFor(policyLanguages, existingMessages) {
+        const set = new Set(['en', ...policyLanguages]);
+        Object.values(existingMessages || {}).forEach(m => Object.keys(m || {}).forEach(l => set.add(l)));
+        return Object.keys(LANGUAGE_NAMES).filter(l => set.has(l));
+    }
+
+    function renderAddLanguage() {
+        const select = document.getElementById('add-language-select');
+        if (!select) return;
+        const missing = Object.keys(LANGUAGE_NAMES).filter(l => !SUPPORTED_LANGUAGES.includes(l));
+        select.innerHTML = '<option value="">Add a language...</option>' +
+            missing.map(l => `<option value="${esc(l)}">${esc(LANGUAGE_NAMES[l])}</option>`).join('');
+    }
+
+    async function addNotificationLanguage() {
+        const lang = document.getElementById('add-language-select').value;
+        if (!lang) return;
+        SUPPORTED_LANGUAGES = Object.keys(LANGUAGE_NAMES).filter(l => l === lang || SUPPORTED_LANGUAGES.includes(l));
+        const existingMessages = await loadExistingMessages();
+        renderSettingsForm(SUPPORTED_LANGUAGES, existingMessages);
+        renderBreachTypes(SUPPORTED_LANGUAGES, existingMessages);
+        renderAddLanguage();
     }
 
     async function loadSupportedLanguages() {
@@ -334,8 +382,13 @@
             </div>
         `).join('');
 
+        const placeholders = PLACEHOLDERS_BY_TYPE[type] || [];
+        const hint = placeholders.length
+            ? `<p class="text-xs text-slate-500 mb-2">Fields you can use: ${placeholders.map(p => '<code>{' + esc(p) + '}</code>').join(' ')}</p>`
+            : '';
         card.innerHTML = `
             <h2 class="text-md font-bold text-slate-700 mb-3 tracking-tight">${esc(label)}</h2>
+            ${hint}
             <div class="messages-form" data-type="${esc(type)}">${langInputs}</div>
             <div class="flex justify-end mt-2">
                 <button class="save-message-btn primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Save</button>
@@ -394,7 +447,8 @@
             if (response.ok) {
                 alert("Message saved for " + type.replace(/_/g, ' ') + ".");
             } else {
-                alert("Failed to save message.");
+                const err = await response.json().catch(() => ({}));
+                alert("Failed to save message: " + (err.message || response.status));
             }
         } catch (e) {
             alert("Network error while saving message.");
@@ -518,6 +572,90 @@
             alert("Network error while saving webhook.");
         }
     }
+
+    // CW-08: per-processor webhook endpoints.
+    async function loadApps() {
+        try {
+            const response = await fetch('/api/v1/admin/app', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "list_apps", "fiduciary_id": FIDUCIARY_ID })
+            });
+            const rows = await response.json();
+            return Array.isArray(rows) ? rows.filter(a => a.status === 'ACTIVE') : [];
+        } catch (e) {
+            console.error("Could not load processors", e);
+            return [];
+        }
+    }
+
+    async function loadProcessorWebhookConfigs() {
+        try {
+            const response = await fetch(API_URL_NOTIFICATION, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "list_processor_webhook_configs", "fiduciary_id": FIDUCIARY_ID })
+            });
+            const rows = await response.json();
+            return Array.isArray(rows) ? rows : [];
+        } catch (e) {
+            console.error("Could not load processor webhooks", e);
+            return [];
+        }
+    }
+
+    function renderProcessorWebhooks(apps, configs) {
+        const container = document.getElementById('processor-webhooks-container');
+        if (!container) return;
+        if (!apps.length) {
+            container.innerHTML = '<div class="card text-center text-gray-500">No active processors (apps) for this organisation.</div>';
+            return;
+        }
+        const byKey = {};
+        configs.forEach(c => { byKey[c.app_id + ':' + c.category] = c; });
+        container.innerHTML = apps.map(app => `
+            <div class="card">
+                <h4 class="text-sm font-bold text-slate-700 mb-2">${esc(app.name)} <span class="text-xs font-mono text-slate-400">${esc(app.app_id)}</span></h4>
+                ${WEBHOOK_CATEGORIES.map(({ category, label }) => {
+                    const c = byKey[app.app_id + ':' + category] || {};
+                    return `
+                    <div class="processor-webhook-form grid grid-cols-1 md:grid-cols-5 gap-2 items-end mb-2" data-app="${esc(app.app_id)}" data-category="${esc(category)}">
+                        <label class="text-xs font-bold text-slate-500 uppercase md:col-span-1">${esc(label)}</label>
+                        <input type="text" data-field="webhook_url" value="${esc(c.webhook_url || '')}" placeholder="https://processor.example.com/webhook"
+                               class="md:col-span-2 p-2 border border-gray-300 rounded-md text-sm">
+                        <input type="password" data-field="secret" autocomplete="new-password" placeholder="${c.webhook_url ? 'Leave blank to keep secret' : 'Shared secret'}"
+                               class="p-2 border border-gray-300 rounded-md text-sm">
+                        <button class="primary-bg text-white px-3 py-2 rounded-md text-sm font-medium" onclick="saveProcessorWebhook('${esc(app.app_id)}', '${esc(category)}')">Save</button>
+                    </div>`;
+                }).join('')}
+            </div>`).join('');
+    }
+
+    async function saveProcessorWebhook(appId, category) {
+        const form = document.querySelector(`.processor-webhook-form[data-app="${CSS.escape(appId)}"][data-category="${CSS.escape(category)}"]`);
+        const webhookUrl = form.querySelector('input[data-field="webhook_url"]').value.trim();
+        const secret = form.querySelector('input[data-field="secret"]').value;
+        if (!webhookUrl) return alert("Enter a webhook URL first.");
+        try {
+            const response = await fetch(API_URL_NOTIFICATION, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({
+                    "_func": "set_processor_webhook_config", "fiduciary_id": FIDUCIARY_ID, "app_id": appId,
+                    "category": category, "webhook_url": webhookUrl, "secret": secret || undefined, "enabled": true
+                })
+            });
+            if (response.ok) {
+                alert("Processor webhook saved.");
+            } else {
+                const err = await response.json().catch(() => ({}));
+                alert("Failed to save processor webhook: " + (err.message || response.status));
+            }
+        } catch (e) {
+            alert("Network error while saving processor webhook.");
+        }
+    }
+    window.saveProcessorWebhook = saveProcessorWebhook;
 
     async function loadRightsAppConfig() {
         try {
@@ -643,10 +781,12 @@
         const [languages, existingMessages, webhookConfigs, rightsAppConfig] = await Promise.all([
             loadSupportedLanguages(), loadExistingMessages(), loadWebhookConfigs(), loadRightsAppConfig()
         ]);
-        SUPPORTED_LANGUAGES = languages;
-        renderSettingsForm(languages, existingMessages);
-        renderBreachTypes(languages, existingMessages);
+        SUPPORTED_LANGUAGES = languagesFor(languages, existingMessages);
+        renderSettingsForm(SUPPORTED_LANGUAGES, existingMessages);
+        renderBreachTypes(SUPPORTED_LANGUAGES, existingMessages);
+        renderAddLanguage();
         renderWebhookConfigs(webhookConfigs);
+        renderProcessorWebhooks(...(await Promise.all([loadApps(), loadProcessorWebhookConfigs()])));
         renderRightsAppConfig(rightsAppConfig, webhookConfigs['OTP']);
     }
 
@@ -656,6 +796,7 @@
     init();
 
     window.saveMessage = saveMessage;
+    window.addNotificationLanguage = addNotificationLanguage;
     window.addBreachType = addBreachType;
     window.saveWebhookConfig = saveWebhookConfig;
     window.toggleWebhookEnabled = toggleWebhookEnabled;

@@ -156,6 +156,40 @@ def _validate_permissions(ctx: RequestContext, permissions: object) -> list[str]
     return cleaned
 
 
+def ensure_role_assignable(ctx: RequestContext, role_code: str, fiduciary_id: str | None) -> None:
+    """P10-03 / SA-03: an actor may only assign a role whose permissions it holds.
+
+    Assigning a role is delegating its whole permission set, so it is bounded
+    the way create_role bounds a grant (_validate_permissions): by the caller's
+    PERMISSIONS, not its role name. Without this, any custom role holding
+    operator:write could hand DPO - and purge:*, retention:*, legal:write - to
+    any account, its own included.
+    """
+    code = str(role_code or "").upper()
+    row = db.one(
+        """
+        SELECT permissions FROM roles
+        WHERE code = %s AND (fiduciary_id = %s::uuid OR fiduciary_id IS NULL)
+        ORDER BY fiduciary_id NULLS LAST
+        LIMIT 1
+        """,
+        (code, str(fiduciary_id) if fiduciary_id else None),
+    )
+    if not row:
+        raise ApiError(400, "Bad Request", f"Unknown role '{code}'. See list_roles.")
+    held = role_permissions(ctx)
+    if FULL_ACCESS in held:
+        return
+    target = {FULL_ACCESS} if code == "ADMIN" else _parse_permissions(row.get("permissions"))
+    excess = sorted(p for p in target if p == FULL_ACCESS or not has_permission(held, p))
+    if excess:
+        raise ApiError(
+            403,
+            "Forbidden",
+            f"You cannot assign role '{code}': it carries permissions you do not hold ({', '.join(excess)}).",
+        )
+
+
 def _role_scope(ctx: RequestContext) -> str | None:
     """The fiduciary a role write applies to: the caller's own tenant, or for a
     global ADMIN the payload's fiduciary_id (None = a global role)."""

@@ -16,6 +16,8 @@ log = logging.getLogger("dpdpcms.jobs")
 
 
 def _claim_pending_purges(fiduciary_id: str, purpose_id: str, trigger: str) -> bool:
+    # purge_requests.purpose_id is canonical (db/26), as is every lifecycle id
+    # this is called with, so an exact match is the canonical match (P10-09).
     """True when no non-terminal purge request already covers (fid, purpose, trigger)."""
     row = db.one(
         """
@@ -106,7 +108,7 @@ def escalate_overdue_grievances() -> dict[str, int]:
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, user_id, fiduciary_id
+        RETURNING id, user_id, fiduciary_id, reference_number, language
         """,
         (settings.grievance_escalation_hours, settings.worker_batch_size),
     )
@@ -114,12 +116,17 @@ def escalate_overdue_grievances() -> dict[str, int]:
     for row in rows:
         gid = str(row["id"])
         fid = str(row["fiduciary_id"])
+        # GR-03: answered in the language the grievance was filed in.
         db.execute(
             """
-            INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
-            VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_ESCALATED')
+            INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)
+            VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_ESCALATED', %s)
             """,
-            (str(row["user_id"]), fid),
+            (
+                str(row["user_id"]),
+                fid,
+                db.as_jsonb({"reference_number": row.get("reference_number"), "language": row.get("language")}),
+            ),
         )
         # GR-07: an escalation must reach the fiduciary's DPO too, not only the
         # complainant — the DPO owns the SLA and can reassign or drive the
@@ -160,7 +167,7 @@ def _cessation_for(fiduciary_id: str, purpose_id: str) -> datetime | None:
         FROM consent_records cr,
              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
         WHERE cr.fiduciary_id = %s
-          AND lower(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id')) = lower(%s)
+          AND lower(btrim(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id'))) = lower(btrim(%s))
           AND (p ->> 'consent_granted' = 'false' OR lower(p ->> 'status') = 'withdrawn')
         """,
         (fiduciary_id, purpose_id),
@@ -333,6 +340,58 @@ def prune_old_notification_deliveries(days: int | None = None) -> dict[str, int]
     return {"pruned": pruned, "retention_days": effective, "floor_enforced": effective == floor}
 
 
+# Rule 6(1)(c): logs are only half the clause - something must watch them.
+# A burst of failed sign-ins within the window raises an acknowledgeable alert
+# and tells the DPO, at most once per window per fiduciary.
+SECURITY_FAILURE_ACTIONS = ("LOGIN_FAILURE", "PRINCIPAL_LOGIN_FAILURE", "MFA_VERIFY_FAILED")
+SECURITY_FAILURE_THRESHOLD = 20
+SECURITY_WINDOW_MINUTES = 60
+
+
+def flag_security_anomalies() -> dict[str, int]:
+    """R6-c: alert on bursts of failed authentication recorded in the ledger."""
+    from .services.lifecycle import record_alert
+
+    bursts = db.all(
+        """
+        SELECT a.fiduciary_id, COUNT(*) AS failures
+        FROM audit_logs a JOIN fiduciaries f ON f.id = a.fiduciary_id
+        WHERE a.audit_action = ANY(%s)
+          AND a.timestamp > (NOW() AT TIME ZONE 'UTC') - make_interval(mins => %s)
+        GROUP BY a.fiduciary_id
+        HAVING COUNT(*) >= %s
+        """,
+        (list(SECURITY_FAILURE_ACTIONS), SECURITY_WINDOW_MINUTES, SECURITY_FAILURE_THRESHOLD),
+    )
+    raised = 0
+    for row in bursts:
+        fid = str(row["fiduciary_id"])
+        recent = db.one(
+            "SELECT 1 FROM alerts WHERE fiduciary_id = %s AND alert_type = 'SECURITY_AUTH_FAILURE_BURST'"
+            " AND created_at > NOW() - make_interval(mins => %s) LIMIT 1",
+            (fid, SECURITY_WINDOW_MINUTES),
+        )
+        if recent:
+            continue
+        record_alert(
+            fid,
+            "SECURITY_AUTH_FAILURE_BURST",
+            None,
+            {"failures": int(row["failures"]), "window_minutes": SECURITY_WINDOW_MINUTES},
+        )
+        db.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
+            " VALUES ('DPO', %s, %s, 'SECURITY_AUTH_FAILURE_BURST', %s)",
+            (
+                _dpo_recipient(fid),
+                fid,
+                db.as_jsonb({"failures": int(row["failures"]), "window_minutes": SECURITY_WINDOW_MINUTES}),
+            ),
+        )
+        raised += 1
+    return {"alerts_raised": raised}
+
+
 def _dpo_recipient(fiduciary_id: str) -> str:
     row = db.one(
         "SELECT id FROM operators WHERE fiduciary_id = %s AND role = 'DPO' AND status = 'ACTIVE' ORDER BY created_at LIMIT 1",
@@ -366,7 +425,8 @@ def run_retention_sweep() -> dict[str, int]:
                     SELECT DISTINCT cr.user_id, cr.fiduciary_id, %s, 'RetentionPolicyExpiry', %s, %s
                     FROM consent_records cr,
                          LATERAL jsonb_array_elements(cr.data_point_consents) AS p
-                    WHERE cr.fiduciary_id = %s AND lower(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id')) = lower(%s)
+                    WHERE cr.fiduciary_id = %s
+                      AND lower(btrim(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id'))) = lower(btrim(%s))
                       AND NOT EXISTS (
                             SELECT 1 FROM purge_requests pr
                             WHERE pr.user_id = cr.user_id
@@ -504,7 +564,9 @@ def _write_export(job: dict[str, Any]) -> Path:
         where.append(f"{date_column} >= %s::date")
         params.append(job["start_date"])
     if job.get("end_date"):
-        where.append(f"{date_column} <= %s::date + INTERVAL '1 day'")
+        # Exclusive upper bound: the whole end_date, and exactly the window the
+        # AUDIT chain verdict below examines (P10-06).
+        where.append(f"{date_column} < %s::date + INTERVAL '1 day'")
         params.append(job["end_date"])
     rows = db.all(f"SELECT {columns} FROM {table} WHERE {' AND '.join(where)} ORDER BY {date_column} DESC", params)
     output_dir = settings.export_path
@@ -519,13 +581,28 @@ def _write_export(job: dict[str, Any]) -> Path:
     context: dict[str, Any] = {"output_file_path": str(path), "rows": len(rows)}
     if str(job["subtype"]).upper() == "AUDIT":
         # P9-08: ship the chain verdict for the exported range with the file.
+        # P10-06: the verdict covers exactly the exported window - bounded by
+        # end_date as well as start_date - and attests an intact chain ONLY
+        # when every row of that window was examined. A truncated walk that
+        # found nothing broken proves nothing, so it never reads as intact.
         from .audit import verify_chain
 
-        since = job.get("start_date")
-        verdict = verify_chain(fiduciary_id=str(job["fiduciary_id"]), since=str(since) if since else None)
+        since = _day_start(job.get("start_date"))
+        until = _day_start(job.get("end_date"), plus_days=1)
+        verdict = verify_chain(fiduciary_id=str(job["fiduciary_id"]), since=since, until=until)
+        attested = bool(verdict.get("intact")) and bool(verdict.get("coverage_complete"))
+        verdict = {
+            **verdict,
+            "chain_intact": attested,
+            "attestation": "INTACT"
+            if attested
+            else ("BROKEN" if verdict.get("broken_count") or verdict.get("foreign_broken_count") else "NOT_ATTESTED"),
+            "export_window": {"start_date": job.get("start_date"), "end_date": job.get("end_date")},
+        }
         verdict_path = path.with_suffix(".verification.json")
         verdict_path.write_text(json.dumps(db.to_jsonable(verdict), indent=2, default=str), encoding="utf-8")
-        context["chain_intact"] = verdict.get("intact")
+        context["chain_intact"] = attested
+        context["chain_coverage_complete"] = bool(verdict.get("coverage_complete"))
         context["chain_verification_path"] = str(verdict_path)
     log_event(
         "SYSTEM",
@@ -536,6 +613,15 @@ def _write_export(job: dict[str, Any]) -> Path:
         context,
     )
     return path
+
+
+def _day_start(value: Any, plus_days: int = 0) -> datetime | None:
+    """Midnight UTC of a job's start_date / end_date (a date or ISO string)."""
+    if not value:
+        return None
+    day = value if hasattr(value, "year") else datetime.fromisoformat(str(value)[:10])
+    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    return start + timedelta(days=plus_days)
 
 
 def _csv_value(value: Any) -> Any:

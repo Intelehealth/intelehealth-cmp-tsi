@@ -89,6 +89,11 @@ class AlertService(Service):
             params.append("PRINCIPAL")
             where.append("recipient_id = %s")
             params.append(require(ctx.principal_user_id, "principal"))
+        elif ctx.app_id:
+            # CW-08: a processor acknowledges its OWN alert; one app's key
+            # cannot confirm that another processor acted.
+            where.append("(recipient_type <> 'PROCESSOR' OR recipient_id = %s)")
+            params.append(str(ctx.app_id))
         row = db.one(f"SELECT alert_type FROM alerts WHERE {' AND '.join(where)}", params)
         if not row:
             raise ApiError(404, "Not Found", "Alert not found.")
@@ -122,6 +127,14 @@ class AlertService(Service):
             if recipient_id:
                 where.append("recipient_id = %s")
                 params.append(recipient_id)
+        elif ctx.app_id:
+            # CW-08: a processor's key sees fiduciary alerts and its OWN
+            # processor alerts, never another processor's (they carry user ids).
+            where.append("(recipient_type <> 'PROCESSOR' OR recipient_id = %s)")
+            params.append(str(ctx.app_id))
+            if ctx.payload.get("recipient_id"):
+                where.append("recipient_id = %s")
+                params.append(ctx.payload["recipient_id"])
         elif ctx.payload.get("recipient_id"):
             where.append("recipient_id = %s")
             params.append(ctx.payload["recipient_id"])

@@ -298,9 +298,9 @@
         if (activeConsent && activeConsent.data_point_consents) {
             const dpc = activeConsent.data_point_consents;
             if (Array.isArray(dpc)) {
-                dpc.forEach(p => { existingPrefs[p.data_point_id] = !!p.consent_granted; });
+                dpc.forEach(p => { existingPrefs[purposeKey(p.data_point_id || p.purpose_id || p.id)] = !!p.consent_granted; });
             } else if (typeof dpc === 'object') {
-                Object.keys(dpc).forEach(k => { existingPrefs[k] = !!(dpc[k].consent_granted); });
+                Object.keys(dpc).forEach(k => { existingPrefs[purposeKey(k)] = !!(dpc[k].consent_granted); });
             }
         }
 
@@ -312,18 +312,21 @@
         const lc = currentLangContent;
         if (!lc) { area.innerHTML = '<p style="color:#64748b;text-align:center;padding:40px;">Policy content unavailable.</p>'; return; }
 
+        // CC-03: every purpose starts unticked unless the principal already chose
+        // it, and none is locked. A purpose the service depends on is labelled as
+        // such - declining it is the principal's choice to make, never a default.
         let purposeHtml = (lc.data_processing_purposes || []).map(p => {
-            const checked = existingPrefs[p.id] !== undefined ? existingPrefs[p.id] : p.is_mandatory_for_service;
-            const disabled = p.is_mandatory_for_service ? 'disabled' : '';
+            const key = purposeKey(p.id);
+            const checked = existingPrefs[key] === true;
             return `
-            <div class="toggle-row ${p.is_mandatory_for_service ? 'mandatory' : ''}">
+            <div class="toggle-row">
                 <div style="flex:1;padding-right:16px;">
                     <div style="font-weight:700;font-size:0.875rem;color:#1e293b;">${esc(p.name)}</div>
                     <div class="purpose-desc">${esc(p.description || '')}</div>
-                    ${p.is_mandatory_for_service ? '<span style="font-size:0.65rem;font-weight:800;text-transform:uppercase;color:#0891b2;">Required for service</span>' : ''}
+                    ${p.is_mandatory_for_service ? '<span style="font-size:0.65rem;font-weight:800;text-transform:uppercase;color:#0891b2;">Needed to provide the service - you may still decline</span>' : ''}
                 </div>
                 <label class="toggle-switch">
-                    <input type="checkbox" id="toggle-${esc(p.id)}" ${checked ? 'checked' : ''} ${disabled}>
+                    <input type="checkbox" id="toggle-${esc(p.id)}" ${checked ? 'checked' : ''} aria-label="Consent to ${esc(p.name)}">
                     <span class="toggle-slider"></span>
                 </label>
             </div>`;
@@ -387,12 +390,19 @@
     async function savePreferences() {
         const prefs = getCurrentToggles();
         const purposes = currentLangContent.data_processing_purposes || [];
+        // CC-03: the decision sent is exactly what the principal ticked.
         const dataPointConsents = purposes.map(p => ({
             data_point_id: p.id,
-            consent_granted: Boolean(prefs[p.id] !== undefined ? prefs[p.id] : p.is_mandatory_for_service),
+            consent_granted: prefs[p.id] === true,
             purpose_agreed_to: p.name,
             timestamp_updated: new Date().toISOString()
         }));
+        const declinedNeeded = purposes.filter(p => p.is_mandatory_for_service && prefs[p.id] !== true);
+        if (declinedNeeded.length > 0 && !confirm(
+            'You have declined: ' + declinedNeeded.map(p => p.name).join(', ') +
+            '. The service depends on this processing, so the parts of the service that need it cannot be provided. Save your choices?')) {
+            return;
+        }
 
         const result = await apiCall('/api/v1/client/consent', 'record_consent', {
             user_id: SESSION.userId,
@@ -430,15 +440,69 @@
     let historyCache = [];
     let policyPurposesForVerify = [];
     let historyPolicyMap = {}; // { policyId: [{id, name, is_mandatory}] }
+    // UD-03: the principal can search and filter by purpose, date and status.
+    let historyFilters = { purpose_id: '', status: '', start_date: '', end_date: '' };
+
+    function historyFilterBar() {
+        const purposeOptions = policyPurposesForVerify.map(p =>
+            `<option value="${esc(p.id)}" ${purposeKey(historyFilters.purpose_id) === purposeKey(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`
+        ).join('');
+        const statusOptions = [['', 'Any status'], ['ACTIVE', 'Active'], ['CONSENT_GIVEN', 'Consent given'],
+                               ['PARTIAL_WITHDRAWAL', 'Partially withdrawn'], ['WITHDRAWN', 'Withdrawn'],
+                               ['ERASURE_REQUESTED', 'Erasure requested']]
+            .map(([v, l]) => `<option value="${v}" ${historyFilters.status === v ? 'selected' : ''}>${l}</option>`).join('');
+        const field = 'padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;outline:none;';
+        return `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:0 0 18px;">
+                <label style="font-size:0.7rem;color:#64748b;font-weight:700;">Purpose<br>
+                    <select id="hf-purpose" style="${field}"><option value="">Any purpose</option>${purposeOptions}</select></label>
+                <label style="font-size:0.7rem;color:#64748b;font-weight:700;">Status<br>
+                    <select id="hf-status" style="${field}">${statusOptions}</select></label>
+                <label style="font-size:0.7rem;color:#64748b;font-weight:700;">From<br>
+                    <input type="date" id="hf-start" value="${esc(historyFilters.start_date)}" style="${field}"></label>
+                <label style="font-size:0.7rem;color:#64748b;font-weight:700;">To<br>
+                    <input type="date" id="hf-end" value="${esc(historyFilters.end_date)}" style="${field}"></label>
+                <button class="btn-primary" onclick="applyHistoryFilters()" style="padding:8px 14px;">Filter</button>
+                <button onclick="clearHistoryFilters()" style="background:none;border:none;color:#64748b;font-weight:600;cursor:pointer;padding:8px 10px;">Clear</button>
+                <span style="flex:1;"></span>
+                <button onclick="downloadHistory('csv')" style="background:white;border:1px solid #cbd5e1;border-radius:6px;font-weight:700;font-size:0.8rem;cursor:pointer;padding:8px 12px;">Download CSV</button>
+                <button onclick="downloadHistory('pdf')" style="background:white;border:1px solid #cbd5e1;border-radius:6px;font-weight:700;font-size:0.8rem;cursor:pointer;padding:8px 12px;">Download PDF</button>
+            </div>`;
+    }
+
+    function applyHistoryFilters() {
+        historyFilters = {
+            purpose_id: document.getElementById('hf-purpose').value,
+            status: document.getElementById('hf-status').value,
+            start_date: document.getElementById('hf-start').value,
+            end_date: document.getElementById('hf-end').value
+        };
+        renderHistoryTab(document.getElementById('tab-content'));
+    }
+
+    function clearHistoryFilters() {
+        historyFilters = { purpose_id: '', status: '', start_date: '', end_date: '' };
+        renderHistoryTab(document.getElementById('tab-content'));
+    }
+
+    // UD-04: the principal downloads their own consent history as CSV or PDF.
+    async function downloadHistory(format) {
+        const ok = await apiDownload('/api/v1/client/consent', 'export_consent_history', {
+            user_id: SESSION.userId,
+            format: format,
+            language: currentLang || 'en'
+        }, `consent-history.${format}`);
+        if (!ok) alert('The download could not be prepared. Please try again.');
+    }
 
     async function renderHistoryTab(area) {
+        const historyQuery = { user_id: SESSION.userId, fiduciary_id: SESSION.fiduciaryId, limit: 100 };
+        Object.entries(historyFilters).forEach(([k, v]) => {
+            if (v) historyQuery[k] = k === 'end_date' ? v + 'T23:59:59' : v;
+        });
         // Fetch history and all policy content in parallel
         const [historyResult, ...policyResults] = await Promise.all([
-            apiCall('/api/v1/client/consent', 'list_consent_history', {
-                user_id: SESSION.userId,
-                fiduciary_id: SESSION.fiduciaryId,
-                limit: 100
-            }),
+            apiCall('/api/v1/client/consent', 'list_consent_history', historyQuery),
             ...(SESSION.policies || []).map(p =>
                 apiCall('/api/v1/client/policy', 'get_policy', { policy_id: p.policy_id })
             )
@@ -473,9 +537,10 @@
         if (historyCache.length > 0 && SESSION.pcaQrEnabled !== false) setTimeout(updateQR, 0);
 
         if (historyCache.length === 0) {
-            area.innerHTML = `<div style="text-align:center;padding:60px 20px;color:#94a3b8;">
+            const filtered = Object.values(historyFilters).some(Boolean);
+            area.innerHTML = `${historyFilterBar()}<div style="text-align:center;padding:60px 20px;color:#94a3b8;">
                 <p style="font-size:1rem;font-weight:600;">No consent records found.</p>
-                <p style="font-size:0.875rem;">Your consent records will appear here once you save preferences.</p>
+                <p style="font-size:0.875rem;">${filtered ? 'No record matches these filters.' : 'Your consent records will appear here once you save preferences.'}</p>
             </div>${renderSelfVerify()}`;
             return;
         }
@@ -559,6 +624,7 @@
         area.innerHTML = `
             <h2 style="margin:0 0 6px;font-size:1rem;font-weight:700;color:#1e293b;">Consent History</h2>
             <p style="margin:0 0 20px;font-size:0.8rem;color:#64748b;">Records are grouped by consent policy. Use Withdraw or Erasure Request to act on a specific policy.</p>
+            ${historyFilterBar()}
             ${sectionsHtml}
             <p style="font-size:0.7rem;color:#94a3b8;margin-top:4px;font-style:italic;">* Mandatory data is retained until account closure.</p>
             ${renderSelfVerify()}
@@ -683,10 +749,11 @@
 
         // All purposes are eligible for withdrawal (including mandatory)
         const eligible = dpc.map(dp => {
-            const pInfo = policyPurposes.find(p => p.id === dp.data_point_id);
+            const dpId = dp.data_point_id || dp.purpose_id || dp.id;
+            const pInfo = policyPurposes.find(p => purposeKey(p.id) === purposeKey(dpId));
             return {
-                id: dp.data_point_id,
-                name: dp.purpose_agreed_to || dp.data_point_id,
+                id: dpId,
+                name: dp.purpose_agreed_to || (pInfo && pInfo.name) || dpId,
                 active: dp.consent_granted === true,
                 mandatory: pInfo ? pInfo.is_mandatory : false
             };
@@ -797,7 +864,7 @@
         let rows = list.length === 0
             ? `<tr><td colspan="5" style="text-align:center;padding:40px;color:#94a3b8;font-style:italic;">No requests or grievances submitted yet.</td></tr>`
             : list.map(r => `<tr>
-                <td style="font-family:monospace;font-size:0.75rem;color:#64748b;">${esc(r.grievance_id)}</td>
+                <td style="font-family:monospace;font-size:0.75rem;color:#64748b;" title="${esc(r.grievance_id || r.id || '')}">${esc(r.reference_number || r.grievance_id || r.id)}</td>
                 <td style="font-weight:700;font-size:0.8rem;color:#1e293b;">${esc((r.type||'').replace(/_/g,' '))}</td>
                 <td style="color:#64748b;">${esc(r.subject)}</td>
                 <td style="color:#64748b;">${esc(r.due_date ? formatTimestamp(r.due_date).split(',')[0] : 'N/A')}</td>
@@ -835,7 +902,7 @@
             </div>
             <div style="overflow-x:auto;">
                 <table class="dash-table">
-                    <thead><tr><th>ID</th><th>Type</th><th>Subject</th><th>Deadline</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Reference</th><th>Type</th><th>Subject</th><th>Deadline</th><th>Status</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table>
             </div>
@@ -877,6 +944,9 @@
 
         if (result && result.success) {
             await renderGrievanceTab(document.getElementById('tab-content'));
+            // UD-10: give the principal the reference to quote in follow-up contact.
+            const ref = result.reference_number || (result.data && result.data.reference_number);
+            if (ref) alert('Your request was submitted. Your reference number is ' + ref + '.');
         } else {
             errEl.textContent = (result && result.message) || 'Submission failed. Please try again.';
             errEl.style.display = 'block';

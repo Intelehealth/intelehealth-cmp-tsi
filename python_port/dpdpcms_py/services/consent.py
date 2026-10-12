@@ -8,7 +8,17 @@ from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
 from ..security import principal_token
-from .base import Service, bind_principal_field, ensure_principal_owns, page_limit, reject_principal, require
+from .base import (
+    Service,
+    bind_principal_field,
+    canonical_consent_points,
+    canonical_purpose_id,
+    ensure_principal_owns,
+    page_limit,
+    point_purpose_id,
+    reject_principal,
+    require,
+)
 from .catalog import resolve_fiduciary
 
 
@@ -43,7 +53,7 @@ def _purpose_names(policy_content: Any, language: str) -> dict[str, str]:
     if not isinstance(block, dict):
         return {}
     return {
-        str(p.get("id")).lower(): str(p["name"])
+        canonical_purpose_id(p.get("id")): str(p["name"])
         for p in block.get("data_processing_purposes") or []
         if isinstance(p, dict) and p.get("id") and p.get("name")
     }
@@ -69,8 +79,8 @@ def _point_granted(point: dict) -> bool:
 
 def _point_grants(point: dict, purpose_id: str) -> bool:
     """As above, for one specific purpose. 'id'/'purpose_id' are older aliases for data_point_id."""
-    stored_id = point.get("data_point_id") or point.get("id") or point.get("purpose_id")
-    if not stored_id or str(stored_id).lower() != purpose_id.lower():
+    stored_id = point_purpose_id(point)
+    if not stored_id or stored_id != canonical_purpose_id(purpose_id):
         return False
     return _point_granted(point)
 
@@ -80,10 +90,10 @@ def _normalise_purpose_ids(payload: dict) -> list[str]:
     raw = payload.get("purpose_ids") or []
     if isinstance(raw, str):
         raw = [raw]
-    ids = [str(item).strip() for item in raw if item is not None and str(item).strip()]
+    ids = [canonical_purpose_id(item) for item in raw if item is not None and str(item).strip()]
     single = payload.get("purpose_id")
-    if single is not None and str(single).strip() and str(single).strip() not in ids:
-        ids.append(str(single).strip())
+    if single is not None and str(single).strip() and canonical_purpose_id(single) not in ids:
+        ids.append(canonical_purpose_id(single))
     return ids
 
 
@@ -97,7 +107,7 @@ def declared_purpose_ids(policy_content: dict | None) -> set[str]:
             continue
         for purpose in block.get("data_processing_purposes") or []:
             if isinstance(purpose, dict) and purpose.get("id"):
-                ids.add(str(purpose["id"]))
+                ids.add(canonical_purpose_id(purpose["id"]))
     return ids
 
 
@@ -128,13 +138,13 @@ def check_consent_alignment(fiduciary_id: str, policy_id: str, version: str, dat
         for point in data_consents:
             if not isinstance(point, dict):
                 continue
-            pid = point.get("data_point_id") or point.get("purpose_id") or point.get("id")
+            pid = point_purpose_id(point)
             if pid:
-                requested.add(str(pid).lower())
+                requested.add(pid)
                 if point.get("consent_granted") is True:
-                    granted.add(str(pid).lower())
+                    granted.add(pid)
     for pid in requested:
-        if pid not in {d.lower() for d in declared}:
+        if pid not in declared:
             raise ApiError(
                 400,
                 "Bad Request",
@@ -145,7 +155,7 @@ def check_consent_alignment(fiduciary_id: str, policy_id: str, version: str, dat
         "SELECT purpose_id FROM purpose_lifecycle WHERE fiduciary_id = %s AND state = 'CLOSED'",
         (fiduciary_id,),
     )
-    closed_ids = {str(row["purpose_id"]).lower() for row in closed}
+    closed_ids = {canonical_purpose_id(row["purpose_id"]) for row in closed}
     # PL-02: a closed purpose may still be declared by the policy until a new
     # version drops it. Declining it (or leaving it out) is fine; granting it is not.
     overlap = granted & closed_ids
@@ -172,7 +182,7 @@ def check_explicit_choices(policy_content: dict | None, data_consents: Any, clos
     for point in data_consents:
         if not isinstance(point, dict):
             raise ApiError(400, "Bad Request", "data_point_consents entries must be objects.")
-        pid = str(point.get("data_point_id") or point.get("purpose_id") or point.get("id") or "").lower()
+        pid = point_purpose_id(point)
         if not pid:
             raise ApiError(400, "Bad Request", "Each consent decision must name its data_point_id.")
         if pid in seen:
@@ -185,7 +195,7 @@ def check_explicit_choices(policy_content: dict | None, data_consents: Any, clos
                 f"Purpose '{pid}' needs an explicit consent_granted true/false; consent is never implied (CC-03).",
             )
     exempt = seen | (closed or set())
-    undecided = sorted(d for d in {d.lower() for d in declared_purpose_ids(policy_content)} if d not in exempt)
+    undecided = sorted(d for d in declared_purpose_ids(policy_content) if d not in exempt)
     if undecided:
         raise ApiError(
             400,
@@ -280,7 +290,9 @@ class ConsentService(Service):
         fid = _fid(ctx)
         user_id = require(payload.get("user_id"), "user_id")
         policy_id = require(payload.get("policy_id"), "policy_id")
-        data_consents = require(payload.get("data_point_consents"), "data_point_consents")
+        # P10-01: one purpose per decision, stored under data_point_id only.
+        data_consents = canonical_consent_points(require(payload.get("data_point_consents"), "data_point_consents"))
+        payload["data_point_consents"] = data_consents
         requested_version = payload.get("version") or payload.get("policy_version") or ""
         if requested_version:
             policy = db.one(
@@ -414,19 +426,33 @@ class ConsentService(Service):
             )
         _notify_principal(user_id, fid, NOTIF_CONSENT_GIVEN)
         grant_purpose_ids = []
+        declined_purpose_ids = []
         if isinstance(data_consents, list):
             for point in data_consents:
-                if isinstance(point, dict) and _point_granted(point):
-                    pid = point.get("data_point_id") or point.get("purpose_id") or point.get("id")
-                    if pid:
-                        grant_purpose_ids.append(str(pid))
+                pid = point_purpose_id(point)
+                if not pid:
+                    continue
+                if _point_granted(point):
+                    grant_purpose_ids.append(pid)
+                else:
+                    declined_purpose_ids.append(pid)
+        # CU-09: the audit row names every purpose the grant or update decided,
+        # not only a single-purpose grant's purpose_id column.
         log_event(
             user_id,
             fid,
             "APP",
             None,
             "CONSENT_GIVEN",
-            {"policy_id": policy_id, "record_id": cid},
+            {
+                "policy_id": policy_id,
+                "policy_version": version,
+                "record_id": cid,
+                "supersedes_record_id": str(prior["id"]) if prior else None,
+                "purpose_ids": grant_purpose_ids + declined_purpose_ids,
+                "granted_purpose_ids": grant_purpose_ids,
+                "declined_purpose_ids": declined_purpose_ids,
+            },
             purpose_id=grant_purpose_ids[0] if len(grant_purpose_ids) == 1 else None,
             consent_status="CONSENT_GIVEN",
             initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
@@ -586,7 +612,9 @@ class ConsentService(Service):
                     """
                     SELECT DISTINCT lower(replace(trim(cat), ' ', '_')) AS id, trim(cat) AS label
                     FROM ropa_entries e,
-                         LATERAL jsonb_array_elements_text(e.data_subject_categories) AS cat
+                         LATERAL jsonb_array_elements_text(
+                         CASE WHEN jsonb_typeof(e.data_subject_categories) = 'array'
+                              THEN e.data_subject_categories ELSE '[]'::jsonb END) AS cat
                     WHERE e.fiduciary_id = %s AND e.linked_policy_ids @> %s AND e.status = 'active'
                       AND trim(cat) <> ''
                     ORDER BY label LIMIT 100
@@ -604,14 +632,14 @@ class ConsentService(Service):
             from .retention import retention_for_purposes
 
             lifecycle = {
-                str(r["purpose_id"]).lower(): r["state"]
+                canonical_purpose_id(r["purpose_id"]): r["state"]
                 for r in db.all(
                     "SELECT purpose_id, state FROM purpose_lifecycle WHERE fiduciary_id = %s",
                     (str(row["fiduciary_id"]),),
                 )
             }
             points = [
-                (point, str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "").lower())
+                (point, point_purpose_id(point))
                 for point in row.get("data_point_consents") or []
                 if isinstance(point, dict)
             ]
@@ -646,9 +674,9 @@ class ConsentService(Service):
         if payload.get("purpose_id"):
             where.append(
                 "EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) p "
-                "WHERE lower(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id')) = lower(%s))"
+                "WHERE lower(btrim(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id'))) = %s)"
             )
-            params.append(str(payload["purpose_id"]))
+            params.append(canonical_purpose_id(payload["purpose_id"]))
         if payload.get("status"):
             status = str(payload["status"]).upper()
             if status == "ACTIVE":
@@ -750,9 +778,7 @@ class ConsentService(Service):
         for row in rows:
             points = row.get("data_point_consents") or []
             purposes = ", ".join(
-                str(p.get("data_point_id") or p.get("id") or "") + ("" if _point_granted(p) else ":withdrawn")
-                for p in points
-                if isinstance(p, dict)
+                point_purpose_id(p) + ("" if _point_granted(p) else ":withdrawn") for p in points if isinstance(p, dict)
             )
             writer.writerow(
                 [
@@ -801,8 +827,8 @@ class ConsentService(Service):
                 ]
                 points = [p for p in row.get("data_point_consents") or [] if isinstance(p, dict)]
                 for point in points:
-                    pid = str(point.get("data_point_id") or point.get("id") or "")
-                    name = names.get(pid.lower())
+                    pid = point_purpose_id(point)
+                    name = names.get(pid)
                     label = f"{name} ({pid})" if name and name != pid else pid
                     lines.append(f"    - {label}: {'granted' if _point_granted(point) else 'withdrawn'}")
                 if not points:
@@ -846,7 +872,11 @@ class ConsentService(Service):
     def validate_consent(self, ctx: RequestContext) -> dict:
         bind_principal_field(ctx, "user_id")
         user_id = require(ctx.payload.get("user_id"), "user_id")
-        purpose = require(ctx.payload.get("required_purpose_id"), "required_purpose_id")
+        # P10-04: one canonical spelling for the grant match, the CLOSED gate,
+        # the validation row, the webhook and the audit entry alike.
+        purpose = canonical_purpose_id(require(ctx.payload.get("required_purpose_id"), "required_purpose_id"))
+        if not purpose:
+            raise ApiError(400, "Bad Request", "'required_purpose_id' is required.")
         fid = _fid(ctx)
         # CW-03: one active record per policy, so look at all of them. The newest
         # record that names the purpose decides; if none names it, it was never
@@ -867,10 +897,7 @@ class ConsentService(Service):
             purpose_state = "NOT_CONSENTED"
             for candidate in rows:
                 points = [p for p in candidate.get("data_point_consents") or [] if isinstance(p, dict)]
-                named = any(
-                    str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower() == purpose.lower()
-                    for p in points
-                )
+                named = any(point_purpose_id(p) == canonical_purpose_id(purpose) for p in points)
                 if named:
                     row = candidate
                     valid = any(_point_grants(p, purpose) for p in points)
@@ -881,7 +908,7 @@ class ConsentService(Service):
         # P9-01: matched case-insensitively, exactly as the grant matcher above
         # is; otherwise 'marketing' validates while 'MARKETING' is closed.
         lifecycle = db.one(
-            "SELECT state FROM purpose_lifecycle WHERE fiduciary_id = %s AND lower(purpose_id) = lower(%s)"
+            "SELECT state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s"
             " ORDER BY (state = 'CLOSED') DESC LIMIT 1",
             (fid, purpose),
         )
@@ -892,7 +919,22 @@ class ConsentService(Service):
         # not an integrator validation. It must not log a validation, notify
         # the principal of a "denial", webhook the fiduciary or audit as one.
         self_check = bool(ctx.auth_via_principal_jwt)
-        if not self_check:
+        if self_check:
+            # P10-08: ...but it is still an access to the principal's consent
+            # record and is logged as what it is, so Rule 6(1)(c) review can see it.
+            log_event(
+                user_id,
+                fid,
+                "APP",
+                None,
+                "CONSENT_SELF_CHECKED",
+                {"purpose_id": purpose, "purpose_status": purpose_state, "valid": valid},
+                purpose_id=purpose,
+                consent_status="VALID" if valid else "INVALID",
+                initiator="PRINCIPAL",
+                source_ip=ctx.source_ip,
+            )
+        else:
             db.execute(
                 "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
                 (fid, user_id, purpose, "VALID" if valid else "INVALID"),
@@ -966,7 +1008,7 @@ class ConsentService(Service):
         )
         if not records:
             raise ApiError(404, "Not Found", "No active consent found.")
-        wanted = {pid.lower() for pid in _normalise_purpose_ids(ctx.payload)}
+        wanted = set(_normalise_purpose_ids(ctx.payload))
         out = []
         seen: set[str] = set()
         granted_points = []
@@ -974,7 +1016,7 @@ class ConsentService(Service):
             content = record.get("policy_content") or {}
             block = content.get(language) or content.get("en") or next(iter(content.values()), {})
             purposes = {
-                str(p.get("id")).lower(): p
+                canonical_purpose_id(p.get("id")): p
                 for p in (block.get("data_processing_purposes") or [])
                 if isinstance(p, dict)
             }
@@ -982,11 +1024,11 @@ class ConsentService(Service):
                 if isinstance(point, dict) and _point_granted(point):
                     granted_points.append((point, purposes))
         for point, purposes in granted_points:
-            pid = str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "")
-            if (wanted and pid.lower() not in wanted) or pid.lower() in seen:
+            pid = point_purpose_id(point)
+            if (wanted and pid not in wanted) or pid in seen:
                 continue
-            seen.add(pid.lower())
-            purpose = purposes.get(pid.lower(), {})
+            seen.add(pid)
+            purpose = purposes.get(pid, {})
             mandatory = bool(purpose.get("is_mandatory_for_service"))
             hold = legal_hold_for(fid, pid)
             consequence = purpose.get("withdrawal_consequence") or (
@@ -1053,12 +1095,12 @@ class ConsentService(Service):
                 # active grant; withdrawing something that was never granted is an
                 # error an integrator can act on, not a silent success.
                 granted = {
-                    str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower()
+                    point_purpose_id(p)
                     for active in active_rows
                     for p in active["data_point_consents"] or []
                     if isinstance(p, dict) and _point_granted(p)
                 }
-                missing = [pid for pid in purpose_ids if pid.lower() not in granted]
+                missing = [pid for pid in purpose_ids if pid not in granted]
                 if missing:
                     raise ApiError(
                         400,
@@ -1069,10 +1111,7 @@ class ConsentService(Service):
             for row in active_rows:
                 points = row["data_point_consents"] or []
                 if purpose_ids and not any(
-                    isinstance(p, dict)
-                    and _point_granted(p)
-                    and str(p.get("data_point_id") or p.get("id") or p.get("purpose_id") or "").lower()
-                    in {w.lower() for w in purpose_ids}
+                    isinstance(p, dict) and _point_granted(p) and point_purpose_id(p) in set(purpose_ids)
                     for p in points
                 ):
                     continue  # this policy's record holds none of the named purposes
@@ -1082,8 +1121,7 @@ class ConsentService(Service):
                     if not isinstance(point, dict):
                         updated.append(point)
                         continue
-                    stored_id = str(point.get("data_point_id") or point.get("id") or point.get("purpose_id") or "")
-                    matches = full_withdrawal or any(stored_id.lower() == wanted.lower() for wanted in purpose_ids)
+                    matches = full_withdrawal or point_purpose_id(point) in purpose_ids
                     if matches:
                         point = dict(point)
                         point["consent_granted"] = False
@@ -1220,11 +1258,26 @@ class ConsentService(Service):
             record_id,
             {"user_id": user_id, "purpose_ids": purpose_ids, "legal_holds": held},
         )
+        # CW-08: every linked processor is told too, on its own endpoint, and
+        # must acknowledge its own alert.
+        try:
+            from .lifecycle import notify_processors
+
+            processors = notify_processors(
+                fid,
+                "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
+                record_id,
+                {"user_id": user_id, "purpose_ids": purpose_ids, "consent_record_id": record_id, "erasure": erasure},
+                category="PURGE" if erasure else "NOTIFICATION",
+            )
+        except Exception:  # pragma: no cover - a fan-out failure never undoes the withdrawal
+            processors = []
         out = {
             "success": True,
             "message": "Erasure request submitted." if erasure else "Consent withdrawn successfully.",
             "consent_record_id": record_id,
             "consent_record_ids": record_ids,
+            "processors_notified": len(processors),
         }
         if held:
             out["retained_under_legal_hold"] = held
@@ -1259,7 +1312,9 @@ class PrincipalService(Service):
                    lower(replace(trim(cat), ' ', '_')) AS id,
                    trim(cat)                           AS label
             FROM ropa_entries e,
-                 LATERAL jsonb_array_elements_text(e.data_subject_categories) AS cat
+                 LATERAL jsonb_array_elements_text(
+                         CASE WHEN jsonb_typeof(e.data_subject_categories) = 'array'
+                              THEN e.data_subject_categories ELSE '[]'::jsonb END) AS cat
             WHERE e.fiduciary_id = %s
               AND e.status = 'active'
               AND trim(cat) <> ''
@@ -1356,7 +1411,65 @@ class PrincipalService(Service):
             log_event(user_id, fid, "APP", None, "PRINCIPAL_LOGIN_FAILURE", {"reason": "Invalid or expired OTP."})
             raise ApiError(401, "Unauthorized", "Invalid OTP or account not found.")
         log_event(user_id, fid, "APP", None, "PRINCIPAL_LOGIN_SUCCESS", {"otp_mode": mode}, source_ip=ctx.source_ip)
-        return {"success": True, "token": principal_token(fid, user_id), "user_id": user_id, "fiduciary_id": fid}
+        token = principal_token(fid, user_id)
+        # UD-05: the rights portal builds its session from this response
+        # (portal.js saveSession). Without the policies the Manage Consent tab
+        # read "No active consent policy found" for every principal.
+        persona = str(ctx.payload.get("persona") or "").strip()[:100] or None
+        return {
+            "success": True,
+            "token": token,
+            "user_id": user_id,
+            "fiduciary_id": fid,
+            **self._portal_session(fid),
+            "persona": persona,
+            "sync_token": token,
+        }
+
+    @staticmethod
+    def _portal_session(fid: str) -> dict:
+        """The fiduciary's name, its live policies (with the personas each is
+        tagged for in the ROPA) and whether the PCA QR is enabled."""
+        fiduciary = db.one(
+            "SELECT f.name, r.pca_qr_enabled FROM fiduciaries f"
+            " LEFT JOIN rights_app_config r ON r.fiduciary_id = f.id WHERE f.id = %s",
+            (fid,),
+        )
+        rows = db.all(
+            """
+            SELECT DISTINCT ON (p.id) p.id AS policy_id, p.version, p.jurisdiction, p.policy_content,
+                   COALESCE((
+                       SELECT jsonb_agg(DISTINCT lower(replace(trim(cat), ' ', '_')))
+                       FROM ropa_entries e, LATERAL jsonb_array_elements_text(
+                         CASE WHEN jsonb_typeof(e.data_subject_categories) = 'array'
+                              THEN e.data_subject_categories ELSE '[]'::jsonb END) AS cat
+                       WHERE e.fiduciary_id = p.fiduciary_id AND e.linked_policy_ids @> jsonb_build_array(p.id)
+                         AND e.status = 'active' AND trim(cat) <> ''
+                   ), '[]'::jsonb) AS personas
+            FROM consent_policies p
+            WHERE p.fiduciary_id = %s AND p.status = 'ACTIVE' AND p.effective_date <= NOW()
+            ORDER BY p.id, p.effective_date DESC
+            """,
+            (fid,),
+        )
+        policies = []
+        for row in rows:
+            content = row.get("policy_content") or {}
+            block = (content.get("en") or next(iter(content.values()), {})) if isinstance(content, dict) else {}
+            policies.append(
+                {
+                    "policy_id": row["policy_id"],
+                    "version": row["version"],
+                    "jurisdiction": row["jurisdiction"],
+                    "title": (block.get("title") if isinstance(block, dict) else None) or row["policy_id"],
+                    "personas": row.get("personas") or [],
+                }
+            )
+        return {
+            "fiduciary_name": (fiduciary or {}).get("name"),
+            "policies": policies,
+            "pca_qr_enabled": (fiduciary or {}).get("pca_qr_enabled") is not False,
+        }
 
     @staticmethod
     def _consume_otp(fid: str, user_id: str, supplied: str) -> bool:

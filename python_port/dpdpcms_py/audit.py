@@ -155,7 +155,12 @@ def certificate_signature(data: dict) -> str:
     return hmac.new(settings.certificate_signing_key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
 
 
-def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None, since: datetime | str | None = None) -> dict:
+def verify_chain(
+    limit: int = 100_000,
+    fiduciary_id: str | None = None,
+    since: datetime | str | None = None,
+    until: datetime | str | None = None,
+) -> dict:
     """LG-04: walk the ledger and recompute it.
 
     The walk is NEWEST-first and stops at `limit` rows, so the most recent
@@ -181,16 +186,26 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None, since: d
     examined: with `since`, that the window was not truncated; without it, that
     rows_checked equals the scope's real row count. Callers that certify refuse
     on an incomplete window rather than on the old (unreachable) truncation test.
+
+    P10-06: `until` closes the window (exclusive), so a verdict for a historical
+    export examines the rows that export holds - not the newest `limit` rows of
+    the ledger - and the newest row of the window must be the one its successor
+    links to, or a row deleted just above the window would go unnoticed.
     """
     cols = ", ".join(_HASHED_COLUMNS)
     select = f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
+    bounds, bound_params = [], []
     if since is not None:
-        fetched = db.all(
-            select + "WHERE timestamp >= %s::timestamp ORDER BY timestamp DESC, id DESC LIMIT %s",
-            (_naive_utc(since), limit + 1),
-        )
-    else:
-        fetched = db.all(select + "ORDER BY timestamp DESC, id DESC LIMIT %s", (limit + 1,))
+        bounds.append("timestamp >= %s::timestamp")
+        bound_params.append(_naive_utc(since))
+    if until is not None:
+        bounds.append("timestamp < %s::timestamp")
+        bound_params.append(_naive_utc(until))
+    window = f"WHERE {' AND '.join(bounds)} " if bounds else ""
+    fetched = db.all(
+        select + window + "ORDER BY timestamp DESC, id DESC LIMIT %s",
+        (*bound_params, limit + 1),
+    )
     truncated = len(fetched) > limit
     rows = fetched[:limit]
     broken: list[dict] = []
@@ -241,13 +256,25 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None, since: d
         )
         if predecessor and (oldest.get("prev_log_hash") or "") != (predecessor.get("current_log_hash") or ""):
             flag(oldest, "LINK_MISMATCH")
+    if until is not None and rows:
+        newest = rows[0]
+        successor = db.one(
+            "SELECT id, fiduciary_id, prev_log_hash FROM audit_logs WHERE (timestamp, id) > (%s, %s)"
+            " ORDER BY timestamp ASC, id ASC LIMIT 1",
+            (newest["timestamp"], newest["id"]),
+        )
+        if successor and (successor.get("prev_log_hash") or "") != (newest.get("current_log_hash") or ""):
+            flag(successor, "LINK_MISMATCH")
 
     # An untruncated window holds every row in scope by construction; only a
     # truncated one needs the scope's real row count to say what was missed.
-    scope_total = _count_rows(fiduciary_id, since) if truncated else in_scope_total
+    scope_total = _count_rows(fiduciary_id, since, until) if truncated else in_scope_total
     # Zero in-scope rows is never a clean bill of health (P7-02).
     unexamined_tenant = fiduciary_id is not None and in_scope_total == 0
-    coverage_complete = not truncated if since is not None else in_scope_total >= scope_total
+    if since is not None or until is not None:
+        coverage_complete = not truncated
+    else:
+        coverage_complete = in_scope_total >= scope_total
     return {
         "intact": not broken and not foreign_broken and not unexamined_tenant,
         # P6-13: rows_checked means the same thing at every scope — the in-scope
@@ -264,6 +291,7 @@ def verify_chain(limit: int = 100_000, fiduciary_id: str | None = None, since: d
         "coverage_complete": coverage_complete,
         "unexamined_tenant": unexamined_tenant,
         "anchored_since": _naive_utc(since).isoformat() if since is not None else None,
+        "anchored_until": _naive_utc(until).isoformat() if until is not None else None,
     }
 
 
@@ -276,7 +304,7 @@ def _naive_utc(value: datetime | str) -> datetime:
     return value
 
 
-def _count_rows(fiduciary_id: str | None, since: datetime | str | None) -> int:
+def _count_rows(fiduciary_id: str | None, since: datetime | str | None, until: datetime | str | None = None) -> int:
     where, params = [], []
     if fiduciary_id is not None:
         where.append("fiduciary_id = %s")
@@ -284,6 +312,9 @@ def _count_rows(fiduciary_id: str | None, since: datetime | str | None) -> int:
     if since is not None:
         where.append("timestamp >= %s::timestamp")
         params.append(_naive_utc(since))
+    if until is not None:
+        where.append("timestamp < %s::timestamp")
+        params.append(_naive_utc(until))
     clause = f" WHERE {' AND '.join(where)}" if where else ""
     row = db.one(f"SELECT count(*) AS n FROM audit_logs{clause}", params)
     return int((row or {}).get("n") or 0)
@@ -364,7 +395,7 @@ def list_logs(payload: dict) -> list[dict]:
         params.append(payload["audit_action"])
     if payload.get("purpose_id"):
         where.append("purpose_id = %s")
-        params.append(payload["purpose_id"])
+        params.append(str(payload["purpose_id"]).strip().lower())
     if payload.get("initiator"):
         where.append("initiator = %s")
         params.append(payload["initiator"])
@@ -375,7 +406,7 @@ def list_logs(payload: dict) -> list[dict]:
             f"""
         SELECT id, fiduciary_id, timestamp, user_id, service_type, service_id,
                audit_action, context_details, prev_log_hash, current_log_hash,
-               purpose_id, consent_status, initiator, source_ip
+               purpose_id, consent_status, initiator, source_ip, system_metadata
         FROM audit_logs
         WHERE {" AND ".join(where)}
         ORDER BY timestamp DESC

@@ -14,7 +14,7 @@ from ..errors import ApiError
 from ..netutil import validate_outbound_url
 from ..security import hash_password, pseudonym, random_secret
 from .base import Service, bind_principal_field, principal_list_filter, require, tenant_filter
-from .catalog import resolve_fiduciary
+from .catalog import activate_policy_if_complete, resolve_fiduciary
 
 API_KEY_COLUMNS = (
     "ak.id AS key_id, ak.fiduciary_id, ak.app_id, ap.name AS app_name, ak.description, "
@@ -58,6 +58,19 @@ class ApiKeyService(Service):
         fiduciary_id = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         app_id = ctx.payload.get("app_id") or None
         permissions = ctx.payload.get("permissions") or ["READ"]
+        if app_id:
+            # Rule 6(1)(f): no processor is onboarded without a recorded data
+            # processing agreement - a key for an app is issued only once the
+            # app carries its DPA reference.
+            app = db.one("SELECT dpa_reference FROM apps WHERE id = %s AND fiduciary_id = %s", (app_id, fiduciary_id))
+            if not app:
+                raise ApiError(404, "Not Found", "App not found for this fiduciary.")
+            if not str(app.get("dpa_reference") or "").strip():
+                raise ApiError(
+                    400,
+                    "Bad Request",
+                    "This app has no dpa_reference; record its data processing agreement before issuing a key.",
+                )
         row = db.insert_returning(
             """
             INSERT INTO api_keys
@@ -310,6 +323,32 @@ class NotificationService(Service):
         return {"success": True}
 
     def set_notification_message(self, ctx: RequestContext) -> dict:
+        # NT-02: a template saved under a name the delivery engine never looks
+        # up is a localisation that silently never reaches anyone. Only the
+        # types the services write (and DPO-defined breach categories) are
+        # accepted. NT-03: messages are keyed by English or an Eighth Schedule
+        # language code.
+        from ..defaults import DEFAULT_NOTIFICATION_MESSAGES, NOTIFICATION_LANGUAGES
+
+        ntype = str(require(ctx.payload.get("notification_type"), "notification_type")).strip().upper()
+        if ntype not in DEFAULT_NOTIFICATION_MESSAGES and not ntype.startswith("BREACH_NOTIFICATION"):
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"Unknown notification_type '{ntype}'. Use one of {sorted(DEFAULT_NOTIFICATION_MESSAGES)} "
+                "or a BREACH_NOTIFICATION_* category.",
+            )
+        messages = require(ctx.payload.get("messages"), "messages")
+        if not isinstance(messages, dict):
+            raise ApiError(400, "Bad Request", "messages must be an object keyed by language code.")
+        unknown = sorted(str(k) for k in messages if str(k) not in NOTIFICATION_LANGUAGES)
+        if unknown:
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"Unsupported language code(s) {unknown}; use en or an Eighth Schedule language code.",
+            )
+        ctx.payload["notification_type"] = ntype
         db.execute(
             """
             INSERT INTO notification_message_templates (fiduciary_id, notification_type, messages, last_updated_at)
@@ -346,7 +385,7 @@ class NotificationService(Service):
             INSERT INTO webhook_configs (fiduciary_id, category, webhook_url, secret_enc, enabled, last_updated_at)
             VALUES (%s, %s, %s, {db.enc_expr()}, %s, NOW())
             ON CONFLICT (fiduciary_id, category) DO UPDATE SET
-                webhook_url = EXCLUDED.webhook_url, secret_enc = EXCLUDED.secret_enc,
+                webhook_url = EXCLUDED.webhook_url, secret_enc = CASE WHEN %s THEN EXCLUDED.secret_enc ELSE webhook_configs.secret_enc END,
                 enabled = EXCLUDED.enabled, last_updated_at = NOW()
             """,
             (
@@ -355,9 +394,68 @@ class NotificationService(Service):
                 webhook_url,
                 *db.bind_encrypt(ctx.payload.get("secret", "")),
                 bool(ctx.payload.get("enabled", True)),
+                # A blank secret on an edit keeps the stored one (the console says so).
+                bool(ctx.payload.get("secret")),
             ),
         )
         return {"success": True}
+
+    def set_processor_webhook_config(self, ctx: RequestContext) -> dict:
+        """CW-08: a processor's own endpoint, so a withdrawal reaches each
+        linked processor instead of one endpoint per category."""
+        fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
+        app_id = require(ctx.payload.get("app_id"), "app_id")
+        category = str(require(ctx.payload.get("category"), "category")).upper()
+        if category not in {"NOTIFICATION", "PURGE"}:
+            raise ApiError(400, "Bad Request", "category must be NOTIFICATION or PURGE.")
+        if not db.one("SELECT 1 FROM apps WHERE id = %s AND fiduciary_id = %s", (app_id, fid)):
+            raise ApiError(404, "Not Found", "App not found for this fiduciary.")
+        webhook_url = require(ctx.payload.get("webhook_url"), "webhook_url")
+        try:
+            validate_outbound_url(webhook_url, "webhook_url")
+        except ValueError as exc:
+            raise ApiError(400, "Bad Request", str(exc)) from None
+        db.execute(
+            f"""
+            INSERT INTO processor_webhook_configs (app_id, fiduciary_id, category, webhook_url, secret_enc, enabled, last_updated_at)
+            VALUES (%s, %s, %s, %s, {db.enc_expr()}, %s, NOW())
+            ON CONFLICT (app_id, category) DO UPDATE SET
+                webhook_url = EXCLUDED.webhook_url, secret_enc = CASE WHEN %s THEN EXCLUDED.secret_enc ELSE processor_webhook_configs.secret_enc END,
+                enabled = EXCLUDED.enabled, last_updated_at = NOW()
+            """,
+            (
+                app_id,
+                fid,
+                category,
+                webhook_url,
+                *db.bind_encrypt(ctx.payload.get("secret", "")),
+                bool(ctx.payload.get("enabled", True)),
+                # A blank secret on an edit keeps the stored one (the console says so).
+                bool(ctx.payload.get("secret")),
+            ),
+        )
+        log_event(
+            ctx.actor_email or "DPO",
+            str(fid),
+            "DPO_CONSOLE",
+            None,
+            "PROCESSOR_WEBHOOK_CONFIGURED",
+            {"app_id": str(app_id), "category": category, "enabled": bool(ctx.payload.get("enabled", True))},
+            source_ip=ctx.source_ip,
+        )
+        return {"success": True}
+
+    def list_processor_webhook_configs(self, ctx: RequestContext) -> list[dict]:
+        return db.to_jsonable(
+            db.all(
+                """
+                SELECT p.app_id, a.name AS app_name, p.category, p.webhook_url, p.enabled, p.last_updated_at
+                FROM processor_webhook_configs p JOIN apps a ON a.id = p.app_id
+                WHERE p.fiduciary_id = %s ORDER BY a.name, p.category
+                """,
+                (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
+            )
+        )
 
     def list_webhook_configs(self, ctx: RequestContext) -> list[dict]:
         return db.to_jsonable(
@@ -406,13 +504,20 @@ class NotificationService(Service):
         )
 
     def dispatch_notification(self, ctx: RequestContext) -> dict:
+        # P10-10: the caller supplies the values the template's placeholders
+        # need (`context`; `payload_data` is the older name), so a dispatched
+        # notice is filled like one the services raise.
+        context = ctx.payload.get("context") or ctx.payload.get("payload_data")
+        if context is not None and not isinstance(context, dict):
+            raise ApiError(400, "Bad Request", "context must be an object.")
         row = db.insert_returning(
-            "INSERT INTO notifications (id, recipient_type, recipient_id, fiduciary_id, notification_type, created_at) VALUES (uuid_generate_v4(), %s, %s, %s, %s, NOW()) RETURNING id",
+            "INSERT INTO notifications (id, recipient_type, recipient_id, fiduciary_id, notification_type, context, created_at) VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW()) RETURNING id",
             (
                 require(ctx.payload.get("recipient_type"), "recipient_type"),
                 require(ctx.payload.get("recipient_id"), "recipient_id"),
                 require(resolve_fiduciary(ctx), "fiduciary_id"),
-                require(ctx.payload.get("notification_type"), "notification_type"),
+                require(ctx.payload.get("notification_type") or ctx.payload.get("template_id"), "notification_type"),
+                db.as_jsonb(context) if context else None,
             ),
         )
         return {"success": True, "notification_id": str(row["id"])}
@@ -558,18 +663,9 @@ class RopaService(Service):
         return {"success": True, "message": "ROPA entry published.", "activated_policies": activated}
 
     def _activate_policy_if_complete(self, policy_id: str, fiduciary_id: str) -> bool:
-        """A policy goes live only once every ROPA entry that references it is active or retired."""
-        pending = db.one(
-            "SELECT COUNT(*) AS count FROM ropa_entries WHERE linked_policy_ids @> %s AND fiduciary_id = %s AND status NOT IN ('active', 'retired')",
-            (db.as_jsonb([policy_id]), fiduciary_id),
-        )
-        if pending and pending["count"] > 0:
-            return False
-        updated = db.execute(
-            "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = NOW() WHERE id = %s AND fiduciary_id = %s AND status = 'UNDER_REVIEW'",
-            (policy_id, fiduciary_id),
-        )
-        if not updated:
+        """A policy goes live only once every ROPA entry that references it is
+        active or retired; activation also sends the re-consent notices (P10-02)."""
+        if not activate_policy_if_complete(policy_id, fiduciary_id):
             return False
         log_event("DPO", fiduciary_id, "DPO_CONSOLE", fiduciary_id, "POLICY_ACTIVATED_BY_DPO", f"policy:{policy_id}")
         return True

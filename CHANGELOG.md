@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (308 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (333 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -598,10 +598,123 @@ regression test in `test_integration_db.py`.
 - Tests: 307 passed, 1 skipped (308 collected) against a throwaway Postgres
   with `db/01..25` applied; db/25 re-applied cleanly.
 
+### Fixed (Security workbook v8, p11 remediation round)
+
+Workbook v8 re-verified `038f6ce` and raised eleven findings (P10-01..P10-11),
+left P9-08 partly open and kept fourteen requirements off Exists. All are
+closed in code, with a DB-backed regression test for each in
+`test_integration_db.py`. The re-consent flow (P10-02) is now tested against
+the real policy and ROPA rows, so CI no longer depends on unit tests that stub
+the policy as ACTIVE (the CF-03 blind spot).
+
+- **P10-01 (CC-03, CV-01, CU-05)** A consent decision is stored under
+  `data_point_id` only. One that names two different purposes through two
+  aliases (`purpose_id` and `id`) is refused with a 400. Every reader resolves
+  the aliases in one order (`data_point_id`, `purpose_id`, `id`), which is the
+  order the SQL in erasure, closure and retention already used.
+- **P10-02 (CU-02, CU-03)** A version is activated when its ROPA is complete,
+  and the re-consent notices go out only at activation, never while the version
+  is UNDER_REVIEW. A wording-only change creates no new ROPA entry, so it
+  activates at `publish_policy`. A version that adds a purpose activates when
+  its last ROPA entry is published. `notify_policy_change` refuses (409) a
+  version that is not active and in effect.
+- **P10-03 (SA-03, SA-04)** Assigning a role is bounded by the caller's
+  permissions, not its role name: the target role's permission set must be held
+  by the caller. This is enforced in `create_user` and `update_user`. An
+  operator cannot change its own role.
+- **P10-04 / P10-05 / P10-09 (PL-03, PL-04, SA-09, SA-10, CW-11)** Purpose ids
+  are canonical (trimmed, lower-case) on write:
+  - The services canonicalise policy purposes, consent decisions, lifecycle rows,
+    retention `applicable_purposes`, erasure targets and the ROPA link.
+  - db/26 rewrites the stored rows once and adds canonicalising triggers.
+  - Case-variant lifecycle rows are merged and the CLOSED one is kept.
+  - Retention and legal-hold lookups resolve on the canonical id.
+  - Reopening a purpose cancels only that purpose's purges raised since the
+    closure, and only for principals whose consent to it is still active.
+- **P10-06 (LG-04, LG-07)** `verify_chain` takes an exclusive `until` bound and
+  checks the link from the window's newest row to its successor. The AUDIT export
+  verdict is bounded by `start_date` and `end_date`, and `chain_intact` is true
+  only when the chain is intact and coverage is complete. Otherwise
+  `attestation` reads `NOT_ATTESTED` or `BROKEN`. The export's end bound is now
+  exclusive, so it matches the verdict's window. `list_logs` returns
+  `system_metadata`, and the console XLSX export carries it and `fiduciary_id`.
+- **P10-07 (GR-11)** For any channel other than in-app, `render_message`
+  replaces free-text context (the resolution summary) with a pointer to the
+  app. The summary is never handed to the SMS or push gateway.
+- **P10-08 (LG-01, UD-02)** A principal's self-check writes a
+  `CONSENT_SELF_CHECKED` audit row (initiator PRINCIPAL). It still writes no
+  validation row, denial notice or webhook.
+- **P10-10 (NT-01)**
+  - New default messages for `POLICY_CHANGE_RECONSENT_REQUIRED`,
+    `PURGE_SCHEDULED` and `PURGE_EXECUTED`.
+  - A type with no template renders as words, never as its enum name.
+  - A placeholder the context cannot fill falls back to the type's plain
+    wording, or is dropped.
+  - `dispatch_notification` takes `context` (or the schema's older
+    `payload_data`).
+- **P10-11 (CC-01, UD-05)** db/26 replaces the one-active-record-per-fiduciary
+  unique index with one active record per principal per policy. The schema
+  now matches the service model.
+- **UD-05** `principal_login` returns `fiduciary_name`, the fiduciary's live
+  `policies` (with ROPA personas), `persona`, `pca_qr_enabled` and
+  `sync_token`, which are the keys the rights portal's `saveSession` reads.
+- **NT-02** The console's template cards use the notification types the
+  services write. db/26 merges the legacy names into them.
+  `set_notification_message` refuses unknown types (other than
+  `BREACH_NOTIFICATION_*`) and unsupported language codes.
+- **NT-03**
+  - The console offers English and all 22 Eighth Schedule languages, not only the
+    active policy's.
+  - Principal-facing defaults ship in Hindi as well as English.
+  - Rendering prefers the DPO's text in the principal's language, then the
+    built-in text in that language, then English.
+- **CC-03** The rights portal pre-ticks no purpose and locks none. A purpose
+  the service depends on is labelled as such. Declining it asks for
+  confirmation, and exactly what the principal ticked is sent.
+- **CU-09** The `CONSENT_GIVEN` audit row lists every purpose a grant or update
+  decided (`purpose_ids`, `granted_purpose_ids`, `declined_purpose_ids`), the
+  policy version and the superseded record.
+- **PL-03** Closing a purpose raises erasure for every principal who ever
+  granted it, including those who had already withdrawn.
+- **CW-08** A withdrawal, an erasure request or a purpose closure fans out to
+  every active processor (app):
+  - Each processor gets its own webhook delivery to its own endpoint
+    (`processor_webhook_configs`, db/26).
+  - Each processor gets its own acknowledgeable PROCESSOR alert.
+  - One app's key cannot acknowledge another processor's alert.
+  - The console configures the endpoints.
+- **UD-03** The rights dashboard filters history by purpose, status and date.
+- **UD-04** The rights dashboard downloads the history as CSV or PDF.
+- **UD-10** The dashboard shows the grievance reference number and tells the
+  principal the reference on submission.
+- **GR-03** Grievance notices carry the language the grievance was filed in.
+  Delivery uses it before the principal's last consent language.
+- **GR-08** `list_pending_grievances`, the fourth reader, returns
+  `grievance_id`.
+- **SA-13** Erasure re-keys to a random token per erasure, not a keyed hash of
+  the identifier. Nobody can recompute it from the original id.
+- **P9-05 (residual)** The `consent_records` maintenance opt-in no longer
+  permits DELETE, reviving a retired record, changing the cited notice or
+  timing, or turning a refused purpose into a granted one.
+- **Rule 6(1)(c)** A worker sweep (`jobs.flag_security_anomalies`) raises an
+  alert and tells the DPO when failed sign-ins burst within an hour.
+- **Rule 6(1)(f)** An API key for an app is issued only once the app records
+  its `dpa_reference`.
+- **DD-04** The DPO decision register is now `docs/dpo_decision_register.md`
+  (DD-01 to DD-04).
+- **D10 / D13** are reconciled and tested. D10 is the CHANGELOG test-count and
+  CI guard (`test_changelog_test_claims_are_true_and_ci_never_skips`). D13 is
+  the README and scripted upgrade lists (`test_readme_upgrade_loop_lists_every_migration`,
+  `test_upgrade_script_list_covers_every_migration`).
+- Webhook settings: saving with a blank secret keeps the stored secret, as the
+  console says, instead of overwriting it with an empty one.
+- Tests: 332 passed, 1 skipped (333 collected) against a throwaway Postgres
+  with `db/01..26` applied. db/26 re-applies cleanly.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/25` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Existing database:** Run `db/13` through `db/26` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
 - **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

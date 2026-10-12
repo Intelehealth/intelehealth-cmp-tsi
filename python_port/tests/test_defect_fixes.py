@@ -118,6 +118,13 @@ def otp_store(monkeypatch):
     monkeypatch.setattr(consent.db, "connection", store.connection)
     monkeypatch.setattr(consent, "log_event", lambda *a, **k: None)
     monkeypatch.setattr("dpdpcms_py.webhooks.queue_webhook", lambda *a, **k: store.webhooks.append((a, k)))
+    # UD-05: the portal-session lookup is exercised against Postgres in the
+    # integration tier; here the OTP store is all the fake understands.
+    monkeypatch.setattr(
+        consent.PrincipalService,
+        "_portal_session",
+        staticmethod(lambda fid: {"fiduciary_name": None, "policies": [], "pca_qr_enabled": True}),
+    )
     return store
 
 
@@ -299,6 +306,7 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
         "prune_sso_nonces",
         "expire_nominations",
         "prune_old_webhook_deliveries",
+        "flag_security_anomalies",
     ):
         monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})
     monkeypatch.setattr(worker.throttle, "prune_expired", lambda: {"pruned": 0})

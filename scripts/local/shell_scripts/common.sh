@@ -35,6 +35,7 @@ UPGRADE_MIGRATIONS=(
   23_notification_delivery_floor.sql
   24_p8_remediation.sql
   25_p9_remediation.sql
+  26_p10_remediation.sql
 )
 REQUIRED_SECRETS=(JWT_SECRET DB_ENCRYPTION_KEY TSI_LOOKUP_SALT BOOTSTRAP_TOKEN)
 CONTAINER_NAMES=(tsi_dpdp_cms_py_db tsi_dpdp_cms_py_server tsi_dpdp_cms_py_worker)
