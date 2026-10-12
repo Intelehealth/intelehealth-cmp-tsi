@@ -416,7 +416,17 @@
             "Actor ID": log.service_id,
             "Context Details": typeof log.context_details === 'object'
                 ? JSON.stringify(log.context_details)
-                : log.context_details
+                : log.context_details,
+            // P9-08 / LG-07: the remaining hashed columns and both hashes, so the
+            // exported ledger can be re-verified by whoever receives it.
+            "Log ID": log.id,
+            "Purpose ID": log.purpose_id,
+            "Consent Status": log.consent_status,
+            "Initiator": log.initiator,
+            "Source IP": log.source_ip,
+            "Raw Timestamp (UTC)": log.timestamp,
+            "Previous Log Hash": log.prev_log_hash,
+            "Current Log Hash": log.current_log_hash
         }));
 
         // Generate worksheet and workbook
@@ -431,7 +441,15 @@
             { wch: 20 }, // Action Type
             { wch: 12 }, // Actor Type
             { wch: 36 }, // Actor ID
-            { wch: 50 }  // Context Details
+            { wch: 50 }, // Context Details
+            { wch: 36 }, // Log ID
+            { wch: 20 }, // Purpose ID
+            { wch: 16 }, // Consent Status
+            { wch: 12 }, // Initiator
+            { wch: 16 }, // Source IP
+            { wch: 28 }, // Raw Timestamp (UTC)
+            { wch: 64 }, // Previous Log Hash
+            { wch: 64 }  // Current Log Hash
         ];
         worksheet['!cols'] = wscols;
 

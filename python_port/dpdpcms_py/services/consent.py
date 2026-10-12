@@ -106,11 +106,20 @@ def check_consent_alignment(fiduciary_id: str, policy_id: str, version: str, dat
     and no CLOSED purpose (PL-02/03) may be granted. Returns the closed purpose ids
     (lower-case) so the explicit-choice check does not demand a decision on them."""
     policy = db.one(
-        "SELECT policy_content FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+        "SELECT policy_content, status, effective_date <= NOW() AS in_effect FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
         (policy_id, version, fiduciary_id),
     )
     if not policy:
         raise ApiError(404, "Not Found", f"Policy {policy_id} version {version} not found.")
+    # P9-02: consent may only rest on a notice the principal could have been
+    # shown, i.e. the version get_active_policy serves: ACTIVE and in effect.
+    # A DRAFT was never published and an ARCHIVED version is no longer served.
+    if str(policy.get("status") or "").upper() != "ACTIVE" or policy.get("in_effect") is False:
+        raise ApiError(
+            409,
+            "Conflict",
+            f"Policy {policy_id} version {version} is not the active, in-effect notice; consent cannot be recorded against it.",
+        )
     declared = declared_purpose_ids(policy.get("policy_content"))
 
     requested: set[str] = set()
@@ -815,10 +824,12 @@ class ConsentService(Service):
         anon = require(ctx.payload.get("anonymous_user_id"), "anonymous_user_id")
         auth = require(ctx.payload.get("authenticated_user_id"), "authenticated_user_id")
         fid = _fid(ctx)
-        db.execute(
-            "UPDATE consent_records SET user_id = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s",
-            (auth, anon, fid),
-        )
+        with db.connection() as conn, conn.cursor() as cur:
+            db.allow_consent_maintenance(cur)
+            cur.execute(
+                "UPDATE consent_records SET user_id = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s",
+                (auth, anon, fid),
+            )
         # SEC-05: age_category and verification_status are server-derived from
         # the guardian/consent flows (CC-05), never from this payload. The link
         # only relabels an anonymous profile the server already recorded (age
@@ -867,21 +878,29 @@ class ConsentService(Service):
                     break
         # PL-02/PL-03: a CLOSED purpose can never validate — closing one must halt
         # further processing under it even if a consent row still exists.
+        # P9-01: matched case-insensitively, exactly as the grant matcher above
+        # is; otherwise 'marketing' validates while 'MARKETING' is closed.
         lifecycle = db.one(
-            "SELECT state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
+            "SELECT state FROM purpose_lifecycle WHERE fiduciary_id = %s AND lower(purpose_id) = lower(%s)"
+            " ORDER BY (state = 'CLOSED') DESC LIMIT 1",
             (fid, purpose),
         )
         if lifecycle and lifecycle["state"] == "CLOSED":
             valid = False
             purpose_state = "PURPOSE_CLOSED"
-        db.execute(
-            "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
-            (fid, user_id, purpose, "VALID" if valid else "INVALID"),
-        )
+        # P9-06: a principal checking their own status from the dashboard is
+        # not an integrator validation. It must not log a validation, notify
+        # the principal of a "denial", webhook the fiduciary or audit as one.
+        self_check = bool(ctx.auth_via_principal_jwt)
+        if not self_check:
+            db.execute(
+                "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
+                (fid, user_id, purpose, "VALID" if valid else "INVALID"),
+            )
         # CV-07: a denied validation must notify the principal, and the denial
         # leaves an audit trail with the purpose and outcome as discrete columns
         # (CV-06, LG-02).
-        if not valid:
+        if not valid and not self_check:
             _notify_principal(user_id, fid, NOTIF_VALIDATION_DENIED)
             try:
                 from ..webhooks import queue_webhook
@@ -1023,6 +1042,12 @@ class ConsentService(Service):
                 (user_id, fid, policy_filter) if policy_filter else (user_id, fid),
             )
             active_rows = cur.fetchall()
+            # P9-07 / CW-06: with no active consent there is nothing to withdraw.
+            # Succeeding here fired the acknowledgement, webhook, alert and audit
+            # cascade for a withdrawal that never happened. An erasure request
+            # stays valid after consent was already withdrawn (s.12 right).
+            if not active_rows and not erasure:
+                raise ApiError(404, "Not Found", "No active consent found to withdraw.")
             if active_rows and purpose_ids:
                 # CW-06: every purpose named for withdrawal must currently hold an
                 # active grant; withdrawing something that was never granted is an

@@ -123,9 +123,28 @@ def record_alert(
             """,
             (str(fiduciary_id), str(fiduciary_id), alert_type, event_ref_id, db.as_jsonb(payload or {})),
         )
-        return str(row["id"]) if row else None
     except Exception:
         return None
+    alert_id = str(row["id"]) if row else None
+    # NT-10: every alert is recorded in the audit log, not only the ones raised
+    # through the alerts API. Payload keys only — it may carry a user_id.
+    try:
+        log_event(
+            "SYSTEM",
+            str(fiduciary_id),
+            "SYSTEM",
+            None,
+            "ALERT_RAISED",
+            {
+                "alert_id": alert_id,
+                "alert_type": alert_type,
+                "event_ref_id": str(event_ref_id) if event_ref_id else None,
+                "purpose_id": (payload or {}).get("purpose_id"),
+            },
+        )
+    except Exception:  # pragma: no cover - auditing must not lose the alert
+        pass
+    return alert_id
 
 
 def close_purpose_exec(
@@ -170,7 +189,7 @@ def close_purpose_exec(
              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
         WHERE cr.fiduciary_id = %s
           AND cr.is_active_consent IS TRUE
-          AND p ->> 'data_point_id' = %s
+          AND lower(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id')) = lower(%s)
           AND (
                 p ->> 'consent_granted' = 'true'
                 OR lower(p ->> 'status') IN ('granted', 'consent_given')
@@ -333,12 +352,36 @@ class PurposeLifecycleService(Service):
             raise ApiError(404, "Not Found", f"Purpose '{purpose_id}' is not declared for this fiduciary.")
         if row["state"] == "OPEN":
             raise ApiError(409, "Conflict", f"Purpose '{purpose_id}' is already open.")
-        db.execute(
-            "UPDATE purpose_lifecycle SET state = 'OPEN', closed_at = NULL, closure_reason = NULL, deidentification_action = NULL, last_updated_at = NOW() WHERE fiduciary_id = %s AND purpose_id = %s",
-            (fid, purpose_id),
+        with db.connection() as conn, conn.cursor() as cur:
+            # P9-04: opened_at restarts the TIME_BOUND clock; leaving it at the
+            # original value re-closed a lapsed purpose on the next worker cycle.
+            cur.execute(
+                "UPDATE purpose_lifecycle SET state = 'OPEN', opened_at = NOW(), closed_at = NULL, closure_reason = NULL, deidentification_action = NULL, last_updated_at = NOW() WHERE fiduciary_id = %s AND purpose_id = %s",
+                (fid, purpose_id),
+            )
+            # P9-04: the purges the closure (or its retention clock) raised are
+            # moot once the purpose is open again. Cancel the ones no processor
+            # has started, so nobody erases data for a purpose that is live.
+            cur.execute(
+                """
+                UPDATE purge_requests SET status = 'CANCELLED', last_updated_at = NOW()
+                WHERE fiduciary_id = %s AND lower(purpose_id) = lower(%s)
+                  AND trigger_event IN ('PurposeClosed', 'RetentionPolicyExpiry')
+                  AND status = 'PENDING'
+                RETURNING id
+                """,
+                (fid, purpose_id),
+            )
+            cancelled = len(cur.fetchall())
+        log_event(
+            actor or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "PURPOSE_REOPENED",
+            {"purpose_id": purpose_id, "purge_requests_cancelled": cancelled},
         )
-        log_event(actor or "DPO", fid, "DPO_CONSOLE", None, "PURPOSE_REOPENED", {"purpose_id": purpose_id})
-        return {"success": True, "purpose_id": purpose_id, "state": "OPEN"}
+        return {"success": True, "purpose_id": purpose_id, "state": "OPEN", "purge_requests_cancelled": cancelled}
 
     def close_purpose(self, ctx: RequestContext) -> dict:
         """PL-03: close a purpose and trigger erasure/de-identification of data held under it."""

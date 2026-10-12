@@ -609,8 +609,15 @@
         });
 
         const container = document.getElementById('verify-result');
-        if (result && result.consent_granted) {
+        // P9-06: validate_consent answers with `valid` and metadata.purpose_status;
+        // there is no `consent_granted` key on the response.
+        const state = result && result.metadata ? result.metadata.purpose_status : null;
+        if (result && result.valid === true) {
             container.innerHTML = `<div class="verify-result verify-granted">✓ Consent Active — you have granted consent for this purpose.</div>`;
+        } else if (state === 'PURPOSE_CLOSED') {
+            container.innerHTML = `<div class="verify-result verify-denied">✕ Purpose Ended — this purpose has been closed and no longer runs on your consent.</div>`;
+        } else if (state === 'WITHDRAWN') {
+            container.innerHTML = `<div class="verify-result verify-denied">✕ Consent Withdrawn — you have withdrawn consent for this purpose.</div>`;
         } else {
             container.innerHTML = `<div class="verify-result verify-denied">✕ No Active Consent — consent has not been granted for this purpose.</div>`;
         }
@@ -703,6 +710,7 @@
                         <span style="font-size:0.7rem;color:${p.active ? (p.mandatory ? '#b45309' : '#15803d') : '#94a3b8'};">
                             ${p.active ? (p.mandatory ? 'Active · Required for service' : 'Active') : 'Already Withdrawn'}
                         </span>
+                        ${p.active ? `<span class="withdraw-implication" data-purpose-id="${esc(p.id)}" style="display:block;margin-top:4px;font-size:0.72rem;color:#475569;"></span>` : ''}
                     </span>
                 </label>
             `).join('');
@@ -719,6 +727,32 @@
         };
 
         modal.style.display = 'flex';
+        loadWithdrawalImplications(policyId, listEl);
+    }
+
+    // CW-04: show what withdrawing each purpose means, and whether the law
+    // requires the data to be kept anyway, BEFORE the principal confirms.
+    async function loadWithdrawalImplications(policyId, listEl) {
+        const result = await apiCall('/api/v1/client/consent', 'get_withdrawal_implications', {
+            user_id: SESSION.userId,
+            fiduciary_id: SESSION.fiduciaryId,
+            policy_id: policyId,
+            language: currentLang || 'en'
+        });
+        if (!result || !Array.isArray(result.purposes)) return;
+        const byId = {};
+        result.purposes.forEach(p => { byId[String(p.purpose_id).toLowerCase()] = p; });
+        listEl.querySelectorAll('.withdraw-implication').forEach(el => {
+            const info = byId[String(el.dataset.purposeId).toLowerCase()];
+            if (!info) return;
+            let text = esc(info.consequence || '');
+            if (info.data_retained_by_law) {
+                const days = info.retention_days ? ` for ${esc(String(info.retention_days))} days` : '';
+                const ref = info.legal_reference ? ` (${esc(info.legal_reference)})` : '';
+                text += `<br><strong style="color:#b45309;">Some data must be kept by law${days}${ref}.</strong>`;
+            }
+            el.innerHTML = text;
+        });
     }
 
     async function withdrawConsent(policyId, purposeIds) {
@@ -836,7 +870,9 @@
         const result = await apiCall('/api/v1/client/grievance', 'submit_grievance', {
             user_id: SESSION.userId,
             fiduciary_id: SESSION.fiduciaryId,
-            type, subject, description: desc
+            type, subject, description: desc,
+            // GR-03: the grievance is recorded in the principal's chosen language.
+            language: currentLang || 'en'
         });
 
         if (result && result.success) {

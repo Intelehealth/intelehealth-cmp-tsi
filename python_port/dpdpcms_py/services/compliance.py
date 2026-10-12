@@ -52,12 +52,13 @@ GRIEVANCE_STAGE_NOTICES = {
 }
 
 
-def _notify_grievance_stage(user_id: str, fiduciary_id: str, stage: str) -> None:
+def _notify_grievance_stage(user_id: str, fiduciary_id: str, stage: str, context: dict | None = None) -> None:
     notice = GRIEVANCE_STAGE_NOTICES.get(stage)
     if notice:
         db.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, %s)",
-            (user_id, fiduciary_id, notice),
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
+            " VALUES ('PRINCIPAL', %s, %s, %s, %s)",
+            (user_id, fiduciary_id, notice, db.as_jsonb(context) if context else None),
         )
 
 
@@ -194,6 +195,7 @@ def erase_cms_copy(
         # which used to make the metadata scrub and the deliveries join match
         # nothing, so the session IP / user agent and the delivery recipient
         # survived erasure.
+        db.allow_consent_maintenance(cur)
         cur.execute(
             "UPDATE consent_records SET ip_address = '0.0.0.0', user_agent = NULL"
             " WHERE fiduciary_id = %s AND user_id = %s",
@@ -210,6 +212,14 @@ def erase_cms_copy(
             (token, fiduciary_id, user_id),
         )
         counts["notification_deliveries"] = cur.rowcount
+        # GR-11: a resolution notice carries the DPO's free-text summary in its
+        # context; it goes with the rest of the grievance text.
+        cur.execute(
+            "UPDATE notifications SET context = NULL"
+            " WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL' AND recipient_id = %s AND context IS NOT NULL",
+            (fiduciary_id, user_id),
+        )
+        counts["notifications.context"] = cur.rowcount
 
         for table, column in ERASURE_TARGETS:
             if table == "grievances":
@@ -365,6 +375,7 @@ def deidentify_purpose_cms_copy(
 
     marker = f"erased:{pseudonym(f'{fiduciary_id}:{purpose_id}')}"
     with _cursor(cur) as cur:
+        db.allow_consent_maintenance(cur)
         # DE_IDENTIFY: keep the entry so the consent's history is intact, but
         # blank the fields that name the purpose or the principal's choices.
         # ERASE: drop the entry entirely.
@@ -694,14 +705,19 @@ class GrievanceService(Service):
         # in follow-up contact. Collision-safe within a fiduciary via the unique
         # index on (fiduciary_id, reference_number).
         reference_number = self._next_reference(fid)
+        # GR-03: the language the principal wrote in, so the grievance can be
+        # handled and answered in it. A short code (Eighth Schedule / BCP 47).
+        language = str(ctx.payload.get("language") or "").strip().lower() or None
+        if language and (len(language) > 16 or not all(c.isalnum() or c == "-" for c in language)):
+            raise ApiError(400, "Bad Request", "language must be a short language code such as 'hi' or 'ta'.")
         row = db.insert_returning(
             """
             INSERT INTO grievances
                 (id, user_id, fiduciary_id, type, subject, description,
                  submission_timestamp, status, communication_log, attachments, due_date,
-                 reference_number, consent_record_id)
+                 reference_number, consent_record_id, language)
             VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), 'NEW', %s, %s,
-                    NOW() + make_interval(days => %s), %s, %s)
+                    NOW() + make_interval(days => %s), %s, %s, %s)
             RETURNING id, reference_number
             """,
             (
@@ -715,6 +731,7 @@ class GrievanceService(Service):
                 sla_days,
                 reference_number,
                 consent_record_id,
+                language,
             ),
         )
         gid = str(row["id"])
@@ -810,7 +827,8 @@ class GrievanceService(Service):
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
-        row = db.one(f"SELECT * FROM grievances WHERE {' AND '.join(where)}", params)
+        # GR-08: `grievance_id` alongside `id` — the console keys every row on it.
+        row = db.one(f"SELECT *, id AS grievance_id FROM grievances WHERE {' AND '.join(where)}", params)
         if not row:
             raise ApiError(404, "Not Found", "Grievance not found.")
         ensure_principal_owns(ctx, row.get("user_id"), label="Grievance")
@@ -827,7 +845,8 @@ class GrievanceService(Service):
         params.extend([limit, (page - 1) * limit])
         return db.to_jsonable(
             db.all(
-                f"SELECT * FROM grievances WHERE {' AND '.join(where)} ORDER BY submission_timestamp DESC LIMIT %s OFFSET %s",
+                # GR-08: the DPO queue reads grievance_id; without it every row threw.
+                f"SELECT *, id AS grievance_id FROM grievances WHERE {' AND '.join(where)} ORDER BY submission_timestamp DESC LIMIT %s OFFSET %s",
                 params,
             )
         )
@@ -836,7 +855,7 @@ class GrievanceService(Service):
         bind_principal_field(ctx, "user_id")
         return db.to_jsonable(
             db.all(
-                "SELECT * FROM grievances WHERE fiduciary_id = %s AND user_id = %s ORDER BY submission_timestamp DESC",
+                "SELECT *, id AS grievance_id FROM grievances WHERE fiduciary_id = %s AND user_id = %s ORDER BY submission_timestamp DESC",
                 (require(resolve_fiduciary(ctx), "fiduciary_id"), require(ctx.payload.get("user_id"), "user_id")),
             )
         )
@@ -870,14 +889,23 @@ class GrievanceService(Service):
                    communication_log = COALESCE(communication_log, '[]'::jsonb) || %s::jsonb,
                    last_updated_at = NOW()
             WHERE id = %s{scope}
-            RETURNING user_id, fiduciary_id
+            RETURNING user_id, fiduciary_id, reference_number, resolution_details
             """,
             (status, resolution, status, db.as_jsonb([entry]), gid, *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "Grievance not found.")
-        # GR-10: the principal hears about every significant stage.
-        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), status)
+        # GR-10: the principal hears about every significant stage. GR-11: a
+        # resolution notice carries the summary itself, not just the fact.
+        context = None
+        if status in {"RESOLVED", "CLOSED"}:
+            context = {
+                "grievance_id": str(gid),
+                "reference_number": row.get("reference_number") or str(gid),
+                "status_word": status.lower(),
+                "resolution_details": row.get("resolution_details") or "",
+            }
+        _notify_grievance_stage(str(row["user_id"]), str(row["fiduciary_id"]), status, context)
         log_event(
             ctx.actor_email or "DPO",
             str(row["fiduciary_id"]),

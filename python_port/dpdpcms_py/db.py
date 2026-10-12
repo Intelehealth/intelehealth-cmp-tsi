@@ -48,6 +48,13 @@ def connection():
         yield conn
 
 
+def allow_consent_maintenance(cur: Any) -> None:
+    """P9-05: consent_records is append-only (db/25). Erasure, purpose
+    de-identification and the anonymous-session link are the sanctioned
+    in-place rewrites; each opts in for its own transaction only."""
+    cur.execute("SELECT set_config('tsi.consent_maintenance', 'on', true)")
+
+
 def one(sql: str, params: Iterable[Any] = ()) -> dict[str, Any] | None:
     with connection() as conn, conn.cursor() as cur:
         cur.execute(sql, tuple(params))

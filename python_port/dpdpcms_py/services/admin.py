@@ -473,12 +473,54 @@ class OperatorService(Service):
 
     def update_user(self, ctx: RequestContext) -> dict:
         uid = require(ctx.payload.get("user_id"), "user_id")
-        fields = ["name = %s", "last_updated_at = NOW()"]
-        params: list[Any] = [ctx.payload.get("username")]
+        fields = ["last_updated_at = NOW()"]
+        params: list[Any] = []
+        # SA-04: name only changes when one is supplied; the column is NOT NULL.
+        if "username" in ctx.payload:
+            username = str(ctx.payload.get("username") or "").strip()
+            if not username:
+                raise ApiError(400, "Bad Request", "username must not be empty.")
+            fields.append("name = %s")
+            params.append(username)
+        # SA-04: role assignment follows the same rules as create_user.
+        new_role = None
+        end_sessions = False
+        if ctx.payload.get("role"):
+            new_role = str(ctx.payload["role"]).upper()
+            caller_role = verified_role(ctx)
+            if new_role == "ADMIN" and caller_role != "ADMIN":
+                raise ApiError(403, "Forbidden", "Only ADMIN users may assign the ADMIN role.")
+            if caller_role == "DPO" and new_role != "OPERATOR":
+                raise ApiError(403, "Forbidden", "DPO users may only assign the OPERATOR role.")
+            target = db.one("SELECT fiduciary_id, role FROM operators WHERE id = %s", (uid,))
+            if caller_role == "DPO" and target and str(target.get("role") or "").upper() != "OPERATOR":
+                raise ApiError(403, "Forbidden", "DPO users may only change the role of OPERATOR accounts.")
+            role_fid = ctx.payload.get("fiduciary_id") or ctx.fiduciary_id or (target or {}).get("fiduciary_id")
+            known = db.one(
+                "SELECT 1 FROM roles WHERE code = %s AND (fiduciary_id IS NULL OR fiduciary_id = %s::uuid)",
+                (new_role, str(role_fid) if role_fid else None),
+            )
+            if not known:
+                raise ApiError(400, "Bad Request", f"Unknown role '{new_role}'. See list_roles.")
+            # A role change takes effect on the next request; end old sessions too.
+            fields.append("role = %s")
+            params.append(new_role)
+            end_sessions = True
+        new_status = None
+        if ctx.payload.get("status"):
+            new_status = str(ctx.payload["status"]).upper()
+            if new_status not in {"ACTIVE", "INACTIVE"}:
+                raise ApiError(400, "Bad Request", "status must be ACTIVE or INACTIVE.")
+            fields.append("status = %s")
+            params.append(new_status)
+            end_sessions = end_sessions or new_status == "INACTIVE"
         if ctx.payload.get("password"):
             # SA-05: a new password ends every existing session of the account.
-            fields.append("password_hash = %s, tokens_valid_after = NOW()")
+            fields.append("password_hash = %s")
             params.append(hash_password(ctx.payload["password"]))
+            end_sessions = True
+        if end_sessions:
+            fields.append("tokens_valid_after = NOW()")
         # SEC-18: the WHERE below targets exactly non-ADMIN rows, so a NULL
         # fiduciary_id on these rows is the account shape that defeats every
         # tenancy check. The field is updated ONLY when the caller explicitly
@@ -488,6 +530,9 @@ class OperatorService(Service):
             new_fid = ctx.payload.get("fiduciary_id") or None
             if not new_fid:
                 raise ApiError(400, "Bad Request", "Non-ADMIN operators must belong to a fiduciary_id.")
+            # A tenant-scoped caller cannot hand its operator to another tenant.
+            if ctx.fiduciary_id and str(new_fid).lower() != str(ctx.fiduciary_id).lower():
+                raise ApiError(403, "Forbidden", "Operators cannot be moved to another fiduciary.")
             fields.append("fiduciary_id = %s")
             params.append(new_fid)
         scope, scope_params = tenant_filter(ctx)
@@ -505,7 +550,12 @@ class OperatorService(Service):
             "ADMIN_CONSOLE",
             authenticated_user_id(ctx),
             "USER_UPDATED",
-            {"user_id": uid, "password_changed": bool(ctx.payload.get("password"))},
+            {
+                "user_id": uid,
+                "password_changed": bool(ctx.payload.get("password")),
+                "role": new_role,
+                "status": new_status,
+            },
             source_ip=ctx.source_ip,
         )
         return {"success": True, "message": "User updated successfully."}

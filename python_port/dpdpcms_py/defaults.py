@@ -21,8 +21,10 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "GRIEVANCE_ROUTED": {"en": "Grievance {reference_number} ({grievance_type}) has been assigned to you for action."},
     "GRIEVANCE_IN_PROGRESS": {"en": "Your grievance is being worked on."},
     "GRIEVANCE_ESCALATED": {"en": "Your grievance has been escalated because it passed its response deadline."},
+    # GR-11: the resolution summary travels in the notice itself.
     "GRIEVANCE_RESOLVED": {
-        "en": "Your grievance has been resolved. You can view the resolution summary and rate how it was handled."
+        "en": "Your grievance {reference_number} has been {status_word}. Resolution summary: {resolution_details} "
+        "You can rate how it was handled."
     },
     "PURPOSE_CLOSED": {
         "en": "A purpose you consented to has ended; data held only for it will be erased or de-identified."

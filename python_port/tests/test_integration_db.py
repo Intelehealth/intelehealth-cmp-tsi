@@ -743,7 +743,10 @@ def test_principal_notification_renders_in_the_language_they_chose(tx):
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
         _seed_consent(cur, fid, pol, "asha")
+        # P9-05: consent_records is append-only; seeding opts in like the services do.
+        real_db.allow_consent_maintenance(cur)
         cur.execute("UPDATE consent_records SET language_selected = 'hi' WHERE fiduciary_id = %s", (fid,))
+        cur.execute("SELECT set_config('tsi.consent_maintenance', 'off', true)")
         cur.execute(
             "INSERT INTO notification_message_templates (fiduciary_id, notification_type, messages) VALUES (%s, %s, %s)",
             (fid, "CONSENT_RECORDED", real_db.as_jsonb({"en": "Recorded.", "hi": "आपकी सहमति दर्ज की गई।"})),
@@ -780,10 +783,12 @@ def test_erase_keeps_consent_entries_that_carry_no_purpose_id(tx):
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
         _seed_consent(cur, fid, pol, "asha")
+        real_db.allow_consent_maintenance(cur)
         cur.execute(
             "UPDATE consent_records SET data_point_consents = data_point_consents || %s WHERE fiduciary_id = %s",
             (real_db.as_jsonb([{"note": "no id"}]), fid),
         )
+        cur.execute("SELECT set_config('tsi.consent_maintenance', 'off', true)")
         deidentify_purpose_cms_copy(fid, "asha", "care", action="ERASE")
         assert _consents(cur, fid)["asha"] == [{"note": "no id"}]
 
@@ -890,6 +895,7 @@ def test_hold_written_concurrently_is_honoured_not_raced():
             worker.join(timeout=30)
         with psycopg.connect(settings.db_dsn) as cleanup, cleanup.cursor() as cur:
             cur.execute("DELETE FROM purge_requests WHERE fiduciary_id = %s", (fid,))
+            real_db.allow_consent_maintenance(cur)
             cur.execute("DELETE FROM consent_records WHERE fiduciary_id = %s", (fid,))
             cur.execute("DELETE FROM consent_policies WHERE fiduciary_id = %s", (fid,))
             cur.execute("DELETE FROM fiduciaries WHERE id = %s", (fid,))
@@ -913,3 +919,287 @@ def test_assign_grievance_rejects_an_officer_who_cannot_act(tx):
         cur.execute("SELECT assigned_dpo_user_id FROM grievances WHERE id = %s", (gid,))
         assigned = cur.fetchone()["assigned_dpo_user_id"]
     assert exc.value.status == 400 and assigned is None
+
+
+# ── workbook v7 (P9) ─────────────────────────────────────────────────────────
+def _close(cur, fid, purpose):
+    cur.execute(
+        "INSERT INTO purpose_lifecycle (fiduciary_id, purpose_id, state, closed_at) VALUES (%s, %s, 'CLOSED', NOW())",
+        (fid, purpose),
+    )
+
+
+def test_closed_purpose_does_not_validate_under_another_case(tx):
+    """P9-01: 'marketing' must not validate while 'MARKETING' is closed."""
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur, purposes=("marketing",))
+        _seed_consent(cur, fid, pol, "asha", purposes=("marketing",))
+        _close(cur, fid, "MARKETING")
+    for spelling in ("MARKETING", "marketing", "Marketing"):
+        out = ConsentService().validate_consent(_ctx(fid, {"user_id": "asha", "required_purpose_id": spelling}))
+        assert out["valid"] is False and out["metadata"]["purpose_status"] == "PURPOSE_CLOSED", spelling
+
+
+@pytest.mark.parametrize("status", ["DRAFT", "ARCHIVED"])
+def test_consent_refused_against_an_unpublished_policy(tx, status):
+    """P9-02: consent rests only on the ACTIVE, in-effect notice."""
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.consent import check_consent_alignment
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        cur.execute("UPDATE consent_policies SET status = %s WHERE fiduciary_id = %s", (status, fid))
+    with pytest.raises(ApiError) as exc:
+        check_consent_alignment(fid, pol, "v1", [{"data_point_id": "care", "consent_granted": True}])
+    assert exc.value.status == 409
+
+
+def test_consent_accepted_against_the_active_policy(tx):
+    from dpdpcms_py.services.consent import check_consent_alignment
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    assert check_consent_alignment(fid, pol, "v1", [{"data_point_id": "care", "consent_granted": True}]) == set()
+
+
+def test_marking_read_by_id_is_audited(tx):
+    """P9-03: the schema's own 'id' field must not 500 or skip the audit row."""
+    from dpdpcms_py.services.governance import NotificationService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        cur.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
+            " VALUES ('PRINCIPAL', 'asha', %s, 'CONSENT_RECORDED') RETURNING id",
+            (fid,),
+        )
+        nid = str(cur.fetchone()["id"])
+    assert NotificationService().mark_notification_read(_ctx(fid, {"id": nid})) == {"success": True}
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT service_id FROM audit_logs WHERE fiduciary_id = %s AND audit_action = 'NOTIFICATION_ACKNOWLEDGED'",
+            (fid,),
+        )
+        rows = cur.fetchall()
+    assert [str(r["service_id"]) for r in rows] == [nid]
+
+
+def test_reopening_a_purpose_cancels_its_pending_purges(tx):
+    """P9-04: purges raised by the closure are moot once the purpose reopens,
+    and the time-bound clock restarts."""
+    from dpdpcms_py.services.lifecycle import PurposeLifecycleService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        cur.execute(
+            "INSERT INTO purpose_lifecycle (fiduciary_id, purpose_id, state, opened_at, closed_at)"
+            " VALUES (%s, 'care', 'CLOSED', NOW() - INTERVAL '400 days', NOW())",
+            (fid,),
+        )
+        for user, trigger, status in (
+            ("asha", "PurposeClosed", "PENDING"),
+            ("ramesh", "PurposeClosed", "PENDING"),
+            ("sita", "PurposeClosed", "PURGE_IN_PROGRESS"),
+            ("gita", "ErasureRequest", "PENDING"),
+        ):
+            cur.execute(
+                "INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, status)"
+                " VALUES (%s, %s, 'care', %s, %s)",
+                (user, fid, trigger, status),
+            )
+    out = PurposeLifecycleService().set_purpose_state(_ctx(fid, {"purpose_id": "care", "state": "OPEN"}))
+    assert out["purge_requests_cancelled"] == 2
+    with tx.cursor() as cur:
+        cur.execute("SELECT user_id, status FROM purge_requests WHERE fiduciary_id = %s", (fid,))
+        statuses = {r["user_id"]: r["status"] for r in cur.fetchall()}
+        cur.execute(
+            "SELECT opened_at > NOW() - INTERVAL '1 minute' AS fresh FROM purpose_lifecycle WHERE fiduciary_id = %s",
+            (fid,),
+        )
+        fresh = cur.fetchone()["fresh"]
+    assert statuses == {"asha": "CANCELLED", "ramesh": "CANCELLED", "sita": "PURGE_IN_PROGRESS", "gita": "PENDING"}
+    assert fresh is True
+
+
+def test_consent_records_are_append_only_in_the_database(tx):
+    """P9-05: raw UPDATE and DELETE fail; the retirement flip still works."""
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _seed_consent(cur, fid, pol, "asha")
+        for sql in (
+            "UPDATE consent_records SET data_point_consents = '[]'::jsonb WHERE fiduciary_id = %s",
+            "UPDATE consent_records SET is_active_consent = FALSE, policy_version = 'v9' WHERE fiduciary_id = %s",
+            "DELETE FROM consent_records WHERE fiduciary_id = %s",
+        ):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege), tx.transaction():
+                cur.execute(sql, (fid,))
+        cur.execute(
+            "UPDATE consent_records SET is_active_consent = FALSE, last_updated_at = NOW() WHERE fiduciary_id = %s",
+            (fid,),
+        )
+        assert cur.rowcount == 1
+        # Once retired, a record cannot be flipped back on.
+        with pytest.raises(psycopg.errors.InsufficientPrivilege), tx.transaction():
+            cur.execute("UPDATE consent_records SET is_active_consent = TRUE WHERE fiduciary_id = %s", (fid,))
+
+
+def test_principal_self_check_is_not_an_integrator_denial(tx):
+    """P9-06: a principal checking their own status writes no validation,
+    denial notice or audit row."""
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur, purposes=("care", "research"))
+        _seed_consent(cur, fid, pol, "asha", purposes=("care",))
+    ctx = _ctx(
+        fid,
+        {"user_id": "asha", "required_purpose_id": "research"},
+        auth_via_principal_jwt=True,
+        principal_user_id="asha",
+    )
+    out = ConsentService().validate_consent(ctx)
+    assert out["valid"] is False
+    with tx.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM consent_validations WHERE fiduciary_id = %s", (fid,))
+        validations = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM notifications WHERE fiduciary_id = %s", (fid,))
+        notices = cur.fetchone()["n"]
+    assert validations == 0 and notices == 0
+
+
+def test_withdrawal_with_nothing_active_is_refused(tx):
+    """P9-07: no active consent means nothing to withdraw — and no cascade."""
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    with pytest.raises(ApiError) as exc:
+        ConsentService().withdraw_consent(_ctx(fid, {"user_id": "nobody", "purpose_ids": ["care"]}))
+    assert exc.value.status == 404
+    with tx.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM notifications WHERE fiduciary_id = %s", (fid,))
+        assert cur.fetchone()["n"] == 0
+
+
+def _audit_actions(cur, fid):
+    cur.execute("SELECT audit_action, context_details FROM audit_logs WHERE fiduciary_id = %s", (fid,))
+    return cur.fetchall()
+
+
+def test_update_user_applies_role_and_status_and_keeps_the_name(tx):
+    """SA-04: role and status are applied; an omitted username is not nulled."""
+    from dpdpcms_py.services.admin import OperatorService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        op = _seed_operator(cur, fid, "OPERATOR", "op1")
+    OperatorService().update_user(_ctx(fid, {"user_id": op, "role": "AUDITOR", "status": "INACTIVE"}))
+    with tx.cursor() as cur:
+        cur.execute("SELECT name, role, status, tokens_valid_after FROM operators WHERE id = %s", (op,))
+        row = cur.fetchone()
+    assert (row["name"], row["role"], row["status"]) == ("op1", "AUDITOR", "INACTIVE")
+    assert row["tokens_valid_after"] is not None
+
+
+def test_dpo_cannot_assign_a_role_other_than_operator(tx):
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.admin import OperatorService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        cur.execute(
+            "INSERT INTO operators (name, email_plaintext, role, fiduciary_id, email_enc, email_hmac)"
+            f" VALUES ('dpo', 'dpo@example.org', 'DPO', %s, 'x', {real_db.hmac_expr()})",
+            (fid, *real_db.bind_hmac("dpo@example.org")),
+        )
+        op = _seed_operator(cur, fid, "OPERATOR", "op2")
+    with pytest.raises(ApiError) as exc:
+        OperatorService().update_user(_ctx(fid, {"user_id": op, "role": "AUDITOR"}))
+    assert exc.value.status == 403
+
+
+def test_grievance_queue_rows_carry_grievance_id_and_resolution_carries_summary(tx):
+    """GR-08: the console keys rows on grievance_id. GR-11: the resolution
+    notice carries the summary itself."""
+    from dpdpcms_py.services.compliance import GrievanceService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        cur.execute(
+            "INSERT INTO grievances (user_id, fiduciary_id, type, subject, description, reference_number)"
+            " VALUES ('asha', %s, 'GENERAL_COMPLAINT', 's', 'd', 'GRV-2026-ABCDEF') RETURNING id",
+            (fid,),
+        )
+        gid = str(cur.fetchone()["id"])
+    service = GrievanceService()
+    rows = service.list_grievances(_ctx(fid, {}))
+    assert [str(r["grievance_id"]) for r in rows] == [gid]
+    assert str(service.get_grievance(_ctx(fid, {"grievance_id": gid}))["grievance_id"]) == gid
+    service.update_grievance_status(
+        _ctx(fid, {"grievance_id": gid, "status": "RESOLVED", "resolution_details": "Record corrected."})
+    )
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT context FROM notifications WHERE fiduciary_id = %s AND notification_type = 'GRIEVANCE_RESOLVED'",
+            (fid,),
+        )
+        context = cur.fetchone()["context"]
+    assert context["resolution_details"] == "Record corrected."
+    assert context["reference_number"] == "GRV-2026-ABCDEF"
+
+
+def test_internally_raised_alerts_are_audited(tx):
+    """NT-10: record_alert (every consent and closure alert) writes an audit row."""
+    from dpdpcms_py.services.lifecycle import record_alert
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    alert_id = record_alert(fid, "CONSENT_WITHDRAWN", None, {"user_id": "asha"})
+    import json
+
+    with tx.cursor() as cur:
+        rows = [r for r in _audit_actions(cur, fid) if r["audit_action"] == "ALERT_RAISED"]
+    assert len(rows) == 1
+    details = rows[0]["context_details"]
+    details = json.loads(details) if isinstance(details, str) else details
+    assert details["alert_id"] == alert_id and "user_id" not in details
+
+
+def test_retention_policy_delete_is_audited(tx):
+    """SA-14: withdrawing a retention schedule leaves an audit trail."""
+    from dpdpcms_py.services.retention import RetentionService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        cur.execute(
+            "INSERT INTO retention_policies (fiduciary_id, name, retention_duration_value) VALUES (%s, 'r', 7) RETURNING id",
+            (fid,),
+        )
+        pid = str(cur.fetchone()["id"])
+    RetentionService().delete_retention_policy(_ctx(fid, {"policy_id": pid}))
+    with tx.cursor() as cur:
+        assert [r["audit_action"] for r in _audit_actions(cur, fid)] == ["RETENTION_POLICY_DELETED"]
+
+
+def test_audit_export_carries_the_hashes_and_a_chain_verdict(tx, tmp_path, monkeypatch):
+    """P9-08 / LG-07: an exported ledger can be re-verified by whoever receives it."""
+    import csv
+    import dataclasses
+    import json
+
+    from dpdpcms_py import jobs
+    from dpdpcms_py.audit import log_event
+
+    monkeypatch.setattr(jobs, "settings", dataclasses.replace(settings, export_path=tmp_path))
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    log_event("asha", fid, "APP", None, "CONSENT_GIVEN", {"k": "v"})
+    path = jobs._write_export({"id": str(uuid.uuid4()), "fiduciary_id": fid, "subtype": "AUDIT"})
+    with path.open(encoding="utf-8") as handle:
+        rows = [r for r in csv.DictReader(handle) if r["audit_action"] == "CONSENT_GIVEN"]
+    assert len(rows) == 1 and len(rows[0]["current_log_hash"]) == 64 and "prev_log_hash" in rows[0]
+    verdict = json.loads(path.with_suffix(".verification.json").read_text(encoding="utf-8"))
+    assert "intact" in verdict

@@ -299,9 +299,11 @@ class NotificationService(Service):
                     row.get("recipient_id") or ctx.actor_email or "PRINCIPAL",
                     row["fiduciary_id"],
                     "APP",
-                    str(ctx.payload.get("notification_id")),
+                    # P9-03: the resolved id, never payload['notification_id'],
+                    # which is absent when the caller uses the schema's 'id'.
+                    str(nid),
                     "NOTIFICATION_ACKNOWLEDGED",
-                    {"notification_id": ctx.payload.get("notification_id")},
+                    {"notification_id": str(nid)},
                     initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
                     source_ip=ctx.source_ip,
                 )

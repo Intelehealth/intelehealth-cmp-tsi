@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (293 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (308 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -538,10 +538,70 @@ real schema.
   ledger cap for the worker's daily walk. Streaming it in keyset batches is the
   next step for very large ledgers.
 
+### Fixed (Security workbook v7, p10 remediation round)
+
+Re-verification of all 120 requirements against `a3d9c58` (workbook v7) raised
+eight new findings (P9-01..P9-08) and left four requirements off Exists
+(SA-04, GR-08, GR-11, NT-05). All are closed in code; each has a DB-backed
+regression test in `test_integration_db.py`.
+
+- **P9-01 (CV-02)** `validate_consent` matches the CLOSED-purpose gate
+  case-insensitively, as the grant matcher already did, so `marketing` no longer
+  validates while `MARKETING` is closed. The closure holder query, the cessation
+  lookup and the retention sweep match purpose ids the same way.
+- **P9-02 (CU-05)** `check_consent_alignment` refuses (409) a policy version that
+  is not ACTIVE with an effective date in the past — the version
+  `get_active_policy` serves. DRAFT and ARCHIVED versions are rejected.
+- **P9-03 (NT-05)** `mark_notification_read` audits the resolved id, so a caller
+  using the schema's `id` field no longer gets a 500 and the
+  `NOTIFICATION_ACKNOWLEDGED` row is written.
+- **P9-04 (PL-02)** Reopening a purpose cancels the PENDING purges its closure
+  or retention clock raised (new `CANCELLED` purge status, db/25) and resets
+  `opened_at`, so a lapsed TIME_BOUND purpose is not re-closed on the next cycle.
+- **P9-05 (CC-07)** db/25 makes `consent_records` append-only at the database
+  level. UPDATE, DELETE and TRUNCATE fail, except the retirement flip
+  (`is_active_consent` TRUE -> FALSE with only `last_updated_at` changing) and
+  the sanctioned rewrites — erasure, purpose de-identification and the
+  anonymous-session link — which opt in for their own transaction with
+  `db.allow_consent_maintenance()`.
+- **P9-06 (UD-02)** A principal's self-check from the dashboard no longer writes
+  a validation row, a denial notice, a `CONSENT_DENIED` webhook or an audit
+  entry. The dashboard reads `valid` and `metadata.purpose_status` (it read a
+  `consent_granted` key the response never had) and shows withdrawn and closed
+  purposes distinctly.
+- **P9-07 (CW-06)** `withdraw_consent` with no active consent returns 404 and
+  fires no notification, webhook, alert or audit event. An erasure request is
+  still accepted after a full withdrawal.
+- **P9-08 (LG-07)** The EXPORT/AUDIT CSV carries every hashed column,
+  `prev_log_hash`, `current_log_hash` and `system_metadata`, and writes the
+  chain verdict for the exported range beside it (`*.verification.json`). The
+  console XLSX export adds the same columns.
+- **SA-04** `update_user` applies `role` (same rules as `create_user`: known
+  role for the tenant, only ADMIN grants ADMIN, a DPO assigns OPERATOR to
+  OPERATOR accounts only) and `status` (ACTIVE/INACTIVE). A role change,
+  deactivation or password change ends existing sessions. An omitted `username`
+  no longer nulls the NOT NULL `name` column. A tenant-scoped caller cannot move
+  an operator to another fiduciary.
+- **GR-08** `list_grievances`, `get_grievance` and `list_user_grievances` return
+  `grievance_id` alongside `id`, so the DPO queue and detail view render.
+- **GR-11** The resolution notice carries the reference number and the
+  resolution summary (notification context). Erasure clears that context with
+  the rest of the grievance text.
+- **GR-03** `submit_grievance` stores the principal's `language` (new column,
+  db/25); the rights portal sends the selected language.
+- **CW-04** The withdrawal modal calls `get_withdrawal_implications` and shows
+  each purpose's consequence and any legal retention before the principal
+  confirms.
+- **NT-10** `record_alert` (every consent and purpose-closure alert) writes an
+  `ALERT_RAISED` audit row, and the stale-alert sweep writes `ALERT_ESCALATED`.
+- **SA-14** `delete_retention_policy` writes `RETENTION_POLICY_DELETED`.
+- Tests: 307 passed, 1 skipped (308 collected) against a throwaway Postgres
+  with `db/01..25` applied; db/25 re-applied cleanly.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/24` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Existing database:** Run `db/13` through `db/25` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
 - **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

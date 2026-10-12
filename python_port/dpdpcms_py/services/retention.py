@@ -311,6 +311,17 @@ class RetentionService(Service):
         # SEC-12: a delete that did not happen is not reported as done.
         if updated == 0:
             raise ApiError(404, "Not Found", "Retention policy not found.")
+        # SA-14: withdrawing a retention schedule is the change a regulator most
+        # wants to see; it is audited like creation and update.
+        log_event(
+            ctx.actor_email or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "RETENTION_POLICY_DELETED",
+            {"policy_id": policy_id},
+            source_ip=ctx.source_ip,
+        )
         return {"success": True, "policy_id": policy_id}
 
     def validate_completeness(self, ctx: RequestContext) -> dict:

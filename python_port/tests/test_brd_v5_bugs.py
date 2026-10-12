@@ -45,7 +45,9 @@ def _ctx(service="consent", func="record_consent", payload=None, category="clien
 # ── PL-02 a closed purpose no longer deadlocks consent ─────────────────────
 @pytest.fixture
 def research_closed(monkeypatch):
-    monkeypatch.setattr(consent.db, "one", lambda *a, **k: {"policy_content": POLICY})
+    monkeypatch.setattr(
+        consent.db, "one", lambda *a, **k: {"policy_content": POLICY, "status": "ACTIVE", "in_effect": True}
+    )
     monkeypatch.setattr(consent.db, "all", lambda *a, **k: [{"purpose_id": "research"}])
 
 

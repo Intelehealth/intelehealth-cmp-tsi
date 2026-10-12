@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -66,16 +67,27 @@ def close_due_time_bound_purposes() -> dict[str, int]:
 
 def escalate_stale_alerts() -> dict[str, int]:
     """NT-09: escalate alerts nobody has acknowledged within the SLA window."""
-    escalated = db.execute(
+    rows = db.all(
         """
         UPDATE alerts
         SET status = 'ESCALATED', escalated_at = NOW()
         WHERE status = 'PENDING' AND requires_action IS TRUE
           AND created_at < NOW() - make_interval(hours => %s)
+        RETURNING id, fiduciary_id, alert_type
         """,
         (settings.alert_escalation_hours,),
     )
-    return {"escalated": escalated or 0}
+    # NT-10: an escalation is an alert event and is audited like one.
+    for row in rows:
+        log_event(
+            "SYSTEM",
+            str(row["fiduciary_id"]),
+            "SYSTEM",
+            None,
+            "ALERT_ESCALATED",
+            {"alert_id": str(row["id"]), "alert_type": row.get("alert_type")},
+        )
+    return {"escalated": len(rows)}
 
 
 def escalate_overdue_grievances() -> dict[str, int]:
@@ -148,7 +160,7 @@ def _cessation_for(fiduciary_id: str, purpose_id: str) -> datetime | None:
         FROM consent_records cr,
              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
         WHERE cr.fiduciary_id = %s
-          AND p ->> 'data_point_id' = %s
+          AND lower(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id')) = lower(%s)
           AND (p ->> 'consent_granted' = 'false' OR lower(p ->> 'status') = 'withdrawn')
         """,
         (fiduciary_id, purpose_id),
@@ -354,7 +366,7 @@ def run_retention_sweep() -> dict[str, int]:
                     SELECT DISTINCT cr.user_id, cr.fiduciary_id, %s, 'RetentionPolicyExpiry', %s, %s
                     FROM consent_records cr,
                          LATERAL jsonb_array_elements(cr.data_point_consents) AS p
-                    WHERE cr.fiduciary_id = %s AND p ->> 'data_point_id' = %s
+                    WHERE cr.fiduciary_id = %s AND lower(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id')) = lower(%s)
                       AND NOT EXISTS (
                             SELECT 1 FROM purge_requests pr
                             WHERE pr.user_id = cr.user_id
@@ -420,7 +432,14 @@ _CSV_SUBSCRIPTIONS: dict[str, tuple[str, str, str]] = {
         "created_at",
     ),
     "GRIEVANCE": ("grievances", "id,user_id,type,subject,status,submission_timestamp", "submission_timestamp"),
-    "AUDIT": ("audit_logs", "id,fiduciary_id,timestamp,user_id,service_type,audit_action,context_details", "timestamp"),
+    # P9-08 / LG-07: every hashed column plus both hashes and the hash version,
+    # so whoever receives the export can re-verify the chain it came from.
+    "AUDIT": (
+        "audit_logs",
+        "id,fiduciary_id,timestamp,user_id,service_type,service_id,audit_action,context_details,"
+        "purpose_id,consent_status,initiator,source_ip,prev_log_hash,current_log_hash,system_metadata",
+        "timestamp",
+    ),
 }
 
 
@@ -496,15 +515,32 @@ def _write_export(job: dict[str, Any]) -> Path:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow(
-                {key: (value.isoformat() if hasattr(value, "isoformat") else value) for key, value in row.items()}
-            )
+            writer.writerow({key: _csv_value(value) for key, value in row.items()})
+    context: dict[str, Any] = {"output_file_path": str(path), "rows": len(rows)}
+    if str(job["subtype"]).upper() == "AUDIT":
+        # P9-08: ship the chain verdict for the exported range with the file.
+        from .audit import verify_chain
+
+        since = job.get("start_date")
+        verdict = verify_chain(fiduciary_id=str(job["fiduciary_id"]), since=str(since) if since else None)
+        verdict_path = path.with_suffix(".verification.json")
+        verdict_path.write_text(json.dumps(db.to_jsonable(verdict), indent=2, default=str), encoding="utf-8")
+        context["chain_intact"] = verdict.get("intact")
+        context["chain_verification_path"] = str(verdict_path)
     log_event(
         "SYSTEM",
         str(job["fiduciary_id"]),
         "SYSTEM",
         str(job["id"]),
         "JOB_COMPLETED",
-        {"output_file_path": str(path), "rows": len(rows)},
+        context,
     )
     return path
+
+
+def _csv_value(value: Any) -> Any:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return value

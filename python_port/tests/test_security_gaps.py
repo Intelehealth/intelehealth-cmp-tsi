@@ -1095,8 +1095,8 @@ def test_record_consent_stored_minor_without_guardian_is_rejected(monkeypatch):
     def one(sql, params=()):
         if "SELECT version, policy_content FROM consent_policies" in sql:
             return {"version": "v1", "policy_content": policy_content}
-        if "SELECT policy_content FROM consent_policies" in sql:
-            return {"policy_content": policy_content}
+        if "SELECT policy_content, status" in sql:
+            return {"policy_content": policy_content, "status": "ACTIVE", "in_effect": True}
         if "SELECT age_category FROM data_principal" in sql:
             return {"age_category": "MINOR"}
         return None  # no verified guardian log for the stored minor
@@ -1132,8 +1132,8 @@ def test_record_consent_cannot_flip_stored_minor_to_adult(monkeypatch):
     def one(sql, params=()):
         if "SELECT version, policy_content FROM consent_policies" in sql:
             return {"version": "v1", "policy_content": policy_content}
-        if "SELECT policy_content FROM consent_policies" in sql:
-            return {"policy_content": policy_content}
+        if "SELECT policy_content, status" in sql:
+            return {"policy_content": policy_content, "status": "ACTIVE", "in_effect": True}
         if "SELECT age_category FROM data_principal" in sql:
             return {"age_category": "MINOR"}
         return None
