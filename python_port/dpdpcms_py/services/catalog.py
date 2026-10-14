@@ -192,6 +192,69 @@ def queue_policy_change_notices(
     return {"principals_affected": len(holders), "notified": notified}
 
 
+def served_policy_version(policy_id: str, fiduciary_id: str) -> str | None:
+    """P11-03: the one version of a policy that is served - ACTIVE, in effect,
+    and the newest such. get_active_policy and the consent gate both use it, so
+    consent can only rest on the notice a principal is actually shown."""
+    row = db.one(
+        "SELECT version FROM consent_policies WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE' AND effective_date <= NOW() ORDER BY effective_date DESC, last_updated_at DESC, created_at DESC LIMIT 1",
+        (policy_id, str(fiduciary_id)),
+    )
+    return str(row["version"]) if row else None
+
+
+def retire_superseded_versions(policy_id: str, fiduciary_id: str) -> list[str]:
+    """P11-03: once a newer version is in force, the ones it supersedes are
+    archived and their unanswered re-consent demands closed.
+
+    Only versions already in effect are retired: a future-dated ACTIVE version
+    leaves the current one served until its effective date. Consent records
+    that rest on a retired version are untouched - they stay valid until the
+    principal answers the re-consent request for the served version.
+    """
+    fid = str(fiduciary_id)
+    served = served_policy_version(policy_id, fid)
+    if served is None:
+        return []
+    retired = [
+        str(r["version"])
+        for r in db.all(
+            "UPDATE consent_policies SET status = 'ARCHIVED', last_updated_at = NOW() WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE' AND effective_date <= NOW() AND version <> %s RETURNING version",
+            (policy_id, fid, served),
+        )
+    ]
+    closed = db.execute(
+        "UPDATE reconsent_requests SET status = 'CLOSED', responded_at = NOW() WHERE fiduciary_id = %s AND policy_id = %s AND policy_version <> %s AND status = 'PENDING'",
+        (fid, policy_id, served),
+    )
+    if retired or closed:
+        log_event(
+            "SYSTEM",
+            fid,
+            "DPO_CONSOLE",
+            None,
+            "POLICY_VERSIONS_SUPERSEDED",
+            {
+                "policy_id": policy_id,
+                "served_version": served,
+                "archived_versions": retired,
+                "reconsent_closed": closed,
+            },
+        )
+    return retired
+
+
+def retire_all_superseded_versions() -> dict[str, int]:
+    """P11-03 (worker): a future-dated version supersedes the old one when its
+    effective date arrives, which no API call marks - so the sweep does it."""
+    archived = 0
+    for row in db.all(
+        "SELECT DISTINCT id, fiduciary_id FROM consent_policies p WHERE status = 'ACTIVE' AND effective_date <= NOW() AND EXISTS (SELECT 1 FROM consent_policies q WHERE q.id = p.id AND q.fiduciary_id = p.fiduciary_id AND q.status = 'ACTIVE' AND q.effective_date <= NOW() AND q.version <> p.version)"
+    ):
+        archived += len(retire_superseded_versions(str(row["id"]), str(row["fiduciary_id"])))
+    return {"archived": archived}
+
+
 def activate_policy_if_complete(policy_id: str, fiduciary_id: str) -> list[str]:
     """Activate the policy's UNDER_REVIEW version(s) once its ROPA is complete.
 
@@ -211,19 +274,21 @@ def activate_policy_if_complete(policy_id: str, fiduciary_id: str) -> list[str]:
     if pending and pending["count"] > 0:
         return []
     rows = db.all(
-        "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = NOW() WHERE id = %s AND fiduciary_id = %s AND status = 'UNDER_REVIEW' RETURNING version",
+        # clock_timestamp: on an effective-date tie the version activated last is
+        # the one served (P11-03), even inside the transaction that seeded both.
+        "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = clock_timestamp() WHERE id = %s AND fiduciary_id = %s AND status = 'UNDER_REVIEW' RETURNING version",
         (policy_id, fid),
     )
     versions = [str(r["version"]) for r in rows]
+    # P11-03: the version just activated supersedes the one it replaces.
+    if versions:
+        retire_superseded_versions(policy_id, fid)
     # Notices go out only for a version already in force; a future-dated one is
     # announced with notify_policy_change once its effective date arrives.
-    in_force = {
-        str(r["version"])
-        for r in db.all(
-            "SELECT version FROM consent_policies WHERE id = %s AND fiduciary_id = %s AND version = ANY(%s) AND effective_date <= NOW()",
-            (policy_id, fid, versions),
-        )
-    }
+    # P11-03: and only for the version now served - when two versions activate
+    # together, the older one is superseded at once and is not announced.
+    served = served_policy_version(policy_id, fid)
+    in_force = {served} if served in versions else set()
     for version in [v for v in versions if v in in_force]:
         counts = queue_policy_change_notices(fid, policy_id, version)
         log_event(
@@ -539,7 +604,7 @@ class PolicyService(Service):
         policy_id = ctx.payload.get("policy_id")
         if policy_id:
             row = db.one(
-                "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE' AND effective_date <= NOW() ORDER BY effective_date DESC LIMIT 1",
+                "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE' AND effective_date <= NOW() ORDER BY effective_date DESC, last_updated_at DESC, created_at DESC LIMIT 1",
                 (policy_id, fid),
             )
         else:
@@ -678,16 +743,14 @@ class PolicyService(Service):
         version = ctx.payload.get("version") or ""
         fid = require(resolve_fiduciary(ctx), "fiduciary_id")
         # P10-02: never ask for re-consent to a version consent cannot rest on.
-        live = db.one(
-            "SELECT 1 FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s AND status = 'ACTIVE' AND effective_date <= NOW()",
-            (pid, version, fid),
-        )
-        if not live:
+        # P11-03: and only to the version served now, retiring what it supersedes.
+        if served_policy_version(pid, fid) != str(version):
             raise ApiError(
                 409,
                 "Conflict",
                 f"Policy {pid} version {version} is not the active, in-effect notice; principals cannot re-consent to it yet.",
             )
+        retire_superseded_versions(pid, fid)
         counts = queue_policy_change_notices(fid, pid, version, reason=ctx.payload.get("change_reason"))
         log_event(
             authenticated_user_id(ctx) or "DPO",

@@ -168,6 +168,35 @@
 </div>
 
 <script>
+    // P11-10: a stored consent decision is read exactly as the server reads it
+    // (services/base.py point_purpose_id, services/consent.py _point_granted).
+    function pointPurposeId(point) {
+        if (!point || typeof point !== 'object') return '';
+        for (const key of ['data_point_id', 'purpose_id', 'id']) {
+            if (point[key] != null && point[key] !== '') {
+                const text = String(point[key]).trim();
+                return text === 'ALL' ? text : text.toLowerCase();
+            }
+        }
+        return '';
+    }
+    function pointGranted(point) {
+        if (!point || typeof point !== 'object') return false;
+        let granted = point.consent_granted;
+        if (granted == null) {
+            granted = ['granted', 'true', 'consent_given'].includes(String(point.status == null ? '' : point.status).toLowerCase());
+        } else if (Array.isArray(granted)) {
+            granted = granted.length > 0;
+        } else if (typeof granted === 'object') {
+            granted = Object.keys(granted).length > 0;
+        }
+        if (!granted) return false;
+        if (point.consent_expiry) {
+            const expiry = Date.parse(String(point.consent_expiry));
+            if (!Number.isNaN(expiry) && expiry <= Date.now()) return false;
+        }
+        return true;
+    }
     function esc(s) {
         if (s == null) return '';
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
@@ -502,9 +531,9 @@
                 const noActiveConsent = !detailRes.success;
                 const rawConsents = detailRes.data_point_consents || (data.consents ? data.consents : {});
                 const mappedConsents = Array.isArray(rawConsents) ? rawConsents.map(c => ({
-                    id: c.data_point_id || c.id,
+                    id: pointPurposeId(c),
                     name: c.purpose_agreed_to || c.name,
-                    status: noActiveConsent ? 'WITHDRAWN' : (c.consent_granted === true ? 'GRANTED' : 'WITHDRAWN'),
+                    status: noActiveConsent ? 'WITHDRAWN' : (pointGranted(c) ? 'GRANTED' : 'WITHDRAWN'),
                     mandatory: c.is_mandatory || false
                 })) : [];
 

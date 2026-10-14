@@ -48,10 +48,28 @@ def queue_webhook(
         log.exception("Failed to queue webhook event %s for %s", event_type, fiduciary_id)
 
 
-def linked_processors(fiduciary_id: str) -> list[str]:
-    """CW-08: the processors (apps) acting for a fiduciary - every ACTIVE app."""
+def linked_processors(fiduciary_id: str, category: str = DEFAULT_CATEGORY) -> list[str]:
+    """CW-08 / P11-05: the processors acting for a fiduciary on this class of event.
+
+    A processor is an ACTIVE app that has registered an enabled endpoint for
+    the category (processor_webhook_configs) and carries a recorded processing
+    agreement (dpa_reference). Every other app - an integrator key with no
+    endpoint and no role in the processing - is not sent the principal's
+    identifier and gets no alert it could never acknowledge.
+    """
     try:
-        rows = db.all("SELECT id FROM apps WHERE fiduciary_id = %s AND status = 'ACTIVE'", (str(fiduciary_id),))
+        rows = db.all(
+            """
+            SELECT a.id
+            FROM apps a
+            JOIN processor_webhook_configs p ON p.app_id = a.id AND p.fiduciary_id = a.fiduciary_id
+            WHERE a.fiduciary_id = %s AND a.status = 'ACTIVE'
+              AND p.category = %s AND p.enabled IS TRUE
+              AND btrim(COALESCE(a.dpa_reference, '')) <> ''
+            ORDER BY a.id
+            """,
+            (str(fiduciary_id), category or DEFAULT_CATEGORY),
+        )
     except Exception:
         log.exception("Could not list processors for %s", fiduciary_id)
         return []
@@ -64,12 +82,11 @@ def fan_out_to_processors(
     """CW-08: tell every linked processor, not only the fiduciary.
 
     One delivery per processor, addressed to that processor's own endpoint
-    (processor_webhook_configs); a processor with no endpoint configured is
-    recorded as SKIPPED by the dispatcher, and still has the PROCESSOR alert
-    the caller raises, which it can poll and must acknowledge. Returns the
+    (processor_webhook_configs). P11-05: only apps registered as processors
+    for the category are addressed - see linked_processors. Returns the
     processor app ids notified.
     """
-    apps = linked_processors(fiduciary_id)
+    apps = linked_processors(fiduciary_id, category)
     for app_id in apps:
         queue_webhook(fiduciary_id, event_type, payload, category=category, app_id=app_id)
     return apps

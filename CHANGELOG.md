@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (333 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (365 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -711,10 +711,93 @@ the policy as ACTIVE (the CF-03 blind spot).
 - Tests: 332 passed, 1 skipped (333 collected) against a throwaway Postgres
   with `db/01..26` applied. db/26 re-applies cleanly.
 
+### Fixed (Security workbook v9, p12 remediation round)
+
+Workbook v9 re-verified `2e55f86`. It left four requirements Partial (CU-05,
+CW-08, UD-03, LG-05) and raised ten findings (P11-01..P11-10). It also listed
+the Rule 6 obligations the review never reached on the Security Coverage
+sheet. The findings and the Partial rows are closed in code, each with a
+DB-backed regression in `test_p11_remediation.py`. The coverage items the repo
+can carry are closed in code and tested in `test_security_coverage.py`. The
+rest are now documented controls, each with an owner and a record, under
+`docs/security/`.
+
+- **P11-01 (CC-07, CV-01)** The `consent_records` maintenance guard decides
+  "granted" with `tsi_point_granted`, which mirrors `_point_granted` exactly:
+  Python truthiness of `consent_granted`, else the legacy `status` alias, with
+  expiry. The spellings `status: 'true'`, `consent_granted: 'True'` and `1` no
+  longer turn a refused purpose into a granted one (db/27).
+- **P11-02 (CC-07)** The guard rejects a `data_point_consents` value that is
+  not an array. It used to coerce it, which let one UPDATE erase every recorded
+  decision.
+- **P11-03 / CU-05 (CU-02)** Only one version of a policy is served at a time:
+  ACTIVE, in effect, and the newest (`served_policy_version`).
+  - Consent can rest only on that version.
+  - Activating a version archives the versions it supersedes and closes their
+    PENDING re-consent requests.
+  - A future-dated version takes over when its effective date arrives. The
+    worker's `superseded_policies` sweep does the archiving then.
+  - An unversioned consent is stamped with the served version.
+- **P11-04 / LG-05** The audit purpose filter compares canonical ids on both
+  sides, so whole-account erasures (`ALL`) can be found again.
+- **P11-05 / CW-08** A withdrawal, erasure or closure fans out only to
+  processors. A processor is an ACTIVE app with an enabled endpoint for the
+  event's category and a recorded `dpa_reference`. Other apps no longer receive
+  the principal's id, or alerts they could never act on.
+- **P11-06 (SA-13, CW-11)** Erasure re-keys the `user_id` in FIDUCIARY and
+  PROCESSOR alert payloads as well as in PRINCIPAL ones.
+- **P11-07 (CU-01, UD-05)** `get_active_consent` without a `policy_id` still
+  returns the newest record at the top level. It now also returns
+  `active_records` and `active_record_count`, so the answer is never silently
+  partial.
+- **P11-08 (PL-01)** Purpose closure looks the lifecycle row up canonically,
+  so rows that were never canonicalised still close. A failed time-bound
+  closure is now reported as an error in the cycle summary, not as `closed: 0`.
+- **P11-09 (NT-02)** `EXPIRY_NOTIFICATION` text is migrated into
+  `PURPOSE_CLOSED`, and `PURGE_ONHOLD_NOTIFICATION` into
+  `ERASURE_REQUESTED_NOTIFICATION`. Where the live template already has a
+  language, the DPO's live text wins. The original rows are archived in
+  `notification_message_templates_archive`.
+- **P11-10 (UD-01, UD-02)** The rights dashboard's record-detail and withdraw
+  modals, and the wallet page, resolve purpose aliases and granted-ness exactly
+  as the server does (`pointPurposeId`, `pointGranted`).
+- **UD-03** The history status filter's `ACTIVE` option is labelled "In force"
+  to match what it returns. A consent record superseded by a later one is
+  badged SUPERSEDED, not ACTIVE, so the filter and the badges agree.
+
+### Added (Security Coverage sheet, workbook v9)
+
+- **s.8(6) / Rule 7** Breach handling:
+  - `report_breach` honours the affected principal ids and CSV, and the
+    category, that the console sends. Both were dropped before. It also
+    notifies the principals.
+  - New `notify_affected_principals` and `record_board_intimation` (the
+    reference is mandatory; a late intimation is recorded as late), with
+    console controls for both.
+  - The worker's `breach_deadlines` sweep alerts the DPO 12 hours before the
+    72-hour Board deadline, and again when it is missed.
+- **Rule 6(1)(d)** The worker records a heartbeat each cycle.
+  `GET /healthz/worker` returns 503 when the worker is stale or a sweep failed.
+  `restore-test.sh` restores a dump into a scratch database and checks that
+  the ledger still chains.
+- **Rule 6(1)(b)** Row-level security on every tenant table, for any database
+  role granted `tsi_tenant_reader`. Such a role sees only the fiduciary set in
+  `tsi.fiduciary_id`. The application, as the table owner, is unaffected.
+- **Rule 14** `OUTBOUND_ALLOWED_HOSTS` restricts every webhook, gateway,
+  verifier and SMTP destination.
+- **M-03** Content-Security-Policy, Referrer-Policy and
+  Cross-Origin-Opener-Policy headers.
+- **M-02** A CI `supply-chain` job: `pip-audit --strict` on the runtime
+  requirements, and a failure if any compiled bytecode is committed.
+- **Rule 6(1)(a)–(g), S9, S10, M-01, M-04** `docs/security/`: control map,
+  key management, backup and continuity, monitoring and review, log
+  retention, breach runbook, outbound destinations, pen-test plan.
+- DB scripts: `27_p11_remediation.sql`, `28_security_coverage.sql`.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/26` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Existing database:** Run `db/13` through `db/28` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
 - **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

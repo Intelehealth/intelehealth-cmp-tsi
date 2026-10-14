@@ -1,0 +1,33 @@
+# Rule 6 control map
+
+This maps DPDP Rules 2025 Rule 6(1)(a)–(g), and the other security-bearing obligations, to the control that discharges each one, where it lives, and who owns it. It is the document an auditor asks for first.
+
+Two kinds of control appear here:
+
+- **In the repo.** Enforced by code or by a database trigger, and covered by a test. These are marked *(code)*.
+- **Outside the repo.** A deployment, procedure or contract. The repo cannot prove these. Each one names an owner, a record to keep, and a review cadence. Until the owner fills in the record, the obligation is **not** discharged.
+
+> Owners are roles. Write a named person and a date next to each one before relying on this map. The DPO decision register (`docs/dpo_decision_register.md`) uses the same convention.
+
+| Clause | Obligation | Control | Where | Owner | Evidence / record | Review |
+| --- | --- | --- | --- | --- | --- | --- |
+| 6(1)(a) | Encryption, obfuscation, masking, tokens | pgcrypto column encryption for PII; bcrypt API secrets; pgp-encrypted MFA secrets; HMAC pseudonyms in the ledger; random erasure tokens *(code)*. TLS to Postgres is required outside `local` *(code)*. TLS at the edge, encryption at rest, and key handling are deployment controls. | `db.py`, `security.py`, `config.py`; [KEY_MANAGEMENT.md](KEY_MANAGEMENT.md) | Infrastructure lead | Key inventory and rotation log in KEY_MANAGEMENT.md; TLS scan output | Quarterly |
+| 6(1)(b) | Access control | Role and permission gate on every admin call; MFA; tenancy filter on every query; API-key scopes *(code)*. Row-level security for every non-application database role granted `tsi_tenant_reader` *(code, db/28)*. OS, container, network and admin-plane access are deployment controls. | `services/roles.py`, `main.py`, `db/28_security_coverage.sql` | Infrastructure lead + DPO | Quarterly access review: operators, DB roles, cloud IAM | Quarterly |
+| 6(1)(c) | Logs, monitoring, review | Hash-chained, append-only ledger *(code, db/19)*. Daily chain verification *(code, worker)*. Failed sign-in burst alerts *(code, worker)*. Breach-deadline alerts *(code, worker)*. Shipping logs to a SIEM and the review cadence are procedures. | `audit.py`, `jobs.py`; [MONITORING_AND_REVIEW.md](MONITORING_AND_REVIEW.md) | DPO | Monthly review sign-off in MONITORING_AND_REVIEW.md | Monthly |
+| 6(1)(d) | Continuity, backups | `manage.sh backup` writes `pg_dump`. `restore-test.sh` proves a dump restores and the ledger still chains. `/healthz/worker` returns 503 when the worker stops or a sweep fails *(code)*. | `scripts/local/shell_scripts/`, `worker.py`, `main.py`; [BACKUP_AND_CONTINUITY.md](BACKUP_AND_CONTINUITY.md) | Infrastructure lead | Restore-test log, with RPO/RTO measured | Monthly restore test |
+| 6(1)(e) | Keep logs and personal data for one year | `audit_logs` cannot be updated, deleted or truncated *(code, db/19)*. `notification_deliveries`, `webhook_deliveries` and `notifications` cannot be deleted, truncated or rewritten inside 365 days *(code, db/23, db/24)*. The prune jobs default to 365 days. | `db/19`, `db/23`, `db/24`, `jobs.py`; [LOG_RETENTION.md](LOG_RETENTION.md) | DPO | The trigger tests in `tests/test_integration_db.py` | On every migration |
+| 6(1)(f) | Security terms in processor contracts | No API key is issued to an app without a recorded `dpa_reference` *(code)*. Only apps with a DPA and a registered endpoint are treated as processors *(code, P11-05)*. The contract terms themselves are a legal control. | `services/governance.py`, `webhooks.py` | Legal / DPO | DPA register: one signed agreement per `dpa_reference` | Annually, and on every new processor |
+| 6(1)(g) | Technical and organisational measures | CI runs lint, tests against a live Postgres, and a dependency audit with `pip-audit`. CI fails on committed bytecode *(code)*. Training, secure-development policy, change control and vendor assessment are organisational controls. | `.github/workflows/main.yml`; this document | CTO | Training records, change log, vendor assessments | Annually |
+| s.8(6), R7 | Breach intimation | `report_breach` notifies named principals, or every holder of the affected purpose. `notify_affected_principals` and `record_board_intimation` exist. The worker alerts the DPO 12 hours before the 72-hour Board deadline and again when it is missed *(code)*. | `services/compliance.py`, `jobs.py`; [BREACH_RESPONSE_RUNBOOK.md](BREACH_RESPONSE_RUNBOOK.md) | DPO | Incident log and tabletop record | Tabletop exercise twice a year |
+| s.9, R10 | Children: verifiable consent; no tracking or targeted ads | Age and guardian gate in `record_consent`; the stored MINOR class is sticky *(code)*. The ban on tracking children is a property of the products that hold the clinical data, not of the CMS. | `services/consent.py`; M-04 below | Product lead + DPO | Data-flow review of the telemedicine platform | Annually |
+| s.10, R13 | Significant Data Fiduciary duties | `is_significant_data_fiduciary` flag. If Intelehealth is notified as an SDF: DPIA, annual independent audit, and a DPO based in India. | `services/catalog.py` | DPO / Board | Check for notification by the Central Government; DPIA and audit reports if notified | On each Central Government notification, at least annually |
+| R14 | Transfers outside India | `OUTBOUND_ALLOWED_HOSTS` restricts every webhook, gateway, verifier and SMTP destination *(code)*. | `netutil.py`, `delivery.py`; [OUTBOUND_DESTINATIONS.md](OUTBOUND_DESTINATIONS.md) | Infrastructure lead | Destination inventory with the hosting region of each | Quarterly, and on every new integration |
+
+## Methods the code review did not cover
+
+| Ref | Gap | What closes it | Owner |
+| --- | --- | --- | --- |
+| M-01 | No dynamic or penetration testing | An authenticated pen test of staging, scoped in [PEN_TEST_PLAN.md](PEN_TEST_PLAN.md). Re-test after each major release. | CTO |
+| M-02 | Dependency and supply-chain review | The `supply-chain` CI job (`pip-audit --strict`, plus a check that no bytecode is committed). Pin and refresh dependencies monthly. | Engineering lead |
+| M-03 | Web and transport hardening | The app sets CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, COOP and Permissions-Policy *(code)*. The tokens are not in cookies, so there are no cookie flags to set. TLS versions and ciphers are set at the reverse proxy: run a TLS scan of the deployed host and keep the report. | Infrastructure lead |
+| M-04 | Scope: the CMS only | Run the same review over the telemedicine platform that holds the health records. A compliant CMS does not make the fiduciary compliant. | CTO + DPO |

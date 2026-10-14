@@ -91,6 +91,12 @@ class Settings:
     # self-declare its identity and every operator behind the proxy no longer
     # shares one throttle bucket. Empty = no proxy, the socket peer is trusted.
     trusted_proxy_ips: tuple[str, ...] = ()
+    # Rule 14: the destinations personal data may be sent to. When set, every
+    # outbound webhook, SMS/push gateway and verifier URL - and the SMTP host -
+    # must be one of these hosts or a subdomain of one (".gov.in", "example.in").
+    # Empty = not restricted; production deployments should list the in-India
+    # endpoints recorded in docs/security/OUTBOUND_DESTINATIONS.md.
+    outbound_allowed_hosts: tuple[str, ...] = ()
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -156,6 +162,9 @@ class Settings:
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
             notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),
             trusted_proxy_ips=tuple(ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()),
+            outbound_allowed_hosts=tuple(
+                h.strip().lower().rstrip(".") for h in os.getenv("OUTBOUND_ALLOWED_HOSTS", "").split(",") if h.strip()
+            ),
         )
 
 

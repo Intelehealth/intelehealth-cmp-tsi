@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import secrets
 import uuid
@@ -10,6 +11,7 @@ from .. import db
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
+from .admin import authenticated_user_id
 from .base import (
     Service,
     bind_principal_field,
@@ -273,6 +275,15 @@ def erase_cms_copy(
                     (token, token, fiduciary_id, user_id),
                 )
                 counts[table] = cur.rowcount
+                # P11-06: FIDUCIARY and PROCESSOR alerts about the principal
+                # (withdrawal, erasure) carry the raw user_id in their payload
+                # too; re-key it whoever the alert is addressed to.
+                cur.execute(
+                    "UPDATE alerts SET payload = jsonb_set(payload, '{user_id}', to_jsonb(%s::text))"
+                    " WHERE fiduciary_id = %s AND recipient_type <> 'PRINCIPAL' AND payload ->> 'user_id' = %s",
+                    (token, fiduciary_id, user_id),
+                )
+                counts[table] += cur.rowcount
                 continue
             cur.execute(
                 f"UPDATE {table} SET {column} = %s WHERE fiduciary_id = %s AND {column} = %s",
@@ -1197,8 +1208,34 @@ class GrievanceService(Service):
         return {**meta, "attachment_id": str(row["id"]), "content_base64": base64.b64encode(data).decode("ascii")}
 
 
+def _breach_user_ids(payload: dict) -> list[str] | None:
+    """The principals a breach report names: a list and/or CSV text (one id
+    per cell; a header cell 'user_id' is skipped). None when it names none."""
+    ids: list[str] = []
+    named = payload.get("affected_user_ids")
+    if named is not None:
+        if not isinstance(named, list):
+            raise ApiError(400, "Bad Request", "affected_user_ids must be a list of principal ids.")
+        ids.extend(str(u).strip() for u in named if str(u).strip())
+    csv_text = payload.get("affected_user_ids_csv")
+    if csv_text:
+        for line in str(csv_text).splitlines():
+            for cell in line.split(","):
+                cell = cell.strip().strip('"').strip()
+                if cell and cell.lower() not in {"user_id", "userid", "id"}:
+                    ids.append(cell)
+    return sorted(set(ids)) if ids else None
+
+
 class BreachService(Service):
     def report_breach(self, ctx: RequestContext) -> dict:
+        # S8-6: the console names a category (a BREACH_NOTIFICATION_* template
+        # the DPO wrote) and the affected principals; both used to be dropped.
+        category = str(ctx.payload.get("breach_category") or "").strip().upper()
+        notification_type = ctx.payload.get("notification_type") or (
+            f"BREACH_NOTIFICATION_{category}" if category else "BREACH_NOTIFICATION"
+        )
+        user_ids = _breach_user_ids(ctx.payload)
         row = db.insert_returning(
             """
             INSERT INTO breach_incidents
@@ -1222,15 +1259,35 @@ class BreachService(Service):
                 ctx.payload.get("severity"),
                 int(ctx.payload.get("affected_principal_count") or 0),
                 None,
-                ctx.payload.get("notification_type", "BREACH_NOTIFICATION"),
+                notification_type,
                 ctx.payload.get("detected_at"),
             ),
         )
-        return {
+        log_event(
+            authenticated_user_id(ctx) or "DPO",
+            str(require(resolve_fiduciary(ctx), "fiduciary_id")),
+            "DPO_CONSOLE",
+            str(row["id"]),
+            "BREACH_REPORTED",
+            {"breach_id": str(row["id"]), "severity": ctx.payload.get("severity") or "MEDIUM"},
+        )
+        out = {
             "success": True,
             "breach_id": str(row["id"]),
             "board_notification_deadline": row["board_notification_deadline"].isoformat(),
+            "affected_principal_count": 0,
+            "notified": 0,
         }
+        # s.8(6): intimate the affected principals as part of reporting, when
+        # the report says who they are (named, or everyone under the purpose).
+        if user_ids is not None or ctx.payload.get("affected_purpose_id"):
+            notify_ctx = dataclasses.replace(
+                ctx, payload={"id": str(row["id"]), **({"user_ids": user_ids} if user_ids is not None else {})}
+            )
+            sent = self.notify_affected_principals(notify_ctx)
+            out["affected_principal_count"] = sent["affected_total"]
+            out["notified"] = sent["notified"]
+        return out
 
     def list_breaches(self, ctx: RequestContext) -> list[dict]:
         return db.to_jsonable(
@@ -1267,3 +1324,122 @@ class BreachService(Service):
 
     def download_breach_report(self, ctx: RequestContext) -> dict:
         return self.get_breach(ctx)
+
+    def _breach_row(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT * FROM breach_incidents WHERE id = %s{scope}",
+            (require(ctx.payload.get("id") or ctx.payload.get("breach_id"), "id"), *scope_params),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "Breach not found.")
+        return row
+
+    def notify_affected_principals(self, ctx: RequestContext) -> dict:
+        """s.8(6) / Rule 7(1): intimate each affected Data Principal.
+
+        The principals are the ones the caller names (`user_ids`), or - when
+        none are named - every principal who ever granted the breach's
+        affected purpose. Each gets one BREACH_NOTIFICATION (or the breach's own
+        BREACH_NOTIFICATION_* category) carrying the breach's plain-language
+        steps, and a breach_affected_principals row; a principal already
+        notified for this breach is not notified twice.
+        """
+        breach = self._breach_row(ctx)
+        fid = str(breach["fiduciary_id"])
+        named = ctx.payload.get("user_ids")
+        if named is not None:
+            if not isinstance(named, list) or not all(isinstance(u, str) and u.strip() for u in named):
+                raise ApiError(400, "Bad Request", "user_ids must be a list of principal ids.")
+            user_ids = sorted({u.strip() for u in named})
+        elif breach.get("affected_purpose_id"):
+            user_ids = [
+                str(r["user_id"])
+                for r in db.all(
+                    """
+                    SELECT DISTINCT cr.user_id
+                    FROM consent_records cr, LATERAL jsonb_array_elements(
+                        CASE WHEN jsonb_typeof(cr.data_point_consents) = 'array'
+                             THEN cr.data_point_consents ELSE '[]'::jsonb END) AS p
+                    WHERE cr.fiduciary_id = %s AND cr.user_id NOT LIKE 'erased:%%'
+                      AND tsi_point_purpose(p) = %s AND tsi_point_granted(p, FALSE)
+                    ORDER BY cr.user_id
+                    """,
+                    (fid, canonical_purpose_id(breach["affected_purpose_id"])),
+                )
+            ]
+        else:
+            raise ApiError(
+                400, "Bad Request", "Name the affected principals (user_ids); the breach records no affected purpose."
+            )
+        ntype = str(breach.get("notification_type") or "BREACH_NOTIFICATION")
+        context = {
+            "title": breach["title"],
+            "actionable_steps": breach["actionable_steps"],
+            "detected_at": breach["detected_at"].isoformat() if breach.get("detected_at") else None,
+        }
+        notified = 0
+        with db.connection() as conn, conn.cursor() as cur:
+            for user_id in user_ids:
+                cur.execute(
+                    "INSERT INTO breach_affected_principals (breach_id, user_id) VALUES (%s, %s)"
+                    " ON CONFLICT (breach_id, user_id) DO NOTHING",
+                    (breach["id"], user_id),
+                )
+                if cur.rowcount == 0:
+                    continue
+                cur.execute(
+                    "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
+                    " VALUES ('PRINCIPAL', %s, %s, %s, %s)",
+                    (user_id, fid, ntype, db.as_jsonb(context)),
+                )
+                notified += 1
+            cur.execute(
+                "UPDATE breach_incidents SET affected_principal_count ="
+                " (SELECT COUNT(*) FROM breach_affected_principals WHERE breach_id = %s),"
+                " principals_notified_at = COALESCE(principals_notified_at, NOW()), last_updated_at = NOW()"
+                " WHERE id = %s RETURNING affected_principal_count",
+                (breach["id"], breach["id"]),
+            )
+            total = cur.fetchone()["affected_principal_count"]
+        log_event(
+            authenticated_user_id(ctx) or "DPO",
+            fid,
+            "DPO_CONSOLE",
+            str(breach["id"]),
+            "BREACH_PRINCIPALS_NOTIFIED",
+            {"breach_id": str(breach["id"]), "notified": notified, "affected_total": total},
+        )
+        return {"success": True, "breach_id": str(breach["id"]), "notified": notified, "affected_total": total}
+
+    def record_board_intimation(self, ctx: RequestContext) -> dict:
+        """s.8(6) / Rule 7(2): record that the Data Protection Board was intimated.
+
+        The 72-hour deadline column alone gave a clock with no way to stop it.
+        The intimation reference (the Board's acknowledgement or the filing id)
+        is mandatory; a late intimation is accepted and recorded as late.
+        """
+        breach = self._breach_row(ctx)
+        if breach.get("board_notified_at"):
+            raise ApiError(409, "Conflict", "The Board intimation for this breach is already recorded.")
+        reference = str(require(ctx.payload.get("board_reference"), "board_reference")).strip()
+        row = db.one(
+            "UPDATE breach_incidents SET board_notified_at = COALESCE(%s::timestamptz, NOW()), board_reference = %s,"
+            " board_notified_by = %s, last_updated_at = NOW() WHERE id = %s"
+            " RETURNING board_notified_at, board_notified_at > board_notification_deadline AS late",
+            (ctx.payload.get("intimated_at"), reference, authenticated_user_id(ctx), breach["id"]),
+        )
+        log_event(
+            authenticated_user_id(ctx) or "DPO",
+            str(breach["fiduciary_id"]),
+            "DPO_CONSOLE",
+            str(breach["id"]),
+            "BREACH_BOARD_INTIMATED",
+            {"breach_id": str(breach["id"]), "board_reference": reference, "late": bool(row["late"])},
+        )
+        return {
+            "success": True,
+            "breach_id": str(breach["id"]),
+            "board_notified_at": row["board_notified_at"].isoformat(),
+            "late": bool(row["late"]),
+        }

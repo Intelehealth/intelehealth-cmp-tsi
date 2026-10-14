@@ -5,7 +5,9 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "PURGE_STATUS": {"en": "A data deletion request changed status."},
     "GRIEVANCE_SUBMITTED": {"en": "Your grievance has been submitted."},
     "GRIEVANCE_UPDATED": {"en": "Your grievance status was updated."},
-    "BREACH_NOTIFICATION": {"en": "A personal data breach notification is available."},
+    "BREACH_NOTIFICATION": {
+        "en": "A personal data breach affecting your data was reported ({title}). What you should do: {actionable_steps}"
+    },
     "CONSENT_VALIDATION_DENIED": {
         "en": "A processing request under your consent was denied because no active consent exists for that purpose."
     },
@@ -48,6 +50,13 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "PURGE_EXECUTED": {
         "en": "A retention period has ended and erasure or de-identification requests were raised for the data held under it."
     },
+    # s.8(6) / Rule 7(2): the DPO-facing Board intimation clock.
+    "BREACH_BOARD_DEADLINE_DUE": {
+        "en": "The Data Protection Board must be intimated of breach '{title}' by {deadline}. Record the intimation once made."
+    },
+    "BREACH_BOARD_DEADLINE_MISSED": {
+        "en": "The 72-hour deadline to intimate the Data Protection Board of breach '{title}' passed at {deadline}."
+    },
 }
 
 # NT-03: Hindi defaults for every principal-facing notice, so a principal who
@@ -88,12 +97,15 @@ PLAIN_NOTIFICATION_MESSAGES = {
     },
     "GRIEVANCE_ROUTED": {"en": "A grievance has been assigned to you for action."},
     "SECURITY_AUTH_FAILURE_BURST": {"en": "A burst of failed sign-in attempts was recorded. Review the access log."},
+    "BREACH_NOTIFICATION": {"en": "A personal data breach notification is available. Sign in to read what to do."},
+    "BREACH_BOARD_DEADLINE_DUE": {"en": "A breach's Data Protection Board intimation is due within 12 hours."},
+    "BREACH_BOARD_DEADLINE_MISSED": {"en": "A breach's 72-hour Data Protection Board intimation deadline has passed."},
 }
 
 # P10-07: context fields that may carry free text about the principal's health
 # or circumstances. They are shown in the app only and never handed to the SMS
 # or push gateway.
-SENSITIVE_CONTEXT_KEYS = {"resolution_details"}
+SENSITIVE_CONTEXT_KEYS = {"resolution_details", "actionable_steps"}
 OUT_OF_BAND_PLACEHOLDER = {"en": "(sign in to read it)", "hi": "(पढ़ने के लिए साइन इन करें)"}
 
 # NT-03: English plus the 22 Eighth Schedule languages a notice may be written in.

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import audit, delivery, jobs, throttle, webhooks
+from .services.catalog import retire_all_superseded_versions
 
 log = logging.getLogger("dpdpcms.worker")
 
@@ -23,6 +24,7 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "delivery": delivery.process_pending_notifications,
         "webhooks": webhooks.process_pending_webhooks,
         "time_bound_purposes": jobs.close_due_time_bound_purposes,
+        "superseded_policies": retire_all_superseded_versions,
         "alerts": jobs.escalate_stale_alerts,
         "grievances": jobs.escalate_overdue_grievances,
         "retention": jobs.run_retention_sweep,
@@ -38,6 +40,7 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "notification_deliveries": jobs.prune_old_notification_deliveries,
         "audit_chain": audit.record_chain_verification,
         "security_monitor": jobs.flag_security_anomalies,
+        "breach_deadlines": jobs.flag_breach_board_deadlines,
     }
     # Each sweep is isolated: one failing sweep is logged and reported, and the
     # rest of the cycle still runs.
@@ -48,7 +51,30 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - one bad sweep must not halt the others
             log.exception("Sweep %s failed", name)
             summary[name] = {"error": f"{type(exc).__name__}: {exc}"}
+    record_heartbeat(summary)
     return summary
+
+
+def record_heartbeat(summary: dict[str, Any]) -> None:
+    """R6-d: a stopped worker silently stops retention, escalation and delivery;
+    each cycle leaves a heartbeat that /healthz/worker reports on."""
+    from . import db
+    from .config import settings
+
+    failed = sorted(name for name, out in summary.items() if isinstance(out, dict) and out.get("error"))
+    try:
+        db.execute(
+            """
+            INSERT INTO worker_heartbeat (worker_name, last_cycle_at, poll_seconds, failed_sweeps)
+            VALUES ('default', NOW(), %s, %s)
+            ON CONFLICT (worker_name) DO UPDATE SET
+                last_cycle_at = EXCLUDED.last_cycle_at, poll_seconds = EXCLUDED.poll_seconds,
+                failed_sweeps = EXCLUDED.failed_sweeps
+            """,
+            (settings.worker_poll_seconds, db.as_jsonb(failed)),
+        )
+    except Exception:  # noqa: BLE001 - a heartbeat failure must not stop the cycle
+        log.exception("Could not record the worker heartbeat")
 
 
 def list_sweeps() -> list[str]:
@@ -56,6 +82,7 @@ def list_sweeps() -> list[str]:
         "delivery.process_pending_notifications   (NT-04 delivery adapter)",
         "webhooks.process_pending_webhooks        (CC-09/CU-08/CW-08 dispatcher)",
         "jobs.close_due_time_bound_purposes       (PL-01 time-bound closure)",
+        "catalog.retire_all_superseded_versions   (CU-05 superseded notice versions)",
         "jobs.escalate_stale_alerts               (NT-09)",
         "jobs.escalate_overdue_grievances         (UD-12, GR-09)",
         "jobs.run_retention_sweep                 (PL-04/SA-09, SA-11)",
@@ -71,6 +98,7 @@ def list_sweeps() -> list[str]:
         "jobs.prune_old_notification_deliveries   (SA-13 notification delivery retention)",
         "audit.record_chain_verification         (P6-12 daily full-ledger verification)",
         "jobs.flag_security_anomalies            (Rule 6(1)(c) failed sign-in bursts)",
+        "jobs.flag_breach_board_deadlines        (s.8(6) 72-hour Board intimation clock)",
     ]
 
 

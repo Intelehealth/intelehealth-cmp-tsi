@@ -204,6 +204,11 @@ def _deliver_email(delivery_id: str, recipient: str, subject: str, body: str) ->
     """Send via SMTP. Returns (error, sent_at note)."""
     if not settings.smtp_host:
         return "SMTP not configured", None
+    from .netutil import outbound_host_allowed
+
+    if not outbound_host_allowed(settings.smtp_host):
+        # Rule 14: the mail relay is an outbound destination like any other.
+        return "SMTP host is not an approved outbound destination (OUTBOUND_ALLOWED_HOSTS)", None
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.smtp_from or settings.smtp_username

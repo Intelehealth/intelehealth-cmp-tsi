@@ -30,6 +30,31 @@ jobs:
         run: ruff format --check python_port
         continue-on-error: true
 
+  # M-02: software composition analysis. A known CVE in a pinned dependency
+  # fails the build; so does compiled bytecode committed to the repository.
+  supply-chain:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit runtime dependencies
+        run: pip-audit --strict -r python_port/requirements.txt
+
+      - name: No compiled bytecode in the repository
+        run: |
+          if git ls-files | grep -E '(\.py[co]$|__pycache__/)'; then
+            echo "Compiled bytecode is committed; remove it (it is gitignored)."
+            exit 1
+          fi
+
   test:
     name: Import check + tests
     runs-on: ubuntu-latest

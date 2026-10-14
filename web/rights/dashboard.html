@@ -298,9 +298,9 @@
         if (activeConsent && activeConsent.data_point_consents) {
             const dpc = activeConsent.data_point_consents;
             if (Array.isArray(dpc)) {
-                dpc.forEach(p => { existingPrefs[purposeKey(p.data_point_id || p.purpose_id || p.id)] = !!p.consent_granted; });
+                dpc.forEach(p => { existingPrefs[pointPurposeId(p)] = pointGranted(p); });
             } else if (typeof dpc === 'object') {
-                Object.keys(dpc).forEach(k => { existingPrefs[purposeKey(k)] = !!(dpc[k].consent_granted); });
+                Object.keys(dpc).forEach(k => { existingPrefs[purposeKey(k)] = pointGranted(dpc[k]); });
             }
         }
 
@@ -447,7 +447,9 @@
         const purposeOptions = policyPurposesForVerify.map(p =>
             `<option value="${esc(p.id)}" ${purposeKey(historyFilters.purpose_id) === purposeKey(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`
         ).join('');
-        const statusOptions = [['', 'Any status'], ['ACTIVE', 'Active'], ['CONSENT_GIVEN', 'Consent given'],
+        // UD-03: 'In force' is the server's ACTIVE filter (is_active_consent) - the
+        // record currently in force, which may itself be a partial withdrawal.
+        const statusOptions = [['', 'Any status'], ['ACTIVE', 'In force'], ['CONSENT_GIVEN', 'Consent given'],
                                ['PARTIAL_WITHDRAWAL', 'Partially withdrawn'], ['WITHDRAWN', 'Withdrawn'],
                                ['ERASURE_REQUESTED', 'Erasure requested']]
             .map(([v, l]) => `<option value="${v}" ${historyFilters.status === v ? 'selected' : ''}>${l}</option>`).join('');
@@ -574,10 +576,13 @@
                     const dpc = Array.isArray(rec.data_point_consents)
                         ? rec.data_point_consents
                         : Object.values(rec.data_point_consents || {});
-                    const allWithdrawn = dpc.length > 0 && dpc.every(p => p.consent_granted === false);
+                    const allWithdrawn = dpc.length > 0 && dpc.every(p => !pointGranted(p));
                     displayStatus = allWithdrawn ? 'WITHDRAWN' : 'PARTIALLY WITHDRAWN';
                 } else {
-                    displayStatus = 'ACTIVE';
+                    // UD-03: a consent record replaced by a later one (a re-consent,
+                    // a withdrawal) is no longer in force; badging it ACTIVE made
+                    // the 'In force' filter look as if it dropped active records.
+                    displayStatus = rec.is_active_consent === true ? 'ACTIVE' : 'SUPERSEDED';
                 }
                 return `<tr>
                     <td style="font-family:monospace;font-size:0.7rem;color:#94a3b8;">...${esc(rec.id.slice(-6))}</td>
@@ -704,14 +709,15 @@
         // governing retention period, the substitute for the BRD's expiry date
         // under the open-ended-consent decision.
         const statesById = {};
-        (rec.purpose_states || []).forEach(s => { statesById[String(s.purpose_id || '').toLowerCase()] = s; });
+        (rec.purpose_states || []).forEach(s => { statesById[purposeKey(s.purpose_id)] = s; });
         entries.forEach(item => {
             // Use the actual per-purpose consent_granted value from the record.
             // Do NOT blanket-override to false — partial withdrawals have a mix of true/false.
-            const granted = item.consent_granted === true;
+            // P11-10: granted-ness and purpose read exactly as the server reads them.
+            const granted = pointGranted(item);
             let label = granted ? '✓ GRANTED' : (isErasure ? '✕ ERASED' : isWithdrawal ? '✕ WITHDRAWN' : '✕ DENIED');
             let color = granted ? '#15803d' : '#b91c1c';
-            const pid = String(item.data_point_id || item.id || item.purpose_id || '').toLowerCase();
+            const pid = pointPurposeId(item);
             const state = statesById[pid];
             // P7-06: lifecycle states are OPEN/CLOSED (purpose_lifecycle), and a
             // CLOSED purpose is the temporal fact DD-01 substitutes for expiry.
@@ -720,7 +726,7 @@
             const retentionHtml = state && state.retention_period_days
                 ? `<span style="font-size:0.62rem;color:#64748b;margin-left:6px;white-space:nowrap;">retention ${esc(state.retention_period_days)} days</span>` : '';
             purposeHtml += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0;margin-bottom:8px;">
-                <span style="font-weight:700;font-size:0.8rem;color:#1e293b;">${esc(item.purpose_agreed_to || item.data_point_id)}${stateHtml}${retentionHtml}</span>
+                <span style="font-weight:700;font-size:0.8rem;color:#1e293b;">${esc(item.purpose_agreed_to || pid)}${stateHtml}${retentionHtml}</span>
                 <span style="font-weight:800;font-size:0.75rem;color:${color};">${label}</span>
             </div>`;
         });
@@ -749,12 +755,12 @@
 
         // All purposes are eligible for withdrawal (including mandatory)
         const eligible = dpc.map(dp => {
-            const dpId = dp.data_point_id || dp.purpose_id || dp.id;
+            const dpId = pointPurposeId(dp);
             const pInfo = policyPurposes.find(p => purposeKey(p.id) === purposeKey(dpId));
             return {
                 id: dpId,
                 name: dp.purpose_agreed_to || (pInfo && pInfo.name) || dpId,
-                active: dp.consent_granted === true,
+                active: pointGranted(dp),
                 mandatory: pInfo ? pInfo.is_mandatory : false
             };
         });

@@ -307,13 +307,21 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
         "expire_nominations",
         "prune_old_webhook_deliveries",
         "flag_security_anomalies",
+        "prune_old_notification_deliveries",
+        "flag_breach_board_deadlines",
     ):
         monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})
     monkeypatch.setattr(worker.throttle, "prune_expired", lambda: {"pruned": 0})
+    monkeypatch.setattr(worker.audit, "record_chain_verification", lambda: {"ran": "audit_chain"})
+    monkeypatch.setattr(worker, "retire_all_superseded_versions", lambda: {"archived": 0})
+    heartbeats = []
+    monkeypatch.setattr(worker, "record_heartbeat", heartbeats.append)
     summary = worker.run_cycle()
     assert "smtp exploded" in summary["delivery"]["error"]
     assert summary["webhooks"] == {"dispatched": 1}
     assert summary["jobs"] == {"ran": "execute_queued_jobs"}
+    # R6-d: the cycle leaves a heartbeat, failed sweeps included.
+    assert heartbeats == [summary]
 
 
 # ── #6 roles gate every admin write path, and are tenant-scoped ─────────────

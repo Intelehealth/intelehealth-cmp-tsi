@@ -50,6 +50,7 @@ def close_due_time_bound_purposes() -> dict[str, int]:
         (settings.worker_batch_size,),
     )
     closed = 0
+    errors = 0
     for row in due:
         fid = str(row["fiduciary_id"])
         purpose_id = str(row["purpose_id"])
@@ -63,8 +64,15 @@ def close_due_time_bound_purposes() -> dict[str, int]:
             )
             closed += 1
         except Exception:
+            # P11-08: a failed closure is an error the operator sees in the
+            # cycle summary, never an innocent-looking "closed: 0".
+            errors += 1
             log.exception("Time-bound closure failed for %s/%s", fid, purpose_id)
-    return {"closed": closed, "scanned": len(due)}
+    out = {"closed": closed, "scanned": len(due)}
+    if errors:
+        out["errors"] = errors
+        out["error"] = f"{errors} time-bound closure(s) failed; see the worker log."
+    return out
 
 
 def escalate_stale_alerts() -> dict[str, int]:
@@ -390,6 +398,54 @@ def flag_security_anomalies() -> dict[str, int]:
         )
         raised += 1
     return {"alerts_raised": raised}
+
+
+# s.8(6) / Rule 7(2): the 72-hour Board intimation clock. A breach whose
+# intimation is not recorded raises a DUE alert inside the last 12 hours and a
+# MISSED alert once the deadline passes - each once per breach.
+BREACH_DUE_WARNING_HOURS = 12
+
+
+def flag_breach_board_deadlines() -> dict[str, int]:
+    """S8-6: nothing watched board_notification_deadline."""
+    from .services.lifecycle import record_alert
+
+    rows = db.all(
+        """
+        SELECT b.id, b.fiduciary_id, b.title, b.board_notification_deadline,
+               CASE WHEN b.board_notification_deadline <= NOW() THEN 'BREACH_BOARD_DEADLINE_MISSED'
+                    ELSE 'BREACH_BOARD_DEADLINE_DUE' END AS alert_type
+        FROM breach_incidents b
+        WHERE b.board_notified_at IS NULL AND b.board_notification_deadline IS NOT NULL
+          AND b.board_notification_deadline <= NOW() + make_interval(hours => %s)
+          AND NOT EXISTS (
+                SELECT 1 FROM alerts a
+                WHERE a.fiduciary_id = b.fiduciary_id AND a.event_ref_id = b.id::text
+                  AND a.alert_type = CASE WHEN b.board_notification_deadline <= NOW()
+                                          THEN 'BREACH_BOARD_DEADLINE_MISSED' ELSE 'BREACH_BOARD_DEADLINE_DUE' END
+          )
+        """,
+        (BREACH_DUE_WARNING_HOURS,),
+    )
+    for row in rows:
+        fid = str(row["fiduciary_id"])
+        record_alert(
+            fid,
+            row["alert_type"],
+            str(row["id"]),
+            {"breach_id": str(row["id"]), "deadline": row["board_notification_deadline"].isoformat()},
+        )
+        db.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
+            " VALUES ('DPO', %s, %s, %s, %s)",
+            (
+                _dpo_recipient(fid),
+                fid,
+                row["alert_type"],
+                db.as_jsonb({"title": row["title"], "deadline": row["board_notification_deadline"].isoformat()}),
+            ),
+        )
+    return {"alerted": len(rows)}
 
 
 def _dpo_recipient(fiduciary_id: str) -> str:

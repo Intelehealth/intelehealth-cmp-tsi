@@ -153,7 +153,42 @@ async function apiDownload(path, func, bodyExtra, filename) {
 
 /** Purpose ids are case-insensitive machine ids (P10-04): compare them canonically. */
 function purposeKey(id) {
-    return String(id == null ? '' : id).trim().toLowerCase();
+    // Same canonical form as the server (services/base.py canonical_purpose_id):
+    // trimmed, lower-case, with the 'ALL' whole-account sentinel left as written.
+    const text = String(id == null ? '' : id).trim();
+    return text === 'ALL' ? text : text.toLowerCase();
+}
+
+// P11-10: the purpose a stored consent decision names, resolved in the one
+// order every server reader uses (services/base.py POINT_ID_KEYS):
+// data_point_id, then purpose_id, then id - the first one that is not empty.
+function pointPurposeId(point) {
+    if (!point || typeof point !== 'object') return '';
+    for (const key of ['data_point_id', 'purpose_id', 'id']) {
+        if (point[key] != null && point[key] !== '') return purposeKey(point[key]);
+    }
+    return '';
+}
+
+// P11-10: whether a stored decision is a live grant, as the consent gate reads
+// it (services/consent.py _point_granted): consent_granted when present, else
+// the legacy status alias; a consent_expiry in the past lapses the grant.
+function pointGranted(point) {
+    if (!point || typeof point !== 'object') return false;
+    let granted = point.consent_granted;
+    if (granted == null) {
+        granted = ['granted', 'true', 'consent_given'].includes(String(point.status == null ? '' : point.status).toLowerCase());
+    } else if (Array.isArray(granted)) {
+        granted = granted.length > 0;
+    } else if (typeof granted === 'object') {
+        granted = Object.keys(granted).length > 0;
+    }
+    if (!granted) return false;
+    if (point.consent_expiry) {
+        const expiry = Date.parse(String(point.consent_expiry));
+        if (!Number.isNaN(expiry) && expiry <= Date.now()) return false;
+    }
+    return true;
 }
 
 function esc(s) {

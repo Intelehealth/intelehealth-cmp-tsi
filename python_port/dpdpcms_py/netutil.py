@@ -99,6 +99,26 @@ def resolve_public(host: str) -> str:
     return public[0]
 
 
+def outbound_host_allowed(host: str, allowed: tuple[str, ...] | None = None) -> bool:
+    """Rule 14: is `host` an approved destination? True when no allowlist is set.
+
+    An entry matches the host itself or any subdomain of it; a leading dot is
+    accepted ('.example.in' and 'example.in' mean the same).
+    """
+    if allowed is None:
+        from .config import settings
+
+        allowed = settings.outbound_allowed_hosts
+    if not allowed:
+        return True
+    host = (host or "").lower().rstrip(".")
+    for entry in allowed:
+        entry = entry.lower().strip().lstrip(".").rstrip(".")
+        if entry and (host == entry or host.endswith("." + entry)):
+            return True
+    return False
+
+
 def _validated_target(url: str, label: str) -> tuple[ParseResult, str]:
     """Parse and SSRF-check `url`; returns (parsed URL, the public IP it resolved to)."""
     if not url or not isinstance(url, str):
@@ -110,6 +130,10 @@ def _validated_target(url: str, label: str) -> tuple[ParseResult, str]:
         raise ValueError(f"{label} has no host.")
     if parsed.username or parsed.password:
         raise ValueError(f"{label} must not embed credentials.")
+    if not outbound_host_allowed(parsed.hostname):
+        raise ValueError(
+            f"{label} host {parsed.hostname!r} is not an approved outbound destination (OUTBOUND_ALLOWED_HOSTS)."
+        )
     return parsed, resolve_public(parsed.hostname.lower().rstrip("."))
 
 

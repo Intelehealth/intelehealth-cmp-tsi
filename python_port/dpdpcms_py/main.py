@@ -126,6 +126,24 @@ _docs = "/docs" if settings.environment == "local" else None
 app = FastAPI(title="TSI DPDP CMS Python", docs_url=_docs, redoc_url=_docs and "/redoc")
 
 
+CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
+        "font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com",
+        "img-src 'self' data: blob:",
+        # The voice-consent tour page calls the Sarvam text-to-speech API.
+        "connect-src 'self' https://api.sarvam.ai",
+        "media-src 'self' data: blob:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+
+
 @app.middleware("http")
 async def headers(request: Request, call_next):
     origin = request.headers.get("origin")
@@ -143,6 +161,13 @@ async def headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    # M-03: the consoles load scripts only from this origin and the two CDNs
+    # they name; inline handlers still need 'unsafe-inline' until they are
+    # moved into files, but framing, plugins, base-tag and form hijacking and
+    # off-origin XHR are all refused.
+    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     return response
 
 
@@ -194,6 +219,35 @@ async def healthz():
         return {"status": "ok"}
     except Exception as exc:
         return JSONResponse({"status": "unavailable", "detail": str(exc)}, status_code=503)
+
+
+@app.get("/healthz/worker")
+async def healthz_worker():
+    """R6-d: 503 when the background worker has not completed a cycle within
+    five poll intervals (minimum ten minutes), or a sweep failed last cycle."""
+    try:
+        row = db.one(
+            "SELECT last_cycle_at, poll_seconds, failed_sweeps,"
+            " EXTRACT(EPOCH FROM NOW() - last_cycle_at) AS age_seconds"
+            " FROM worker_heartbeat WHERE worker_name = 'default'"
+        )
+    except Exception as exc:
+        return JSONResponse({"status": "unavailable", "detail": str(exc)}, status_code=503)
+    if not row:
+        return JSONResponse({"status": "stale", "detail": "the worker has never completed a cycle"}, status_code=503)
+    limit = max(600, 5 * int(row["poll_seconds"] or 30))
+    age = float(row["age_seconds"])
+    body = {
+        "status": "ok",
+        "last_cycle_at": row["last_cycle_at"].isoformat(),
+        "age_seconds": round(age),
+        "failed_sweeps": row["failed_sweeps"] or [],
+    }
+    if age > limit:
+        return JSONResponse({**body, "status": "stale"}, status_code=503)
+    if body["failed_sweeps"]:
+        return JSONResponse({**body, "status": "degraded"}, status_code=503)
+    return body
 
 
 async def payload_from(request: Request) -> dict:

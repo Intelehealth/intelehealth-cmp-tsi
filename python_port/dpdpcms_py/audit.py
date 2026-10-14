@@ -382,6 +382,8 @@ def latest_chain_verification() -> dict | None:
 
 
 def list_logs(payload: dict) -> list[dict]:
+    from .services.base import canonical_purpose_id
+
     params: list = []
     where = ["1=1"]
     if payload.get("fiduciary_id"):
@@ -394,8 +396,11 @@ def list_logs(payload: dict) -> list[dict]:
         where.append("audit_action = %s")
         params.append(payload["audit_action"])
     if payload.get("purpose_id"):
-        where.append("purpose_id = %s")
-        params.append(str(payload["purpose_id"]).strip().lower())
+        # P11-04: the same canonical form the services write, so the 'ALL'
+        # whole-account erasure sentinel is found as 'ALL'; tsi_canonical_purpose
+        # (db/26) folds legacy rows written before canonicalisation.
+        where.append("tsi_canonical_purpose(purpose_id) = %s")
+        params.append(canonical_purpose_id(payload["purpose_id"]))
     if payload.get("initiator"):
         where.append("initiator = %s")
         params.append(payload["initiator"])

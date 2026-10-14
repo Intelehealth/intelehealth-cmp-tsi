@@ -1641,14 +1641,18 @@ def test_withdrawal_fans_out_to_each_processor(tx, monkeypatch):
         apps = []
         for name in ("lab", "pharmacy"):
             cur.execute(
-                "INSERT INTO apps (fiduciary_id, name, status) VALUES (%s, %s, 'ACTIVE') RETURNING id", (fid, name)
+                "INSERT INTO apps (fiduciary_id, name, status, dpa_reference) VALUES (%s, %s, 'ACTIVE', 'DPA-1')"
+                " RETURNING id",
+                (fid, name),
             )
             apps.append(str(cur.fetchone()["id"]))
-        cur.execute(
-            "INSERT INTO processor_webhook_configs (app_id, fiduciary_id, category, webhook_url, secret_enc)"
-            " VALUES (%s, %s, 'NOTIFICATION', 'https://lab.example.org/hook', '')",
-            (apps[0], fid),
-        )
+            cur.execute(
+                "INSERT INTO processor_webhook_configs (app_id, fiduciary_id, category, webhook_url, secret_enc)"
+                " VALUES (%s, %s, 'NOTIFICATION', %s, '')",
+                (apps[-1], fid, f"https://{name}.example.org/hook"),
+            )
+        # P11-05: an integrator app with no processor endpoint is not a processor.
+        cur.execute("INSERT INTO apps (fiduciary_id, name, status) VALUES (%s, 'integrator', 'ACTIVE')", (fid,))
     out = ConsentService().withdraw_consent(_ctx(fid, {"user_id": "asha", "purpose_ids": ["care"]}))
     assert out["processors_notified"] == 2
     with tx.cursor() as cur:

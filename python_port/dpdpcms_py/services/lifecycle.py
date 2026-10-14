@@ -211,8 +211,12 @@ def close_purpose_exec(
             400, "Bad Request", f"deidentification_action must be one of {sorted(VALID_DEIDENTIFICATION_ACTIONS)}."
         )
 
+    # P11-08: match the stored id canonically too, so a lifecycle row that was
+    # never rewritten by db/26 (a restore from a pre-26 dump, a load with
+    # triggers disabled) is still found and closed rather than skipped.
     row = db.one(
-        "SELECT purpose_id, state FROM purpose_lifecycle WHERE fiduciary_id = %s AND purpose_id = %s",
+        "SELECT purpose_id, state FROM purpose_lifecycle WHERE fiduciary_id = %s AND tsi_canonical_purpose(purpose_id) = %s"
+        " ORDER BY (state = 'CLOSED') DESC LIMIT 1",
         (fiduciary_id, purpose_id),
     )
     if not row:
@@ -256,7 +260,7 @@ def close_purpose_exec(
             UPDATE purpose_lifecycle
             SET state = 'CLOSED', closed_at = NOW(), closed_by = %s, closure_reason = %s,
                 deidentification_action = %s, last_updated_at = NOW()
-            WHERE fiduciary_id = %s AND purpose_id = %s
+            WHERE fiduciary_id = %s AND tsi_canonical_purpose(purpose_id) = %s
             """,
             (actor, reason, action, fiduciary_id, purpose_id),
         )

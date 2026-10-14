@@ -19,7 +19,7 @@ from .base import (
     reject_principal,
     require,
 )
-from .catalog import resolve_fiduciary
+from .catalog import resolve_fiduciary, served_policy_version
 
 
 def _fid(ctx: RequestContext) -> str:
@@ -124,7 +124,13 @@ def check_consent_alignment(fiduciary_id: str, policy_id: str, version: str, dat
     # P9-02: consent may only rest on a notice the principal could have been
     # shown, i.e. the version get_active_policy serves: ACTIVE and in effect.
     # A DRAFT was never published and an ARCHIVED version is no longer served.
-    if str(policy.get("status") or "").upper() != "ACTIVE" or policy.get("in_effect") is False:
+    # P11-03: several versions can be ACTIVE and in effect until the superseded
+    # one is archived; only the newest - the one served - may take consent.
+    if (
+        str(policy.get("status") or "").upper() != "ACTIVE"
+        or policy.get("in_effect") is False
+        or served_policy_version(policy_id, fiduciary_id) != str(version)
+    ):
         raise ApiError(
             409,
             "Conflict",
@@ -308,9 +314,11 @@ class ConsentService(Service):
             # Notice versioning: when the client does not state which notice the
             # principal agreed to, stamp the current (preferring ACTIVE) version so
             # the consent record always identifies the notice it points at.
+            # P11-03: that is the served version when there is one.
+            served = served_policy_version(policy_id, fid)
             policy = db.one(
-                "SELECT version, policy_content FROM consent_policies WHERE id = %s AND fiduciary_id = %s ORDER BY (status = 'ACTIVE') DESC, effective_date DESC LIMIT 1",
-                (policy_id, fid),
+                "SELECT version, policy_content FROM consent_policies WHERE id = %s AND fiduciary_id = %s ORDER BY (version = %s) DESC, (status = 'ACTIVE') DESC, effective_date DESC LIMIT 1",
+                (policy_id, fid, served or ""),
             )
             if not policy:
                 raise ApiError(400, "Bad Request", f"Policy not found: {policy_id}.")
@@ -554,12 +562,17 @@ class ConsentService(Service):
         if ctx.payload.get("policy_id"):
             where.append("policy_id = %s")
             params.append(ctx.payload["policy_id"])
-        row = db.one(
-            f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT 1", params
-        )
-        if not row:
+        rows = db.all(f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC", params)
+        if not rows:
             raise ApiError(404, "Not Found", "No active consent found.")
-        return _consent_row(row)
+        # P11-07: a principal can hold one active record per policy. The top
+        # level stays the most recent record (the response shape integrators
+        # already read); active_records carries every one of them, so a reader
+        # that did not name a policy is never silently handed a partial answer.
+        out = _consent_row(rows[0])
+        out["active_records"] = [_consent_row(r) for r in rows]
+        out["active_record_count"] = len(rows)
+        return out
 
     def get_consent_record_details(self, ctx: RequestContext) -> dict:
         # P4-01: the wallet's GET_CONSENT_DETAILS sends policy_id, not record_id.
