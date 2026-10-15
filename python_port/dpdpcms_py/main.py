@@ -276,12 +276,23 @@ async def healthz_worker(request: Request):
 async def payload_from(request: Request) -> dict:
     if request.method == "GET":
         return dict(request.query_params)
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    # PT-03: a body is parsed as a form only when it says it is one. A malformed
+    # JSON body used to fall through to form parsing and raise (a 500, and a
+    # hard dependency on python-multipart); it is now the caller's 400.
+    if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
+        try:
+            return dict(await request.form())
+        except Exception as exc:
+            raise ApiError(400, "Bad Request", "The form body could not be parsed.") from exc
+    raw = await request.body()
+    if not raw.strip():
+        return {}
     try:
-        body = await request.json()
-        return body if isinstance(body, dict) else {}
-    except Exception:
-        form = await request.form()
-        return dict(form)
+        body = json.loads(raw)
+    except ValueError as exc:
+        raise ApiError(400, "Bad Request", "The request body is not valid JSON.") from exc
+    return body if isinstance(body, dict) else {}
 
 
 def _is_read_classified(service: str, func: str) -> bool:

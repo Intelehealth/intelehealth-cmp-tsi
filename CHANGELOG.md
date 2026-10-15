@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (424 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (428 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -914,7 +914,12 @@ and the DPO register. Each is closed below, with a regression in
   - The consent-history and ROPA CSVs, and every job export except AUDIT,
     neutralise cells that start with `=`, `+`, `-`, `@`, tab or CR.
   - The AUDIT export stays byte-exact so its row hashes recompute.
-- Tests: `test_pentest_findings.py`; 423 passed, 1 skipped (424 collected).
+- **PT-03** A malformed JSON body (`{not json`) fell through to form
+  parsing. Where `python-multipart` is not installed, as in CI and the image,
+  that raised and returned a 500. A body is now parsed as a form only when
+  its Content-Type says it is one. Invalid JSON, and a form that cannot be
+  parsed, are 400.
+- Tests: `test_pentest_findings.py`; 427 passed, 1 skipped (428 collected).
 
 ### Upgrade notes
 
