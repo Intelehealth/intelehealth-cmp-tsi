@@ -260,10 +260,10 @@ def test_purpose_purge_under_legal_hold_is_refused_before_anything_is_written(tx
         hold_id = _seed_purge(
             cur, fid, "asha", "ALL", status="LEGAL_HOLD_APPLIED", hold_until=datetime.now(UTC) + timedelta(days=30)
         )
-        ctx = _ctx(fid, {"id": request_id, "status": "PURGE_COMPLETED"})
+        ctx = _confirm_ctx(fid, request_id)
 
         with pytest.raises(ApiError) as exc:
-            ComplianceService().update_purge_status(ctx)
+            ComplianceService().confirm_purge_status(ctx)
         assert exc.value.status == 409
 
         cur.execute("SELECT status, completed_at FROM purge_requests WHERE id = %s", (request_id,))
@@ -274,7 +274,7 @@ def test_purpose_purge_under_legal_hold_is_refused_before_anything_is_written(tx
 
         # Lift the hold: the same confirmation now completes end to end.
         cur.execute("UPDATE purge_requests SET status = 'COMPLETED' WHERE id = %s", (hold_id,))
-        out = ComplianceService().update_purge_status(ctx)
+        out = ComplianceService().confirm_purge_status(ctx)
         assert out["status"] == "PURGE_COMPLETED"
         assert out["cms_copy_erased"] == {"consent_records_touched": 1}
         cur.execute("SELECT status, completed_at FROM purge_requests WHERE id = %s", (request_id,))
@@ -299,7 +299,7 @@ def test_expired_hold_on_the_request_itself_does_not_block_completion(tx):
         request_id = _seed_purge(
             cur, fid, "asha", "care", status="LEGAL_HOLD_APPLIED", hold_until=datetime.now(UTC) - timedelta(days=1)
         )
-        out = ComplianceService().update_purge_status(_ctx(fid, {"id": request_id, "status": "PURGE_COMPLETED"}))
+        out = ComplianceService().confirm_purge_status(_confirm_ctx(fid, request_id))
     assert out["status"] == "PURGE_COMPLETED"
     assert out["cms_copy_erased"] == {"consent_records_touched": 1}
 
@@ -647,9 +647,7 @@ def test_closure_with_retention_defers_then_sweep_raises_and_completes_the_purge
             ("asha", "DE_IDENTIFY", "RetentionPolicyExpiry")
         ]
 
-        out = ComplianceService().update_purge_status(
-            _ctx(fid, {"id": str(purges[0]["id"]), "status": "PURGE_COMPLETED"})
-        )
+        out = ComplianceService().confirm_purge_status(_confirm_ctx(fid, str(purges[0]["id"])))
         assert out["cms_copy_erased"] == {"consent_records_touched": 1}
         entries = _consents(cur, fid)["asha"]
     assert [p["status"] for p in entries if p.get("status") == "de_identified"] == ["de_identified"]
@@ -853,9 +851,7 @@ def test_hold_written_concurrently_is_honoured_not_raced():
 
     def confirm():
         try:
-            outcome["result"] = ComplianceService().update_purge_status(
-                _ctx(fid, {"id": request_id, "status": "PURGE_COMPLETED"})
-            )
+            outcome["result"] = ComplianceService().confirm_purge_status(_confirm_ctx(fid, request_id))
         except ApiError as exc:
             outcome["error"] = exc.status
         except Exception as exc:  # noqa: BLE001 - surface it in the assertion, not a silent thread
@@ -1222,6 +1218,19 @@ def test_audit_export_carries_the_hashes_and_a_chain_verdict(tx, tmp_path, monke
 # ── workbook v8 (P10) remediation ─────────────────────────────────────────────
 def _principal_ctx(fid, user, payload):
     return _ctx(fid, {"user_id": user, **payload}, auth_via_principal_jwt=True, principal_user_id=user)
+
+
+def _confirm_ctx(fid, request_id):
+    """INV-07: a purge completes only through confirm_purge_status, with evidence."""
+    return _ctx(
+        fid,
+        {
+            "purge_request_id": request_id,
+            "status": "PURGE_COMPLETED",
+            "records_affected_count": 1,
+            "confirmed_by_entity_id": "dpo@example.org",
+        },
+    )
 
 
 def _ctx_as(fid, role, payload, operator_id=None):

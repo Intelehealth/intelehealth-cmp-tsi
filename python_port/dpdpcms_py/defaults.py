@@ -6,7 +6,9 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "GRIEVANCE_SUBMITTED": {"en": "Your grievance has been submitted."},
     "GRIEVANCE_UPDATED": {"en": "Your grievance status was updated."},
     "BREACH_NOTIFICATION": {
-        "en": "A personal data breach affecting your data was reported ({title}). What you should do: {actionable_steps}"
+        "en": "A personal data breach affecting your data was reported ({title}): {description} "
+        "Likely consequences: {likely_consequences}. What we have done: {mitigation_measures}. "
+        "What you should do: {actionable_steps} Contact: {contact_point}."
     },
     "CONSENT_VALIDATION_DENIED": {
         "en": "A processing request under your consent was denied because no active consent exists for that purpose."

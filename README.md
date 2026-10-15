@@ -101,7 +101,7 @@ More detail: [python_port/README.md](python_port/README.md).
 
 ## Database upgrades
 
-Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `28_security_coverage.sql`).
+Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `29_p12_remediation.sql`).
 
 | Script | Purpose |
 | --- | --- |
@@ -119,10 +119,11 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `24_p8_remediation.sql` | UPDATE floor on delivery personal-data columns, notification delete floor, audit chain index and background verification table, notification context |
 | `25_p9_remediation.sql` | Append-only trigger on `consent_records` (P9-05), `CANCELLED` purge status (P9-04), grievance `language` column (GR-03) |
 | `26_p10_remediation.sql` | Canonical purpose ids with canonicalising triggers (P10-04/05/09), one active consent per principal per policy (P10-11), per-processor webhooks (CW-08), legacy template names merged (NT-02), narrower `consent_records` maintenance opt-in (P9-05) |
-| `27_p11_remediation.sql` | Maintenance guard reads "granted" exactly as the consent gate does and rejects a non-array payload (P11-01/02); last two legacy template names migrated into live types, originals archived (P11-09) |
+| `27_p11_remediation.sql` | Maintenance guard reads "granted" exactly as the consent gate does and rejects a non-array payload (P11-01/02); last two legacy template names archived with the live type each maps to, and removed (P11-09, P12-07) |
 | `28_security_coverage.sql` | Breach Board-intimation columns (s.8(6)), worker heartbeat (Rule 6(1)(d)), row-level security for any non-application role granted `tsi_tenant_reader` (Rule 6(1)(b)) |
+| `29_p12_remediation.sql` | Board intimation asserted time and Rule 7 report fields (P12-04), tenant readers mapped in `tsi_reader_tenants` (P12-05), `consent_policies` keyed per tenant (P12-06), legacy template text taken back out of live types (P12-07), audit purpose index (LG-05) |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`28` manually (each script is idempotent). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`29` manually (each script is idempotent). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \
@@ -131,7 +132,8 @@ for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction
          db/19_audit_ledger_integrity.sql db/20_security_gaps.sql \
          db/21_defect_remediation_p6.sql db/22_sec18_null_fiduciary_block.sql \
          db/23_notification_delivery_floor.sql db/24_p8_remediation.sql          db/25_p9_remediation.sql \
-         db/26_p10_remediation.sql db/27_p11_remediation.sql db/28_security_coverage.sql; do
+         db/26_p10_remediation.sql db/27_p11_remediation.sql db/28_security_coverage.sql \
+         db/29_p12_remediation.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```
@@ -203,7 +205,7 @@ Admin and bootstrap routes use operator JWT or `BOOTSTRAP_TOKEN` respectively. S
 - Postgres is published on `127.0.0.1:5434` by default, not on all interfaces.
 - Never change `DB_ENCRYPTION_KEY` after the database has encrypted rows.
 - Keep `TSI_DPDP_CMS_ENV` off `local` in any deployed environment so `/docs` is disabled.
-- Set `OUTBOUND_ALLOWED_HOSTS` to the approved in-India destinations (Rule 14), and monitor `/healthz/worker` as well as `/healthz`.
+- Set `OUTBOUND_ALLOWED_HOSTS` to the approved in-India destinations (Rule 14); outside `local` the app refuses to start without it. Monitor `/healthz/worker` as well as `/healthz` (set `HEALTHZ_TOKEN` and send it as `X-Health-Token` for detail).
 - The Rule 6 control map, with an owner and a record for each control the repo cannot enforce, is [docs/security/ISMS_CONTROL_MAP.md](docs/security/ISMS_CONTROL_MAP.md).
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md). Please do not open public issues for security problems.

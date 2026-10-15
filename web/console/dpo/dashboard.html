@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TSI DPDP CMS - DPO Dashboard</title>
     <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="../../vendor/tailwindcss-3.4.16.js"></script>
     <style>
         :root {
             --tsi-primary: #006A67;
@@ -97,7 +97,7 @@
 
 <!-- Mobile Header -->
 <div class="lg:hidden flex items-center justify-between p-4 bg-white border-b border-gray-200 sticky top-0 z-30">
-    <button onclick="toggleSidebar()" class="p-2 text-gray-600 focus:outline-none">
+    <button data-action="toggleSidebar" class="p-2 text-gray-600 focus:outline-none">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
         </svg>
@@ -106,7 +106,7 @@
     <div class="w-6"></div> <!-- Spacer -->
 </div>
 
-<div id="backdrop" class="sidebar-backdrop lg:hidden" onclick="toggleSidebar()"></div>
+<div id="backdrop" class="sidebar-backdrop lg:hidden" data-action="toggleSidebar"></div>
 
 <!-- Sidebar Navigation -->
 <div id="sidebar" class="sidebar flex flex-col justify-between">
@@ -133,7 +133,7 @@
     <div class="p-3 border-t border-gray-200">
         <div class="mt-2 text-sm text-gray-500 p-2 rounded-md flex justify-between items-center">
             <span id="username" class="font-bold text-slate-700">DPO User</span>
-            <button onclick="handleLogout()" class="text-xs font-semibold text-red-500 hover:underline">Logout</button>
+            <button data-action="handleLogout" class="text-xs font-semibold text-red-500 hover:underline">Logout</button>
         </div>
     </div>
 </div>
@@ -149,7 +149,7 @@
         <!-- Period Filter Dropdown -->
         <div class="flex items-center gap-3 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
             <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-2">Filter Period:</span>
-            <select id="time-filter" onchange="loadDpoMetrics()" class="text-sm font-bold text-teal-700 bg-transparent outline-none cursor-pointer pr-2">
+            <select id="time-filter" data-change-action="loadDpoMetrics" class="text-sm font-bold text-teal-700 bg-transparent outline-none cursor-pointer pr-2">
                 <!-- Populated via setupFilter script -->
             </select>
         </div>
@@ -218,151 +218,6 @@
 
 </main>
 
-<script>
-    const API_URL_DASHBOARD = '/api/v1/admin/admindash';
-    const AUTH_TOKEN = localStorage.getItem('authToken');
-    const FIDUCIARY_ID = localStorage.getItem('fiduciary_id');
-    function esc(s) {
-        if (s == null) return '';
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
-    }
-
-    // Operators are restricted from policy authoring and system settings.
-    if (localStorage.getItem('role') === 'OPERATOR') {
-        document.querySelectorAll('a[href="policies.html"], a[href="settings.html"], a[href="team.html"]').forEach(el => el.remove());
-    }
-
-    function toggleSidebar() {
-        document.getElementById('sidebar').classList.toggle('open');
-        document.getElementById('backdrop').classList.toggle('active');
-    }
-
-    /**
-     * Initializes the Month Filter dropdown for current + 3 previous months.
-     */
-    function setupFilter() {
-        const filter = document.getElementById('time-filter');
-        const options = [];
-        const now = new Date();
-
-        for (let i = 0; i < 4; i++) {
-            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            const label = i === 0 ? "Current Month" : d.toLocaleString('default', { month: 'long', year: 'numeric' });
-
-            // Format first and last day strings (YYYY-MM-DD)
-            const firstDay = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0];
-            const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().split('T')[0];
-
-            options.push(`<option value="${firstDay}|${lastDay}">${label}</option>`);
-        }
-        filter.innerHTML = options.join('');
-    }
-
-    /**
-     * Fetches and renders the simplified metrics based on the selected time period.
-     */
-    async function loadDpoMetrics() {
-        const filterEl = document.getElementById('time-filter');
-        if (!filterEl.value) return;
-
-        const [start, end] = filterEl.value.split('|');
-
-        try {
-            const response = await fetch(API_URL_DASHBOARD, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({
-                    "_func": "get_dpo_metrics",
-                    "fiduciary_id": FIDUCIARY_ID,
-                    "start_date": start,
-                    "end_date": end
-                })
-            });
-
-            const data = await response.json();
-
-            if (data.status === 401) {
-                alert("Session Expired: " + (data.message || "Authentication required."));
-                handleLogout();
-                return;
-            }
-
-            if (data.success && data.metrics) {
-                const m = data.metrics;
-                document.getElementById('metric-active-policies').textContent = m.active_policies || 0;
-                document.getElementById('metric-consents').textContent = m.total_consents || 0;
-                document.getElementById('metric-principals').textContent = m.data_principals || 0;
-
-                // Consolidated Purge Card
-                document.getElementById('metric-purge-total').textContent = m.purge_total || 0;
-                document.getElementById('metric-purge-pending').textContent = `(${m.purge_pending || 0} Pending)`;
-
-                // Consolidated Grievance Card
-                document.getElementById('metric-grievances-total').textContent = m.grievances_total || 0;
-                document.getElementById('metric-grievances-pending').textContent = `(${m.grievances_pending || 0} Pending)`;
-            }
-        } catch (error) {
-            console.error("Metric load failure:", error);
-            document.querySelectorAll('[id^="metric-"]').forEach(el => el.textContent = 'Err');
-        }
-    }
-
-    /**
-     * Fetches the urgent pending grievances for the table view.
-     */
-    async function loadPendingGrievances() {
-        const tbody = document.getElementById('grievance-table-body');
-        try {
-            const response = await fetch(API_URL_DASHBOARD, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "list_pending_grievances", "fiduciary_id": FIDUCIARY_ID, "limit": 10 })
-            });
-
-            const grievances = await response.json();
-            if (Array.isArray(grievances)) {
-                if (grievances.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-400 italic">No urgent tasks requiring action.</td></tr>';
-                    return;
-                }
-
-                tbody.innerHTML = grievances.map(g => {
-                    const isOverdue = g.days_left < 0;
-                    return `
-                        <tr class="hover:bg-slate-50 transition-colors">
-                            <td class="px-4 py-3 font-mono text-xs text-slate-500">...${esc(String(g.grievance_id || '').slice(-8))}</td>
-                            <td class="px-4 py-3 font-bold text-slate-700">${esc(String(g.type || '').replace(/_/g, ' '))}</td>
-                            <td class="px-4 py-3 text-slate-500">${esc(new Date(g.submission_timestamp).toLocaleDateString())}</td>
-                            <td class="px-4 py-3 font-semibold ${isOverdue ? 'text-red-600' : 'text-slate-600'}">
-                                ${esc(isOverdue ? Math.abs(g.days_left) + ' days OVERDUE' : g.days_left + ' days left')}
-                            </td>
-                            <td class="px-4 py-3">
-                                <span class="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-blue-100 text-blue-700">${esc(g.status)}</span>
-                            </td>
-                        </tr>
-                    `;
-                }).join('');
-            }
-        } catch (error) {
-            tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-red-500">Failed to sync with registry.</td></tr>';
-        }
-    }
-
-    function handleLogout() {
-        localStorage.clear();
-        window.location.href = "../index.html";
-    }
-
-    window.onload = () => {
-        setupFilter();
-        loadDpoMetrics();
-        loadPendingGrievances();
-
-        if (FIDUCIARY_ID) document.getElementById('fiduciary-id-display').textContent = FIDUCIARY_ID;
-
-        const storedUser = localStorage.getItem('username');
-        if (storedUser) document.getElementById('username').textContent = storedUser;
-    };
-</script>
+<script src="dashboard.js"></script>
 </body>
 </html>

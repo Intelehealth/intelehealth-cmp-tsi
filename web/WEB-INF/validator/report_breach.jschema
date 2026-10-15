@@ -44,6 +44,15 @@
     },
     "breach_category": {
       "type": "string"
+    },
+    "likely_consequences": {
+      "type": "string"
+    },
+    "mitigation_measures": {
+      "type": "string"
+    },
+    "contact_point": {
+      "type": "string"
     }
   },
   "required": [

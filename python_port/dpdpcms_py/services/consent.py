@@ -13,6 +13,7 @@ from .base import (
     bind_principal_field,
     canonical_consent_points,
     canonical_purpose_id,
+    csv_safe,
     ensure_principal_owns,
     page_limit,
     point_purpose_id,
@@ -69,11 +70,16 @@ def _point_granted(point: dict) -> bool:
         return False
     expiry = point.get("consent_expiry")
     if expiry:
+        # P12-01: a stored expiry never makes a read raise. A naive value is read
+        # as UTC; one that does not parse is ignored, as before.
         try:
-            if datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) <= datetime.now(UTC):
-                return False
-        except ValueError:
-            pass
+            when = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        if when <= datetime.now(UTC):
+            return False
     return True
 
 
@@ -296,6 +302,14 @@ class ConsentService(Service):
         fid = _fid(ctx)
         user_id = require(payload.get("user_id"), "user_id")
         policy_id = require(payload.get("policy_id"), "policy_id")
+        # PT-02: the language is a code from the closed list, never free text
+        # (it is echoed into the principal's CSV and PDF exports).
+        from ..defaults import NOTIFICATION_LANGUAGES
+
+        language = str(payload.get("language_selected") or "en").strip().lower()
+        if language not in NOTIFICATION_LANGUAGES:
+            raise ApiError(400, "Bad Request", "language_selected must be en or an Eighth Schedule language code.")
+        payload["language_selected"] = language
         # P10-01: one purpose per decision, stored under data_point_id only.
         data_consents = canonical_consent_points(require(payload.get("data_point_consents"), "data_point_consents"))
         payload["data_point_consents"] = data_consents
@@ -686,8 +700,10 @@ class ConsentService(Service):
         # UD-03: search and filter by purpose, date and status.
         if payload.get("purpose_id"):
             where.append(
-                "EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) p "
-                "WHERE lower(btrim(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id'))) = %s)"
+                # P12-10: the same alias rule as point_purpose_id (an empty
+                # data_point_id is skipped), via db/27's tsi_point_purpose.
+                "EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(data_point_consents) = 'array' "
+                "THEN data_point_consents ELSE '[]'::jsonb END) p WHERE tsi_point_purpose(p) = %s)"
             )
             params.append(canonical_purpose_id(payload["purpose_id"]))
         if payload.get("status"):
@@ -795,13 +811,16 @@ class ConsentService(Service):
             )
             writer.writerow(
                 [
-                    row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else row["timestamp"],
-                    row["policy_id"],
-                    row["policy_version"],
-                    row["language_selected"],
-                    row["consent_status_general"],
-                    "yes" if row["is_active_consent"] else "no",
-                    purposes,
+                    csv_safe(cell)
+                    for cell in (
+                        row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else row["timestamp"],
+                        row["policy_id"],
+                        row["policy_version"],
+                        row["language_selected"],
+                        row["consent_status_general"],
+                        "yes" if row["is_active_consent"] else "no",
+                        purposes,
+                    )
                 ]
             )
         fmt = str(ctx.payload.get("format") or "csv").lower()

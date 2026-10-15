@@ -36,3 +36,6 @@ DPDP_Python_Port_Findings.docx
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Automated pen-test report (CI artifact)
+python_port/pentest-report.xml

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
+
+import psycopg
 
 from .. import db
 from ..audit import log_event
@@ -192,6 +195,18 @@ def queue_policy_change_notices(
     return {"principals_affected": len(holders), "notified": notified}
 
 
+def _requested_effective_date(value: Any) -> datetime | None:
+    """P12-03: the effective_date a DPO asked for at create_policy, as an aware
+    datetime (naive values read as UTC), or None when none was given."""
+    if value in (None, ""):
+        return None
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ApiError(400, "Bad Request", "effective_date must be an ISO 8601 date or timestamp.") from exc
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
 def served_policy_version(policy_id: str, fiduciary_id: str) -> str | None:
     """P11-03: the one version of a policy that is served - ACTIVE, in effect,
     and the newest such. get_active_policy and the consent gate both use it, so
@@ -274,15 +289,27 @@ def activate_policy_if_complete(policy_id: str, fiduciary_id: str) -> list[str]:
     if pending and pending["count"] > 0:
         return []
     rows = db.all(
+        # P12-03: a version takes effect when it is activated, not when it was
+        # drafted, so the version activated last is the one served. A future
+        # effective_date the DPO asked for at create_policy is kept.
         # clock_timestamp: on an effective-date tie the version activated last is
         # the one served (P11-03), even inside the transaction that seeded both.
-        "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = clock_timestamp() WHERE id = %s AND fiduciary_id = %s AND status = 'UNDER_REVIEW' RETURNING version",
+        "UPDATE consent_policies SET status = 'ACTIVE', effective_date = GREATEST(effective_date, NOW()), last_updated_at = clock_timestamp() WHERE id = %s AND fiduciary_id = %s AND status = 'UNDER_REVIEW' RETURNING version",
         (policy_id, fid),
     )
     versions = [str(r["version"]) for r in rows]
     # P11-03: the version just activated supersedes the one it replaces.
     if versions:
         retire_superseded_versions(policy_id, fid)
+        # P12-03: only versions still ACTIVE after that are reported as activated.
+        still_active = {
+            str(r["version"])
+            for r in db.all(
+                "SELECT version FROM consent_policies WHERE id = %s AND fiduciary_id = %s AND status = 'ACTIVE'",
+                (policy_id, fid),
+            )
+        }
+        versions = [v for v in versions if v in still_active]
     # Notices go out only for a version already in force; a future-dated one is
     # announced with notify_policy_change once its effective date arrives.
     # P11-03: and only for the version now served - when two versions activate
@@ -366,10 +393,10 @@ class FiduciaryService(Service):
             (
                 require(payload.get("name"), "name"),
                 payload.get("contact_person"),
-                email,
+                None,  # R6-a: encrypted copy only
                 *db.bind_encrypt(email),
                 *db.bind_hmac(email),
-                phone,
+                None,
                 *db.bind_encrypt(phone),
                 payload.get("address"),
                 require(payload.get("primary_domain"), "primary_domain"),
@@ -411,12 +438,10 @@ class FiduciaryService(Service):
             params.append(bool(ctx.payload["is_significant_data_fiduciary"]))
         if ctx.payload.get("email"):
             fields.append(f"email_plaintext = %s, email_enc = {db.enc_expr()}, email_hmac = {db.hmac_expr()}")
-            params.extend(
-                [ctx.payload["email"], *db.bind_encrypt(ctx.payload["email"]), *db.bind_hmac(ctx.payload["email"])]
-            )
+            params.extend([None, *db.bind_encrypt(ctx.payload["email"]), *db.bind_hmac(ctx.payload["email"])])
         if "phone" in ctx.payload:
             fields.append(f"phone_plaintext = %s, phone_enc = {db.enc_expr()}")
-            params.extend([ctx.payload["phone"], *db.bind_encrypt(ctx.payload["phone"])])
+            params.extend([None, *db.bind_encrypt(ctx.payload["phone"])])
         scope, scope_params = tenant_filter(ctx, "id")
         params.extend([fid, *scope_params])
         if db.execute(f"UPDATE fiduciaries SET {', '.join(fields)} WHERE id = %s{scope}", params) == 0:
@@ -432,7 +457,12 @@ class FiduciaryService(Service):
         # SEC-12: only log and report a deactivation that actually happened.
         if updated == 0:
             raise ApiError(404, "Not Found", "Data Fiduciary not found.")
-        return {"success": True}
+        # INV-08: and every API key the fiduciary issued is revoked with it.
+        revoked = db.execute(
+            "UPDATE api_keys SET status = 'REVOKED', revoked_at = NOW() WHERE fiduciary_id = %s AND status = 'ACTIVE'",
+            (ctx.payload["fiduciary_id"],),
+        )
+        return {"success": True, "api_keys_revoked": revoked}
 
     def validate_fiduciary_domain(self, ctx: RequestContext) -> dict:
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
@@ -494,9 +524,9 @@ class AppService(Service):
             (
                 require(payload.get("fiduciary_id"), "fiduciary_id"),
                 require(payload.get("name"), "name"),
-                email,
+                None,  # R6-a: encrypted copy only
                 *db.bind_encrypt(email),
-                phone,
+                None,
                 *db.bind_encrypt(phone),
                 payload.get("dpa_reference"),
                 payload.get("processing_purposes"),
@@ -514,10 +544,10 @@ class AppService(Service):
                 params.append(ctx.payload[key])
         if "email" in ctx.payload:
             fields.append(f"email_plaintext = %s, email_enc = {db.enc_expr()}")
-            params.extend([ctx.payload["email"], *db.bind_encrypt(ctx.payload["email"])])
+            params.extend([None, *db.bind_encrypt(ctx.payload["email"])])
         if "phone" in ctx.payload:
             fields.append(f"phone_plaintext = %s, phone_enc = {db.enc_expr()}")
-            params.extend([ctx.payload["phone"], *db.bind_encrypt(ctx.payload["phone"])])
+            params.extend([None, *db.bind_encrypt(ctx.payload["phone"])])
         scope, scope_params = tenant_filter(ctx)
         params.extend([app_id, *scope_params])
         if db.execute(f"UPDATE apps SET {', '.join(fields)} WHERE id = %s{scope}", params) == 0:
@@ -533,7 +563,12 @@ class AppService(Service):
         # SEC-12: a delete that did not happen is not reported as done.
         if updated == 0:
             raise ApiError(404, "Not Found", "App not found.")
-        return {"success": True}
+        # INV-08: the app's keys are revoked with it, not merely left unusable.
+        revoked = db.execute(
+            "UPDATE api_keys SET status = 'REVOKED', revoked_at = NOW() WHERE app_id = %s AND status = 'ACTIVE'",
+            (ctx.payload["app_id"],),
+        )
+        return {"success": True, "api_keys_revoked": revoked}
 
 
 class PolicyService(Service):
@@ -656,16 +691,24 @@ class PolicyService(Service):
         content = canonicalise_policy_purposes(require(ctx.payload.get("policy_content"), "policy_content"))
         check_language_parity(content)
         validate_duration_flags(content)  # PL-01: every purpose is open-ended or time-bound
-        db.execute(
-            "INSERT INTO consent_policies (id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at) VALUES (%s, %s, %s, NOW(), 'DRAFT', %s, %s, NOW(), NOW())",
-            (
-                pid,
-                version,
-                fid,
-                require(ctx.payload.get("jurisdiction"), "jurisdiction"),
-                db.as_jsonb(content),
-            ),
-        )
+        # P12-03: an effective_date the DPO supplies is honoured (a past one means
+        # "on activation"); without one the version takes effect when activated.
+        effective = _requested_effective_date(ctx.payload.get("effective_date"))
+        try:
+            db.execute(
+                "INSERT INTO consent_policies (id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at) VALUES (%s, %s, %s, COALESCE(%s, NOW()), 'DRAFT', %s, %s, NOW(), NOW())",
+                (
+                    pid,
+                    version,
+                    fid,
+                    effective,
+                    require(ctx.payload.get("jurisdiction"), "jurisdiction"),
+                    db.as_jsonb(content),
+                ),
+            )
+        except psycopg.errors.UniqueViolation as exc:
+            # P12-06: a clash is the caller's own duplicate, never a 500.
+            raise ApiError(409, "Conflict", f"Policy {pid} version {version} already exists.") from exc
         sync_purpose_lifecycle(fid, content)
         derive_ropa_entries(fid, pid, content)
         return {
@@ -727,12 +770,22 @@ class PolicyService(Service):
             "POLICY_PUBLISHED",
             {"policy_id": pid, "version": version, "activated_versions": activated},
         )
-        status = "ACTIVE" if version in activated else "UNDER_REVIEW"
+        # P12-03: report what is stored, after any version this activation
+        # superseded has been archived - never an optimistic ACTIVE.
+        stored = db.one(
+            "SELECT status FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+            (pid, version, fid),
+        )
+        status = str(stored["status"]) if stored else "UNDER_REVIEW"
         return {
             "success": True,
-            "message": "Policy published successfully."
-            if status == "ACTIVE"
-            else "Policy published; it activates, and re-consent notices go out, once its ROPA entries are published.",
+            "message": {
+                "ACTIVE": "Policy published successfully.",
+                "ARCHIVED": "Policy published, but a newer active version supersedes it; it is archived and not served.",
+            }.get(
+                status,
+                "Policy published; it activates, and re-consent notices go out, once its ROPA entries are published.",
+            ),
             "data": {"status": status, "activated_versions": activated},
         }
 

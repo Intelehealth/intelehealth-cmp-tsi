@@ -322,8 +322,10 @@ def test_a_failed_time_bound_closure_is_reported_as_an_error(tx, monkeypatch):
     assert out["errors"] >= 1 and "error" in out
 
 
-def test_legacy_templates_are_migrated_into_live_types(tx):
-    """P11-09: db/26 kept two template rows the API refuses and the console hides."""
+def test_legacy_templates_are_archived_not_merged_into_live_types(tx):
+    """P11-09: db/26 kept two template rows the API refuses and the console hides.
+    P12-07: they are archived and removed; their text, written for another
+    event, never fills a language of the live type."""
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         for ntype, text in (("EXPIRY_NOTIFICATION", "legacy expiry"), ("PURGE_ONHOLD_NOTIFICATION", "legacy hold")):
@@ -345,7 +347,6 @@ def test_legacy_templates_are_migrated_into_live_types(tx):
             "SELECT notification_type FROM notification_message_templates_archive WHERE fiduciary_id = %s", (fid,)
         )
         archived = {r["notification_type"] for r in cur.fetchall()}
-    assert set(live) == {"PURPOSE_CLOSED", "ERASURE_REQUESTED_NOTIFICATION"}
-    assert live["PURPOSE_CLOSED"] == {"en": "live text", "hi": "legacy expiry hi"}
-    assert live["ERASURE_REQUESTED_NOTIFICATION"]["en"] == "legacy hold"
+    assert set(live) == {"PURPOSE_CLOSED"}
+    assert live["PURPOSE_CLOSED"] == {"en": "live text"}
     assert archived == {"EXPIRY_NOTIFICATION", "PURGE_ONHOLD_NOTIFICATION"}

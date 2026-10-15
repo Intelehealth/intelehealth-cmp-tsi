@@ -386,7 +386,7 @@ def test_api_key_valid_rejects_expired(monkeypatch):
     monkeypatch.setattr(security.db, "one", lambda sql, params=(): seen.append(sql) or None)
     ok, *_ = security.api_key_valid("k", "s")
     assert ok is False
-    assert any("expires_at IS NULL OR expires_at > NOW()" in sql for sql in seen)
+    assert any("k.expires_at IS NULL OR k.expires_at > NOW()" in sql for sql in seen)
 
 
 def test_expire_lapsed_api_keys_sweep(monkeypatch):
@@ -883,7 +883,8 @@ def test_p6_08_tour_page_keys_lookup_off_a_map_not_escaped_id():
     """parent-consent.html must not build getElementById ids from escaped markup."""
     from dpdpcms_py.config import WEB_ROOT
 
-    page = (WEB_ROOT / "tour" / "parent-consent.html").read_text(encoding="utf-8")
+    # P12-08: the page's script now lives in its own file.
+    page = (WEB_ROOT / "tour" / "parent-consent.js").read_text(encoding="utf-8")
     assert 'id="check-${esc(' not in page
     assert "learnerChoices[p.id]" in page
     assert "document.getElementById(`check-" not in page
@@ -896,13 +897,22 @@ def test_generate_certificate_requires_subject_principal_id():
     assert any("subject_principal_id" in e for e in errors)
 
 
+def _page_and_script(page):
+    """A page's markup plus the script P12-08 moved out of it (page.js)."""
+    text = page.read_text(encoding="utf-8", errors="ignore")
+    script = page.with_suffix(".js")
+    if script.exists():
+        text += script.read_text(encoding="utf-8", errors="ignore")
+    return text
+
+
 # ── SEC-11 is a front-end esc() fix: assert the console pages carry it ──────
 def test_console_pages_escape_interpolations():
     from dpdpcms_py.config import WEB_ROOT
 
     bad = []
     for page in (WEB_ROOT / "console").rglob("*.html"):
-        text = page.read_text(encoding="utf-8", errors="ignore")
+        text = _page_and_script(page)
         if "innerHTML" not in text:
             continue
         if "function esc(s)" not in text:
@@ -916,7 +926,7 @@ def test_tour_pages_escape_api_interpolations():
 
     bad = []
     for page in (WEB_ROOT / "tour").glob("*.html"):
-        text = page.read_text(encoding="utf-8", errors="ignore")
+        text = _page_and_script(page)
         if "innerHTML" not in text:
             continue
         if "function esc(s)" not in text:

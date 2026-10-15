@@ -13,7 +13,8 @@ from ..context import RequestContext
 from ..errors import ApiError
 from ..netutil import validate_outbound_url
 from ..security import hash_password, pseudonym, random_secret
-from .base import Service, bind_principal_field, principal_list_filter, require, tenant_filter
+from .admin import authenticated_user_id
+from .base import Service, bind_principal_field, csv_safe, principal_list_filter, require, tenant_filter
 from .catalog import activate_policy_if_complete, resolve_fiduciary
 
 API_KEY_COLUMNS = (
@@ -165,7 +166,31 @@ ACCESS_REPORT_ACTIONS = {
     "MFA_ENROLL_STARTED",
     "MFA_ENABLED",
     "MFA_VERIFY_FAILED",
+    # R6-c: Data Principal sign-ins to the rights portal, and who read the
+    # audit ledger itself.
+    "PRINCIPAL_LOGIN_SUCCESS",
+    "PRINCIPAL_LOGIN_FAILURE",
+    "AUDIT_LOG_READ",
 }
+
+
+def _audited_read(ctx: RequestContext, rows: list[dict], what: str) -> list[dict]:
+    """R6-c: reading the audit ledger is itself an audited event."""
+    filters = {
+        k: ctx.payload.get(k)
+        for k in ("fiduciary_id", "user_id", "audit_action", "purpose_id", "start_date", "end_date", "limit", "id")
+        if ctx.payload.get(k) not in (None, "")
+    }
+    log_event(
+        authenticated_user_id(ctx) or ctx.actor_email or "OPERATOR",
+        ctx.fiduciary_id or ctx.payload.get("fiduciary_id"),
+        "ADMIN_CONSOLE",
+        None,
+        "AUDIT_LOG_READ",
+        {"read": what, "filters": filters, "rows_returned": len(rows)},
+        source_ip=ctx.source_ip,
+    )
+    return rows
 
 
 class AuditService(Service):
@@ -173,7 +198,7 @@ class AuditService(Service):
         from .roles import require_audit_access
 
         require_audit_access(ctx)
-        return list_logs(ctx.payload)
+        return _audited_read(ctx, list_logs(ctx.payload), "list_audit_logs")
 
     def verify_audit_chain(self, ctx: RequestContext) -> dict:
         """LG-04: recompute the hash-chained ledger and report any break.
@@ -197,13 +222,13 @@ class AuditService(Service):
         from .roles import require_audit_access
 
         require_audit_access(ctx)
-        return list_logs(ctx.payload)
+        return _audited_read(ctx, list_logs(ctx.payload), "list_recent_audit_logs")
 
     def list_access_logs(self, ctx: RequestContext) -> list[dict]:
         from .roles import require_audit_access
 
         require_audit_access(ctx)
-        return list_logs(ctx.payload)
+        return _audited_read(ctx, list_logs(ctx.payload), "list_access_logs")
 
     def get_audit_log(self, ctx: RequestContext) -> dict:
         from .roles import require_audit_access
@@ -212,6 +237,7 @@ class AuditService(Service):
         row = get_log(require(ctx.payload.get("id"), "id"))
         if not row or (ctx.fiduciary_id and str(row.get("fiduciary_id")) != ctx.fiduciary_id):
             raise ApiError(404, "Not Found", "Audit log not found.")
+        _audited_read(ctx, [row], "get_audit_log")
         return row
 
     def get_audit_log_entry(self, ctx: RequestContext) -> dict:
@@ -252,6 +278,7 @@ class AuditService(Service):
         summary: dict[str, int] = {}
         for row in rows:
             summary[row["audit_action"]] = summary.get(row["audit_action"], 0) + 1
+        _audited_read(ctx, rows, "list_access_report")
         return {"success": True, "summary": summary, "events": rows}
 
     def log_event(self, ctx: RequestContext) -> dict:
@@ -365,12 +392,31 @@ class NotificationService(Service):
         return {"success": True}
 
     def get_notification_messages(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(
+        fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
+        rows = db.to_jsonable(
             db.all(
                 "SELECT notification_type, messages, last_updated_at FROM notification_message_templates WHERE fiduciary_id = %s ORDER BY notification_type",
-                (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
+                (fid,),
             )
         )
+        # P12-07: legacy text db/27 archived (and no longer merges) is shown
+        # beside the live type it maps to, so the DPO can re-home it by hand.
+        archived: dict[str, list[dict]] = {}
+        for row in db.to_jsonable(
+            db.all(
+                "SELECT notification_type, messages, migrated_to, archived_at FROM notification_message_templates_archive"
+                " WHERE fiduciary_id = %s AND migrated_to IS NOT NULL ORDER BY notification_type",
+                (fid,),
+            )
+        ):
+            archived.setdefault(str(row.pop("migrated_to")), []).append(row)
+        for row in rows:
+            row["archived_legacy"] = archived.pop(str(row["notification_type"]), [])
+        rows.extend(
+            {"notification_type": ntype, "messages": {}, "last_updated_at": None, "archived_legacy": legacy}
+            for ntype, legacy in sorted(archived.items())
+        )
+        return rows
 
     def set_webhook_config(self, ctx: RequestContext) -> dict:
         webhook_url = require(ctx.payload.get("webhook_url"), "webhook_url")
@@ -731,7 +777,7 @@ class RopaService(Service):
         )
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key) for key in writer.fieldnames})
+            writer.writerow({key: csv_safe(row.get(key)) for key in writer.fieldnames})
         return output.getvalue()
 
     def derive_from_policy(self, ctx: RequestContext) -> dict:

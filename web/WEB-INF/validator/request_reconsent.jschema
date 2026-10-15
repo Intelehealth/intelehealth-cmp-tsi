@@ -3,23 +3,62 @@
   "title": "Generated schema for Root",
   "type": "object",
   "properties": {
-    "_func": { "type": "string" },
-    "policy_id": { "type": "string" },
-    "version": { "type": "string" },
-    "policy_version": { "type": "string" },
-    "user_id": { "type": "string" },
+    "_func": {
+      "type": "string"
+    },
+    "policy_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
     "data_point_consents": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "data_point_id": { "type": "string" },
-          "consent_granted": { "type": "boolean" }
-        }
+          "data_point_id": {
+            "type": "string"
+          },
+          "consent_granted": {
+            "type": "boolean"
+          },
+          "purpose_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "purpose_agreed_to": {
+            "type": "string"
+          },
+          "timestamp_updated": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       }
     },
-    "jurisdiction": { "type": "string" },
-    "language_selected": { "type": "string" }
+    "jurisdiction": {
+      "type": "string"
+    },
+    "language_selected": {
+      "type": "string"
+    }
   },
-  "required": ["_func", "policy_id", "user_id", "data_point_consents"]
+  "required": [
+    "_func",
+    "policy_id",
+    "user_id",
+    "data_point_consents"
+  ]
 }

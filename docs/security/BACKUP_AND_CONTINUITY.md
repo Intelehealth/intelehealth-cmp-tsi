@@ -13,7 +13,8 @@
 1. Restores the newest dump, or the one named, into a scratch database.
 2. Counts the core tables.
 3. Checks that every audit-ledger row still links to its predecessor.
-4. Drops the scratch database.
+4. Recomputes every ledger row's hash with the application's own verifier (`verify_chain`, run in the `python_app` container against the scratch database), so a row edited in place that kept its links is caught too.
+5. Drops the scratch database.
 
 It never touches the live database. Run it monthly and after every migration, and record the result below.
 
@@ -33,6 +34,7 @@ The worker runs retention sweeps, purpose closure, grievance and alert escalatio
   - **stale**: no completed cycle in 5 poll intervals, with a 10-minute minimum;
   - **degraded**: a sweep failed in the last cycle.
 - Point the uptime monitor at `/healthz/worker` as well as `/healthz`, and page the infrastructure lead on a 503.
+- Both endpoints are unauthenticated, so they return `{"status": ...}` only. A monitor that sends `X-Health-Token: <HEALTHZ_TOKEN>` also gets `last_cycle_at`, `age_seconds` and `failed_sweeps`. Database errors go to the application log, never to the caller.
 
 ## Restore-test log
 

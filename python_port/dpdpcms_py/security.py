@@ -89,9 +89,14 @@ def pseudonym(value: str | None) -> str:
 def api_key_valid(api_key: str | None, api_secret: str | None) -> tuple[bool, str | None, set[str], str | None]:
     if not api_key or not api_secret:
         return False, None, set(), None
+    # INV-08 (SA-05): a key authenticates only while its fiduciary, and the app
+    # it is bound to, are still ACTIVE - deactivating either stops its keys.
     row = db.one(
-        "SELECT fiduciary_id, app_id, key_value, permissions FROM api_keys WHERE id = %s AND status = 'ACTIVE'"
-        " AND (expires_at IS NULL OR expires_at > NOW())",
+        "SELECT k.fiduciary_id, k.app_id, k.key_value, k.permissions FROM api_keys k"
+        " JOIN fiduciaries f ON f.id = k.fiduciary_id AND f.status = 'ACTIVE'"
+        " LEFT JOIN apps a ON a.id = k.app_id"
+        " WHERE k.id = %s AND k.status = 'ACTIVE' AND (k.expires_at IS NULL OR k.expires_at > NOW())"
+        " AND (k.app_id IS NULL OR a.status = 'ACTIVE')",
         (api_key,),
     )
     if not row or not verify_password(api_secret, row.get("key_value")):

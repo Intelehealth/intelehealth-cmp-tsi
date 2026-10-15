@@ -45,8 +45,22 @@ jobs:
       - name: Install pip-audit
         run: pip install pip-audit
 
+      # M-02: audit the hash-pinned lockfile the image installs, not
+      # whatever the >= ranges resolve to on the day.
       - name: Audit runtime dependencies
-        run: pip-audit --strict -r python_port/requirements.txt
+        run: pip-audit --strict --require-hashes -r python_port/requirements.lock
+
+      # Every direct requirement must be pinned in the lockfile, so a new
+      # dependency cannot reach the image unaudited.
+      - name: Lockfile covers requirements.txt
+        run: |
+          python - <<'EOF'
+          import re
+          lock = {m.group(1).lower() for m in re.finditer(r"^([A-Za-z0-9_.-]+)==", open("python_port/requirements.lock").read(), re.M)}
+          reqs = {re.split(r"[\[<>=;# ]", l.strip())[0].lower() for l in open("python_port/requirements.txt") if l.strip() and not l.startswith("#")}
+          missing = sorted(reqs - lock)
+          assert not missing, f"requirements.lock is stale; re-run pip-compile (python_port/README.md): {missing}"
+          EOF
 
       - name: No compiled bytecode in the repository
         run: |
@@ -126,6 +140,19 @@ jobs:
       - name: Run pytest
         working-directory: python_port
         run: python -m pytest -q tests
+
+      # M-01: the automated authenticated pen test drives the real HTTP stack
+      # (two tenants, every credential type) and fails on any attack that works.
+      - name: Automated pen test
+        working-directory: python_port
+        run: python -m pytest -q pentest --junitxml=pentest-report.xml
+
+      - name: Upload pen-test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pentest-report
+          path: python_port/pentest-report.xml
 
   docker:
     name: Docker build

@@ -38,4 +38,16 @@ else
   fail "$broken audit ledger rows do not link to their predecessor in the restored copy."
   exit 1
 fi
+# Links alone would not catch a row edited in place that kept its links, so
+# the application's own verifier recomputes every row hash against the copy.
+verdict="$(compose exec -T -e POSTGRES_DB="$scratch" python_app python -c "
+import json
+from dpdpcms_py.audit import verify_chain
+r = verify_chain(limit=10_000_000)
+print(json.dumps({'intact': r['intact'], 'rows_checked': r['rows_checked'], 'broken_count': r['broken_count']}))
+" | tail -1)"
+case "$verdict" in
+  *'"intact": true'*) ok "Audit ledger row hashes recompute in the restored copy: $verdict" ;;
+  *) fail "Audit ledger hash verification failed in the restored copy: $verdict"; exit 1 ;;
+esac
 ok "Restore test passed for $dump. Record the date and result in docs/security/BACKUP_AND_CONTINUITY.md."

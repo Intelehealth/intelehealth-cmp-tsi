@@ -72,7 +72,8 @@ class AdminSetupService(Service):
             VALUES (uuid_generate_v4(), %s, %s, {db.enc_expr()}, {db.hmac_expr()}, %s, 'ACTIVE', 'ADMIN', NOW(), NOW())
             RETURNING id
             """,
-            (name, email, *db.bind_encrypt(email), *db.bind_hmac(email), hash_password(password)),
+            # R6-a: email_plaintext is no longer written; email_enc is the copy.
+            (name, None, *db.bind_encrypt(email), *db.bind_hmac(email), hash_password(password)),
         )
         return {
             "success": True,
@@ -398,8 +399,9 @@ class OperatorService(Service):
             params.append(uid)
         search = ctx.payload.get("search")
         if search:
-            where.append("(u.name ILIKE %s OR u.email_plaintext ILIKE %s)")
-            params.extend([f"%{search}%", f"%{search}%"])
+            # R6-a: the email is searched in its decrypted form, never a plaintext column.
+            where.append(f"(u.name ILIKE %s OR {db.decrypt_col('u.email_enc')} ILIKE %s)")
+            params.extend([f"%{search}%", *db.bind_key(), f"%{search}%"])
         sql_where = "WHERE " + " AND ".join(where) if where else ""
         return db.to_jsonable(
             db.all(
@@ -468,7 +470,7 @@ class OperatorService(Service):
             VALUES (uuid_generate_v4(), %s, %s, {db.enc_expr()}, {db.hmac_expr()}, %s, %s, 'ACTIVE', %s, NOW(), NOW())
             RETURNING id
             """,
-            (username, email, *db.bind_encrypt(email), *db.bind_hmac(email), hash_password(password), role, fid),
+            (username, None, *db.bind_encrypt(email), *db.bind_hmac(email), hash_password(password), role, fid),
         )
         log_event(
             email, fid or ADMIN_FIDUCIARY_ID, "ADMIN_CONSOLE", login_uid, "USER_CREATED", f"Role assigned: {role}"

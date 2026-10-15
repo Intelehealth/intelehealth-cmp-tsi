@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (365 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (424 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -794,11 +794,134 @@ rest are now documented controls, each with an owner and a record, under
   retention, breach runbook, outbound destinations, pen-test plan.
 - DB scripts: `27_p11_remediation.sql`, `28_security_coverage.sql`.
 
+### Fixed (Security workbook v10, p13 remediation round)
+
+Workbook v10 (revision 14) re-verified `ae4bf9e`. It left CC-04 and CW-01
+Partial and raised twelve findings (P12-01..P12-12), carried two from the API
+inventory (INV-07, INV-08), and kept open items on the Security Coverage sheet
+and the DPO register. Each is closed below, with a regression in
+`test_p12_remediation.py`.
+
+- **P12-01 / P12-02 (CC-04, CW-01, CW-02, CV-03, UD-04; DD-01)** A consent
+  decision may carry only `data_point_id` (or its aliases), `consent_granted`,
+  `status`, `purpose_agreed_to` and `timestamp_updated`.
+  - `canonical_consent_points` refuses anything else with 400, so
+    `consent_expiry` is never the caller's to set.
+  - The `record_consent` and `request_reconsent` schemas close their decision
+    items (`additionalProperties: false`).
+  - `_point_granted` never raises on a stored expiry. A naive value reads as
+    UTC, and an unparseable one is ignored. Validation, withdrawal and export
+    work again for a principal whose record carries one.
+- **P12-03 (CU-03, CC-01)** A version takes effect when it is activated, not
+  when it was drafted.
+  - Activation sets `effective_date` to the later of now and any future
+    `effective_date` the DPO gave `create_policy`, which now honours it.
+  - `publish_policy` reports the stored status after superseded versions are
+    retired, and `activated_versions` lists only versions still ACTIVE.
+- **P12-04 (s.8(6), Rule 7(2))** `record_board_intimation` records
+  `board_notified_at` at server time.
+  - An earlier intimation time may be asserted as `intimated_at`. It is kept in
+    `board_intimated_at_asserted`, must lie between detection and now, and
+    decides `late`.
+  - `report_breach` refuses a future `detected_at`.
+- **Rule 7(1) / 7(2)(b) contents** Breaches record `likely_consequences`,
+  `mitigation_measures` and `contact_point`, and the principal notice carries
+  them. The detailed report records `circumstances`, `cause_findings` and
+  `remedial_measures`. `update_breach_status` accepts all six, and
+  `submit_detailed_report` stamps `board_report_submitted_at` once all four
+  detailed-report fields are present. The console's breach forms have the new
+  fields.
+- **P12-05 (Rule 6(1)(b))** Row-level security for `tsi_tenant_reader` no
+  longer reads the tenant from `tsi.fiduciary_id`, which the reader could set.
+  A reader sees only the tenants mapped to its role in `tsi_reader_tenants`.
+  That table is owned by the application and readers can neither read nor
+  write it; it is consulted through the SECURITY DEFINER `tsi_reader_may_see`.
+- **P12-06 (CC-01)** `consent_policies` is keyed `(fiduciary_id, id,
+  version)`. `consent_records` references it through the tenant as well. Any
+  `UniqueViolation` reaching the dispatcher is a 409, not a 500.
+- **P12-07 (NT-02)** db/27 archives the two legacy templates without merging
+  their text into the live types. db/29 removes the languages an earlier run
+  filled, wherever the DPO has not since edited them.
+  `get_notification_messages` returns the archived text as `archived_legacy`
+  beside its live type, and the settings page shows it read-only.
+- **P12-08 (M-03, DD-04)** The CSP is `script-src 'self'; script-src-attr
+  'none'`.
+  - Every page's inline script moved into its own file, and every inline
+    handler became an `addEventListener`.
+  - Tailwind, qrcodejs and SheetJS are vendored in `web/vendor/`, with sources,
+    licences and hashes in its README.
+  - No page loads a third-party script, stylesheet or font, so the CDN and
+    Google Fonts origins are gone from the policy.
+- **P12-09 (Rule 6(1)(d))** `/healthz` and `/healthz/worker` return the
+  status only, and exceptions go to the log. A monitor sending `X-Health-Token`
+  (`HEALTHZ_TOKEN`) also gets the worker detail.
+- **P12-10 (UD-03)** The history purpose filter uses `tsi_point_purpose`,
+  which resolves aliases exactly as the gate does.
+- **P12-11 (Rule 14)** Outside `TSI_DPDP_CMS_ENV=local`, an empty
+  `OUTBOUND_ALLOWED_HOSTS` stops the app from starting. `*` is the explicit
+  unrestricted setting. `preflight.sh` checks db/27, db/28 and db/29.
+- **P12-12 (Rule 7(2))** `download_breach_report` renders a real PDF
+  server-side with every Rule 7 field and both intimation times, served as
+  `breach-report.pdf`. The runbook describes it as it now is.
+- **INV-07 (SA-09)** `update_purge_status` refuses `COMPLETED` and
+  `PURGE_COMPLETED`, in code and in the schema. Completion goes only through
+  `confirm_purge_status`, with evidence, and a completed purge cannot be
+  completed again. The console's purge form no longer offers it.
+- **INV-08 (SA-05)** A key authenticates only while its fiduciary, and its
+  app if it has one, is ACTIVE. `delete_app` and `delete_fiduciary` revoke the
+  keys and report how many.
+- **LG-05** Expression index on `tsi_canonical_purpose(purpose_id)` for the
+  audit purpose filter.
+
+### Added (Security Coverage sheet, workbook v10)
+
+- **Rule 6(1)(a)** Operator, fiduciary and app contact details are stored
+  encrypted only. The `*_plaintext` columns are no longer written and db/29
+  clears them. Operator search matches the decrypted email.
+- **Rule 6(1)(c)** Every audit read writes an `AUDIT_LOG_READ` event, and one
+  read returns at most 5,000 rows. The access report now includes principal
+  sign-ins and ledger reads.
+- **Rule 6(1)(d)** `restore-test.sh` recomputes every ledger row hash in the
+  restored copy with `verify_chain`. It used to check links only.
+- **M-02** `python_port/requirements.lock` is a hash-pinned lockfile
+  (pip-compile). The image installs it with `--require-hashes`. CI audits it
+  and checks that it covers `requirements.txt`.
+- **DD-03 / DD-05** The DPO register records the recurring purpose-validity
+  review (DD-05), with its procedure in
+  `docs/security/PURPOSE_VALIDITY_REVIEW.md`. Every entry now has recorded,
+  last-checked and next-review dates. Each also has a named-holder column that
+  the DPO must fill in. DD-04's factual basis now matches the vendored scripts.
+- DB script: `29_p12_remediation.sql`.
+- Tests: 403 passed, 1 skipped (404 collected) against Postgres 16 with
+  `db/01..29` applied. db/27, db/28 and db/29 re-apply cleanly.
+
+### Added (automated pen test, M-01)
+
+- `python_port/pentest/` is an automated, authenticated pen-test suite: 114
+  attacks over the real HTTP interface, run against two tenants it
+  provisions through the API. It covers authentication and session,
+  cross-tenant and role/scope authorisation, injection, business logic, SSRF,
+  transport hardening and brute force. It runs locally and in CI
+  (`python -m pytest -q pentest`, with the report uploaded as an artifact).
+  It can also target staging with `PENTEST_BASE_URL`. See
+  `docs/security/PEN_TEST_PLAN.md`; results are in
+  `docs/security/PEN_TEST_REPORT.md`.
+- **PT-01** A malformed id, an over-long value or a bad date reaching SQL
+  (`psycopg.errors.DataError`) is now a 400, not a 500.
+- **PT-02** CSV formula injection.
+  - `record_consent` refuses a `language_selected` that is not `en` or an
+    Eighth Schedule code.
+  - The consent-history and ROPA CSVs, and every job export except AUDIT,
+    neutralise cells that start with `=`, `+`, `-`, `@`, tab or CR.
+  - The AUDIT export stays byte-exact so its row hashes recompute.
+- Tests: `test_pentest_findings.py`; 423 passed, 1 skipped (424 collected).
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/28` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
-- **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker.
+- **Existing database:** Run `db/13` through `db/29` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker. Outside `local`, also set `OUTBOUND_ALLOWED_HOSTS` (or `*`), or the app will not start. Optionally set `HEALTHZ_TOKEN` for health detail.
+- **Tenant readers:** after db/29, a role in `tsi_tenant_reader` sees nothing until a row in `tsi_reader_tenants` maps it to a tenant; `tsi.fiduciary_id` is no longer read.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.
 - **Audit ledger:** After `19`, `audit_logs` rejects UPDATE, DELETE and TRUNCATE for every role. Any maintenance job that edits or prunes audit rows must be retired first.

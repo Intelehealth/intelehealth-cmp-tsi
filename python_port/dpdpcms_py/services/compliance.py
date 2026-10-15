@@ -39,6 +39,7 @@ PURGE_STATUSES = {
     "PURGE_FAILED",
     "LEGAL_HOLD_APPLIED",
 }
+PURGE_COMPLETION_STATUSES = {"COMPLETED", "PURGE_COMPLETED"}
 
 
 # GR-02: the complaint categories the rights portal offers, plus the two
@@ -482,6 +483,15 @@ class ComplianceService(Service):
         status = str(require(ctx.payload.get("status"), "status")).upper()
         if status not in PURGE_STATUSES:
             raise ApiError(400, "Bad Request", f"status must be one of {sorted(PURGE_STATUSES)}.")
+        # INV-07 (SA-09): completion triggers the irreversible CMS erasure, so it
+        # is recorded only through confirm_purge_status, with evidence and the
+        # caller's identity bound to it - never from a status and a note.
+        if status in PURGE_COMPLETION_STATUSES:
+            raise ApiError(
+                400,
+                "Bad Request",
+                "A purge is completed only through confirm_purge_status, with evidence of the records erased.",
+            )
         return self._set_purge_status(
             ctx, require(ctx.payload.get("id"), "id"), status, ctx.payload.get("details"), evidence=None
         )
@@ -608,6 +618,9 @@ class ComplianceService(Service):
                 (request_id,),
             )
             locked = cur.fetchone() or {}
+            # INV-07: a purge that is already complete is not completed again.
+            if completed and str(locked.get("status") or "").upper() in PURGE_COMPLETION_STATUSES:
+                raise ApiError(409, "Conflict", "This purge request is already completed.")
             # SEC-04: the binding checks above ran on an unlocked read. If the
             # request was reassigned (assign_purge_request) or rebound since,
             # refuse rather than act on authorisation that no longer holds.
@@ -1208,6 +1221,98 @@ class GrievanceService(Service):
         return {**meta, "attachment_id": str(row["id"]), "content_base64": base64.b64encode(data).decode("ascii")}
 
 
+# Rule 7(1) contents of the intimation to principals, and the Rule 7(2)(b)
+# detailed report to the Board.
+BREACH_RULE7_FIELDS = (
+    "likely_consequences",
+    "mitigation_measures",
+    "contact_point",
+    "circumstances",
+    "cause_findings",
+    "remedial_measures",
+)
+BREACH_DETAILED_REPORT_FIELDS = ("circumstances", "mitigation_measures", "cause_findings", "remedial_measures")
+
+
+def _breach_text(payload: dict, key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _fmt_time(value: object) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "-")
+
+
+def breach_report_lines(breach: dict) -> list[str]:
+    """The lines of the Rule 7 breach report PDF (P12-12)."""
+    late = None
+    deadline = breach.get("board_notification_deadline")
+    intimated = breach.get("board_intimated_at_asserted") or breach.get("board_notified_at")
+    if deadline and intimated:
+        late = intimated > deadline
+    categories = breach.get("affected_data_categories") or []
+    return [
+        f"Breach id: {breach['id']}",
+        f"Severity: {breach.get('severity') or '-'}    Status: {breach.get('status') or '-'}",
+        f"Detected: {_fmt_time(breach.get('detected_at'))}",
+        f"Reported in the CMS: {_fmt_time(breach.get('reported_at'))}",
+        "",
+        "Nature, extent and timing (Rule 7(1)(a))",
+        str(breach.get("description") or "-"),
+        f"Affected purpose: {breach.get('affected_purpose_id') or '-'}",
+        f"Affected data categories: {', '.join(str(c) for c in categories) if categories else '-'}",
+        f"Affected principals: {breach.get('affected_principal_count') or 0}",
+        "",
+        "Likely consequences (Rule 7(1)(b))",
+        str(breach.get("likely_consequences") or "Not yet recorded."),
+        "",
+        "Mitigation measures implemented (Rule 7(1)(c))",
+        str(breach.get("mitigation_measures") or "Not yet recorded."),
+        "",
+        "Safety measures the Data Principal may take (Rule 7(1)(d))",
+        str(breach.get("actionable_steps") or "-"),
+        "",
+        "Contact point (Rule 7(1)(e))",
+        str(breach.get("contact_point") or "Not yet recorded."),
+        "",
+        "Intimation of affected principals",
+        f"Principals notified from: {_fmt_time(breach.get('principals_notified_at'))}",
+        "",
+        "Data Protection Board intimation (Rule 7(2)(a))",
+        f"72-hour deadline: {_fmt_time(deadline)}",
+        f"Intimation recorded in the CMS: {_fmt_time(breach.get('board_notified_at'))}",
+        f"Intimation time asserted by the DPO: {_fmt_time(breach.get('board_intimated_at_asserted'))}",
+        f"Board reference: {breach.get('board_reference') or '-'}",
+        f"Late: {'-' if late is None else ('yes' if late else 'no')}",
+        "",
+        "Detailed report (Rule 7(2)(b))",
+        f"Submitted: {_fmt_time(breach.get('board_report_submitted_at'))}",
+        "Events, circumstances and reasons:",
+        str(breach.get("circumstances") or "Not yet recorded."),
+        "Findings regarding the person who caused the breach:",
+        str(breach.get("cause_findings") or "Not yet recorded."),
+        "Remedial measures to prevent recurrence:",
+        str(breach.get("remedial_measures") or "Not yet recorded."),
+        "",
+        "Resolution notes",
+        str(breach.get("resolution_notes") or "-"),
+    ]
+
+
+def _parse_asserted_time(value: object, field: str) -> datetime | None:
+    """A caller-asserted timestamp as an aware datetime (naive reads as UTC)."""
+    if value in (None, ""):
+        return None
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ApiError(400, "Bad Request", f"{field} must be an ISO 8601 timestamp.") from exc
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
+
+
 def _breach_user_ids(payload: dict) -> list[str] | None:
     """The principals a breach report names: a list and/or CSV text (one id
     per cell; a header cell 'user_id' is skipped). None when it names none."""
@@ -1236,16 +1341,21 @@ class BreachService(Service):
             f"BREACH_NOTIFICATION_{category}" if category else "BREACH_NOTIFICATION"
         )
         user_ids = _breach_user_ids(ctx.payload)
+        # The 72-hour clock runs from detection, so detection cannot be later
+        # than the report itself.
+        detected = _parse_asserted_time(ctx.payload.get("detected_at"), "detected_at")
+        if detected is not None and detected > datetime.now(UTC):
+            raise ApiError(400, "Bad Request", "detected_at cannot be in the future.")
         row = db.insert_returning(
             """
             INSERT INTO breach_incidents
                 (id, fiduciary_id, title, description, detected_at, affected_purpose_id,
                  affected_data_categories, actionable_steps, severity, status,
                  affected_principal_count, created_by_user_id, notification_type,
-                 board_notification_deadline)
+                 board_notification_deadline, likely_consequences, mitigation_measures, contact_point)
             VALUES (uuid_generate_v4(), %s, %s, %s, COALESCE(%s::timestamptz, NOW()), %s, %s,
                     %s, COALESCE(%s, 'MEDIUM'), 'OPEN', %s, %s, %s,
-                    COALESCE(%s::timestamptz, NOW()) + INTERVAL '72 hours')
+                    COALESCE(%s::timestamptz, NOW()) + INTERVAL '72 hours', %s, %s, %s)
             RETURNING id, board_notification_deadline
             """,
             (
@@ -1261,6 +1371,9 @@ class BreachService(Service):
                 None,
                 notification_type,
                 ctx.payload.get("detected_at"),
+                _breach_text(ctx.payload, "likely_consequences"),
+                _breach_text(ctx.payload, "mitigation_measures"),
+                _breach_text(ctx.payload, "contact_point"),
             ),
         )
         log_event(
@@ -1308,22 +1421,44 @@ class BreachService(Service):
         return db.to_jsonable(row)
 
     def update_breach_status(self, ctx: RequestContext) -> dict:
+        """Status and resolution, plus the Rule 7 contents as they become known:
+        the Rule 7(1) intimation fields and the Rule 7(2)(b) detailed report.
+        `submit_detailed_report` stamps when that report went to the Board; it
+        needs every Rule 7(2)(b) field and can be stamped once."""
         scope, scope_params = tenant_filter(ctx)
+        fields = ["status = %s", "resolution_notes = COALESCE(%s, resolution_notes)", "last_updated_at = NOW()"]
+        params: list[object] = [require(ctx.payload.get("status"), "status"), ctx.payload.get("resolution_notes")]
+        for key in BREACH_RULE7_FIELDS:
+            if _breach_text(ctx.payload, key) is not None:
+                fields.append(f"{key} = %s")
+                params.append(_breach_text(ctx.payload, key))
+        if ctx.payload.get("submit_detailed_report"):
+            breach = self._breach_row(ctx)
+            if breach.get("board_report_submitted_at"):
+                raise ApiError(409, "Conflict", "The Rule 7(2) detailed report for this breach is already recorded.")
+            missing = [
+                key
+                for key in BREACH_DETAILED_REPORT_FIELDS
+                if not (_breach_text(ctx.payload, key) or str(breach.get(key) or "").strip())
+            ]
+            if missing:
+                raise ApiError(400, "Bad Request", f"The Rule 7(2) detailed report still needs {missing}.")
+            fields.append("board_report_submitted_at = NOW()")
         updated = db.execute(
-            f"UPDATE breach_incidents SET status = %s, resolution_notes = COALESCE(%s, resolution_notes), last_updated_at = NOW() WHERE id = %s{scope}",
-            (
-                require(ctx.payload.get("status"), "status"),
-                ctx.payload.get("resolution_notes"),
-                require(ctx.payload.get("id"), "id"),
-                *scope_params,
-            ),
+            f"UPDATE breach_incidents SET {', '.join(fields)} WHERE id = %s{scope}",
+            (*params, require(ctx.payload.get("id"), "id"), *scope_params),
         )
         if updated == 0:
             raise ApiError(404, "Not Found", "Breach not found.")
         return {"success": True}
 
-    def download_breach_report(self, ctx: RequestContext) -> dict:
-        return self.get_breach(ctx)
+    def download_breach_report(self, ctx: RequestContext) -> bytes:
+        """P12-12: the Rule 7 breach report as a real PDF, rendered server-side
+        (it used to be get_breach's JSON saved under a .pdf name)."""
+        from ..pdfgen import text_pdf
+
+        breach = self._breach_row(ctx)
+        return text_pdf(f"Personal data breach report - {breach['title']}", breach_report_lines(breach))
 
     def _breach_row(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
@@ -1373,10 +1508,16 @@ class BreachService(Service):
                 400, "Bad Request", "Name the affected principals (user_ids); the breach records no affected purpose."
             )
         ntype = str(breach.get("notification_type") or "BREACH_NOTIFICATION")
+        # Rule 7(1): what happened, its likely consequences, what was done, what
+        # the principal can do, and whom to contact.
         context = {
             "title": breach["title"],
+            "description": breach["description"],
             "actionable_steps": breach["actionable_steps"],
             "detected_at": breach["detected_at"].isoformat() if breach.get("detected_at") else None,
+            "likely_consequences": breach.get("likely_consequences") or "still being assessed",
+            "mitigation_measures": breach.get("mitigation_measures") or "still being assessed",
+            "contact_point": breach.get("contact_point") or "our Data Protection Officer",
         }
         notified = 0
         with db.connection() as conn, conn.cursor() as cur:
@@ -1418,16 +1559,32 @@ class BreachService(Service):
         The 72-hour deadline column alone gave a clock with no way to stop it.
         The intimation reference (the Board's acknowledgement or the filing id)
         is mandatory; a late intimation is accepted and recorded as late.
+
+        P12-04: board_notified_at is the server's time of recording, never the
+        caller's. An intimation made earlier through another channel may be
+        asserted as intimated_at; it is kept in its own column, must fall
+        between detection and now, and is what decides 'late'.
         """
         breach = self._breach_row(ctx)
         if breach.get("board_notified_at"):
             raise ApiError(409, "Conflict", "The Board intimation for this breach is already recorded.")
         reference = str(require(ctx.payload.get("board_reference"), "board_reference")).strip()
+        asserted = _parse_asserted_time(ctx.payload.get("intimated_at"), "intimated_at")
+        if asserted is not None:
+            now = datetime.now(UTC)
+            detected = breach["detected_at"]
+            if asserted > now or asserted < detected:
+                raise ApiError(
+                    400,
+                    "Bad Request",
+                    "intimated_at must fall between the breach's detection and now.",
+                )
         row = db.one(
-            "UPDATE breach_incidents SET board_notified_at = COALESCE(%s::timestamptz, NOW()), board_reference = %s,"
-            " board_notified_by = %s, last_updated_at = NOW() WHERE id = %s"
-            " RETURNING board_notified_at, board_notified_at > board_notification_deadline AS late",
-            (ctx.payload.get("intimated_at"), reference, authenticated_user_id(ctx), breach["id"]),
+            "UPDATE breach_incidents SET board_notified_at = NOW(), board_intimated_at_asserted = %s,"
+            " board_reference = %s, board_notified_by = %s, last_updated_at = NOW() WHERE id = %s"
+            " RETURNING board_notified_at, board_intimated_at_asserted,"
+            " COALESCE(board_intimated_at_asserted, board_notified_at) > board_notification_deadline AS late",
+            (asserted, reference, authenticated_user_id(ctx), breach["id"]),
         )
         log_event(
             authenticated_user_id(ctx) or "DPO",
@@ -1435,11 +1592,18 @@ class BreachService(Service):
             "DPO_CONSOLE",
             str(breach["id"]),
             "BREACH_BOARD_INTIMATED",
-            {"breach_id": str(breach["id"]), "board_reference": reference, "late": bool(row["late"])},
+            {
+                "breach_id": str(breach["id"]),
+                "board_reference": reference,
+                "recorded_at": row["board_notified_at"].isoformat(),
+                "intimated_at_asserted": asserted.isoformat() if asserted else None,
+                "late": bool(row["late"]),
+            },
         )
         return {
             "success": True,
             "breach_id": str(breach["id"]),
             "board_notified_at": row["board_notified_at"].isoformat(),
+            "intimated_at_asserted": asserted.isoformat() if asserted else None,
             "late": bool(row["late"]),
         }

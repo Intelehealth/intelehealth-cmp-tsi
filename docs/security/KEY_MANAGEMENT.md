@@ -10,6 +10,7 @@
 | `BOOTSTRAP_TOKEN` | One-time super-admin bootstrap | 32 chars | Yes. Rotate, or unset it, once the first admin exists. | A secrets manager |
 | `CERTIFICATE_SIGNING_KEY` | Evidence certificates (defaults to `DB_ENCRYPTION_KEY`) | – | Yes. Certificates signed with the old key then verify only against that key. | A secrets manager |
 | `POSTGRES_PASSWD` | Database login | 8 chars | Yes | A secrets manager |
+| `HEALTHZ_TOKEN` | Health-endpoint detail for the monitor (optional) | 32 chars recommended | Yes | The monitoring system's secret store |
 
 The process refuses to start if a secret is missing, too short, or still `change-me` (`config.py`).
 

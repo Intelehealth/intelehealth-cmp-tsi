@@ -38,6 +38,12 @@ def canonical_purpose_id(value: Any) -> str:
 # closure and retention queries.
 POINT_ID_KEYS = ("data_point_id", "purpose_id", "id")
 
+# P12-01/P12-02: the only keys a caller may put on a consent decision. Anything
+# else - consent_expiry above all - is the server's to set, never the caller's:
+# DD-01 says no consent carries an expiry, and a naive one used to make every
+# later read of the record raise.
+CALLER_POINT_KEYS = frozenset(POINT_ID_KEYS) | {"consent_granted", "status", "purpose_agreed_to", "timestamp_updated"}
+
 
 def point_purpose_id(point: Any) -> str:
     """The canonical purpose id a stored consent decision names ('' if none)."""
@@ -56,7 +62,7 @@ def canonical_consent_points(points: Any) -> Any:
     {purpose_id: 'care', id: 'research'}) is refused: the declaration gate and
     the validator could otherwise read it as two different purposes. Anything
     that is not a list of objects is returned unchanged for the callers' own
-    validation to reject.
+    validation to reject. A key outside CALLER_POINT_KEYS is refused (P12-01).
     """
     if not isinstance(points, list):
         return points
@@ -65,6 +71,13 @@ def canonical_consent_points(points: Any) -> Any:
         if not isinstance(point, dict):
             out.append(point)
             continue
+        unknown = sorted(str(k) for k in point if k not in CALLER_POINT_KEYS)
+        if unknown:
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"A consent decision may not carry {unknown}; consents are open-ended (DD-01).",
+            )
         named = {canonical_purpose_id(point[k]) for k in POINT_ID_KEYS if point.get(k) not in (None, "")}
         if len(named) > 1:
             raise ApiError(
@@ -77,6 +90,18 @@ def canonical_consent_points(points: Any) -> Any:
             clean["data_point_id"] = named.pop()
         out.append(clean)
     return out
+
+
+# PT-02: a cell starting with one of these runs as a formula when a CSV is
+# opened in a spreadsheet (CSV/formula injection).
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: Any) -> Any:
+    """Neutralise a CSV cell a spreadsheet would execute, by prefixing a quote."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 def page_limit(payload: dict, default: int = 10) -> tuple[int, int]:

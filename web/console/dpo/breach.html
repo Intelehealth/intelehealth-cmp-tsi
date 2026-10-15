@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TSI DPDP CMS - Breach Management</title>
     <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="../../vendor/tailwindcss-3.4.16.js"></script>
     <style>
         :root {
             --tsi-primary: #006A67;
@@ -138,7 +138,7 @@
     <div class="p-3 border-t border-gray-200">
         <div class="mt-2 text-sm text-gray-500 p-2 rounded-md hover:bg-gray-100 cursor-pointer flex justify-between items-center">
             <span id="username" class="font-bold text-slate-700">DPO User</span>
-            <a href="#" onclick="handleLogout()"><span class="text-xs font-semibold text-red-500">Logout</span></a>
+            <a href="#" data-action="handleLogout"><span class="text-xs font-semibold text-red-500">Logout</span></a>
         </div>
     </div>
 </div>
@@ -149,7 +149,7 @@
 <main class="flex-1 p-4 lg:p-8 overflow-y-auto">
     <div class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
         <h1 class="text-2xl font-black text-slate-800 tracking-tight">Breach Management</h1>
-        <button id="report-breach-btn" onclick="openReportModal()" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90 transition duration-150 flex items-center gap-2">
+        <button id="report-breach-btn" data-action="openReportModal" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90 transition duration-150 flex items-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
             Report Breach
         </button>
@@ -189,7 +189,7 @@
 <!-- Modal: Report Breach -->
 <div id="report-modal-overlay" class="modal-overlay">
     <div class="modal-content">
-        <button class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-2xl" onclick="closeModal('report-modal-overlay')">&times;</button>
+        <button class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-2xl" data-action="closeModal" data-arg="report-modal-overlay">&times;</button>
         <h2 class="text-lg font-bold text-slate-700 mb-4 tracking-tight">Report a Personal Data Breach</h2>
         <form id="report-form" class="space-y-3">
             <div>
@@ -241,8 +241,20 @@
                 <label class="block text-sm font-medium text-gray-700">Actionable Steps for Affected Principals</label>
                 <textarea id="breach-actionable-steps" rows="3" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm" placeholder="e.g. Reset your password immediately, watch for phishing emails referencing..."></textarea>
             </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Likely Consequences for Principals (Rule 7(1)(b))</label>
+                <textarea id="breach-likely-consequences" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Mitigation Measures Implemented (Rule 7(1)(c))</label>
+                <textarea id="breach-mitigation-measures" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Contact Point for Queries (Rule 7(1)(e))</label>
+                <textarea id="breach-contact-point" rows="1" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm" placeholder="Name, email or phone of the person who can answer"></textarea>
+            </div>
             <div class="modal-footer">
-                <button type="button" onclick="closeModal('report-modal-overlay')" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Cancel</button>
+                <button type="button" data-action="closeModal" data-arg="report-modal-overlay" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Cancel</button>
                 <button type="submit" id="report-submit-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Report Breach &amp; Notify Principals</button>
             </div>
         </form>
@@ -252,7 +264,7 @@
 <!-- Modal: Manage Breach -->
 <div id="manage-modal-overlay" class="modal-overlay">
     <div class="modal-content">
-        <button class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-2xl" onclick="closeModal('manage-modal-overlay')">&times;</button>
+        <button class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-2xl" data-action="closeModal" data-arg="manage-modal-overlay">&times;</button>
         <h2 class="text-lg font-bold text-slate-700 mb-4 tracking-tight">Manage Breach Incident</h2>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm mb-4">
@@ -282,6 +294,7 @@
             <p class="text-xs text-gray-500">Deadline: <span id="detail-board-deadline">-</span> &middot; <span id="detail-board-status">Not recorded</span></p>
             <div id="board-record-row" class="flex gap-2">
                 <input id="board-reference" type="text" placeholder="Board acknowledgement / filing reference" class="flex-1 p-2 border border-gray-300 rounded-md text-sm">
+                <input id="board-intimated-at" type="datetime-local" title="Only if the Board was intimated earlier through another channel; must be after detection" class="p-2 border border-gray-300 rounded-md text-sm">
                 <button type="button" id="board-record-btn" class="bg-slate-600 text-white px-3 py-2 rounded-md text-sm font-medium hover:bg-slate-700">Record intimation</button>
             </div>
             <div class="flex items-center justify-between pt-1">
@@ -302,395 +315,43 @@
                 <label class="block text-sm font-medium text-gray-700">Resolution Notes</label>
                 <textarea id="resolution-notes" rows="3" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
             </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Likely Consequences (Rule 7(1)(b))</label>
+                <textarea id="update-likely-consequences" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Mitigation Measures (Rule 7(1)(c), 7(2)(b))</label>
+                <textarea id="update-mitigation-measures" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Contact Point (Rule 7(1)(e))</label>
+                <textarea id="update-contact-point" rows="1" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Events, Circumstances and Reasons (Rule 7(2)(b))</label>
+                <textarea id="update-circumstances" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Findings on the Person Who Caused the Breach (Rule 7(2)(b))</label>
+                <textarea id="update-cause-findings" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Remedial Measures to Prevent Recurrence (Rule 7(2)(b))</label>
+                <textarea id="update-remedial-measures" rows="2" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm"></textarea>
+            </div>
+            <div>
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700"><input type="checkbox" id="submit-detailed-report"> Record the Rule 7(2)(b) detailed report as submitted to the Board</label>
+                <p id="detailed-report-status" class="text-xs text-slate-500 mt-1"></p>
+            </div>
             <div class="modal-footer">
                 <span id="download-report-hint" class="text-xs text-gray-400 self-center hidden">PDF report available once CONTAINED or RESOLVED</span>
-                <button type="button" id="download-report-btn" onclick="downloadReport(document.getElementById('status-update-form').getAttribute('data-id'))" class="bg-slate-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-slate-700 hidden">Download PDF Report</button>
+                <button type="button" id="download-report-btn" data-action="downloadReport" class="bg-slate-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-slate-700 hidden">Download PDF Report</button>
                 <button type="submit" id="status-update-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Save Status</button>
             </div>
         </form>
     </div>
 </div>
 
-<script>
-    function esc(s) {
-        if (s == null) return '';
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
-    }
-
-    const API_URL_BREACH = '/api/v1/admin/breach';
-    const API_URL_POLICY = '/api/v1/admin/policy';
-    const API_URL_NOTIFICATION = '/api/v1/admin/notification';
-    const BREACH_TYPE_PREFIX = 'BREACH_NOTIFICATION_';
-    const AUTH_TOKEN = localStorage.getItem('authToken');
-    const FIDUCIARY_ID = localStorage.getItem('fiduciary_id');
-    const IS_OPERATOR = localStorage.getItem('role') === 'OPERATOR';
-    if (IS_OPERATOR) {
-        document.querySelectorAll('a[href="policies.html"], a[href="settings.html"], a[href="team.html"]').forEach(el => el.remove());
-        document.getElementById('report-breach-btn').remove();
-        document.getElementById('status-update-form').style.display = 'none'; // hidden, not removed: init below still wires its (now invisible) submit listener
-    }
-    const USER_NAME = localStorage.getItem('username');
-    document.getElementById('username').textContent = USER_NAME || 'DPO User';
-
-    let tableBody, countSpan, statusFilter, reportForm, statusUpdateForm;
-
-    function toggleMenu() {
-        document.getElementById('sidebar').classList.toggle('open');
-        document.getElementById('sidebar-backdrop').classList.toggle('hidden');
-    }
-
-    function closeModal(modalId) {
-        document.getElementById(modalId).style.display = 'none';
-    }
-
-    function openReportModal() {
-        document.getElementById('report-modal-overlay').style.display = 'flex';
-    }
-
-    function createStatusBadge(status) {
-        let colorClass = '';
-        switch (status) {
-            case 'OPEN': colorClass = 'bg-red-100 text-red-800'; break;
-            case 'CONTAINED': colorClass = 'bg-yellow-100 text-yellow-800'; break;
-            case 'RESOLVED': colorClass = 'bg-green-100 text-green-800'; break;
-            default: colorClass = 'bg-gray-100 text-gray-800';
-        }
-        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(status)}</span>`;
-    }
-
-    function createSeverityBadge(severity) {
-        let colorClass = '';
-        switch (severity) {
-            case 'LOW': colorClass = 'bg-slate-100 text-slate-700'; break;
-            case 'MEDIUM': colorClass = 'bg-amber-100 text-amber-800'; break;
-            case 'HIGH': colorClass = 'bg-orange-100 text-orange-800'; break;
-            case 'CRITICAL': colorClass = 'bg-red-100 text-red-800'; break;
-            default: colorClass = 'bg-gray-100 text-gray-800';
-        }
-        return `<span class="px-2 py-0.5 text-[10px] font-bold rounded-full uppercase ${colorClass}">${esc(severity)}</span>`;
-    }
-
-    function createBreachRow(b) {
-        const row = document.createElement('tr');
-        const reportAvailable = b.status === 'CONTAINED' || b.status === 'RESOLVED';
-        const downloadButton = reportAvailable
-            ? `<button class="download-report-row-btn text-slate-600 hover:text-slate-900 font-medium ml-3" data-id="${esc(b.id)}">Download PDF</button>`
-            : '';
-        row.innerHTML = `
-            <td class="px-4 py-3 text-sm font-medium text-gray-800">${esc(b.title)}</td>
-            <td class="px-4 py-3 text-sm">${createSeverityBadge(b.severity)}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${esc(b.affected_principal_count)}</td>
-            <td class="px-4 py-3 text-sm text-gray-600">${esc(new Date(b.reported_at).toLocaleDateString())}</td>
-            <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(b.status)}</td>
-            <td class="px-4 py-3 text-sm">
-                <button class="view-breach-btn text-indigo-600 hover:text-indigo-900 font-medium" data-id="${esc(b.id)}">Manage</button>${downloadButton}
-            </td>
-        `;
-        row.querySelector('.view-breach-btn').addEventListener('click', () => viewBreach(b.id));
-        const dlBtn = row.querySelector('.download-report-row-btn');
-        if (dlBtn) dlBtn.addEventListener('click', () => downloadReport(b.id));
-        return row;
-    }
-
-    async function loadBreaches() {
-        tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">Loading breach incidents...</td></tr>`;
-        try {
-            const payload = {
-                "_func": "list_breaches",
-                "fiduciary_id": FIDUCIARY_ID,
-                "status": statusFilter.value === 'ALL' ? '' : statusFilter.value
-            };
-            const response = await fetch(API_URL_BREACH, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json();
-            if (data.status === 401) {
-                alert("Session Expired: " + (data.message || "Authentication required."));
-                handleLogout();
-                return;
-            }
-            const breaches = data || [];
-            tableBody.innerHTML = '';
-            if (breaches.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-gray-500">No breach incidents recorded.</td></tr>`;
-            } else {
-                breaches.forEach(b => tableBody.appendChild(createBreachRow(b)));
-            }
-            countSpan.textContent = `Total: ${breaches.length} Incidents`;
-        } catch (error) {
-            tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-red-600">Failed to load breach incidents.</td></tr>`;
-        }
-    }
-
-    async function loadPurposeOptions() {
-        const select = document.getElementById('breach-purpose');
-        try {
-            const response = await fetch(API_URL_POLICY, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "get_active_policy", "fiduciary_id": FIDUCIARY_ID, "jurisdiction": "IN" })
-            });
-            const policy = await response.json();
-            const langContent = policy && policy.policy_content ? policy.policy_content.en : null;
-            const purposes = langContent ? (langContent.data_processing_purposes || []) : [];
-            purposes.forEach(p => {
-                const opt = document.createElement('option');
-                opt.value = p.id;
-                opt.textContent = p.name;
-                select.appendChild(opt);
-            });
-        } catch (e) {
-            console.error("Could not load active policy purposes", e);
-        }
-    }
-
-    // Populates the Breach Category dropdown from whatever breach types the DPO has
-    // already defined in Settings (set_notification_message under BREACH_NOTIFICATION_*).
-    async function loadBreachCategoryOptions() {
-        const select = document.getElementById('breach-category');
-        try {
-            const response = await fetch(API_URL_NOTIFICATION, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "get_notification_messages", "fiduciary_id": FIDUCIARY_ID })
-            });
-            const rows = await response.json();
-            (rows || [])
-                .filter(row => row.notification_type && row.notification_type.startsWith(BREACH_TYPE_PREFIX))
-                .forEach(row => {
-                    const code = row.notification_type.substring(BREACH_TYPE_PREFIX.length);
-                    const opt = document.createElement('option');
-                    opt.value = code;
-                    opt.textContent = code.charAt(0).toUpperCase() + code.slice(1).toLowerCase();
-                    select.appendChild(opt);
-                });
-        } catch (e) {
-            console.error("Could not load breach categories", e);
-        }
-    }
-
-    async function viewBreach(id) {
-        try {
-            const response = await fetch(API_URL_BREACH, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "get_breach", "id": id })
-            });
-            const b = await response.json();
-
-            document.getElementById('detail-title').textContent = b.title;
-            document.getElementById('detail-severity').innerHTML = createSeverityBadge(b.severity);
-            document.getElementById('detail-affected-count').textContent = b.affected_principal_count;
-            document.getElementById('detail-notification-type').textContent = b.notification_type || 'BREACH_NOTIFICATION (generic)';
-            document.getElementById('detail-status').innerHTML = createStatusBadge(b.status);
-            document.getElementById('detail-detected').textContent = new Date(b.detected_at).toLocaleString();
-            document.getElementById('detail-reported').textContent = new Date(b.reported_at).toLocaleString();
-            document.getElementById('detail-description').textContent = b.description;
-            document.getElementById('detail-actionable-steps').textContent = b.actionable_steps;
-            document.getElementById('new-status').value = b.status;
-            document.getElementById('resolution-notes').value = b.resolution_notes || '';
-
-            const reportAvailable = b.status === 'CONTAINED' || b.status === 'RESOLVED';
-            document.getElementById('download-report-btn').classList.toggle('hidden', !reportAvailable);
-            document.getElementById('download-report-hint').classList.toggle('hidden', reportAvailable);
-
-            document.getElementById('detail-board-deadline').textContent =
-                b.board_notification_deadline ? new Date(b.board_notification_deadline).toLocaleString() : '-';
-            document.getElementById('detail-board-status').textContent = b.board_notified_at
-                ? `Intimated ${new Date(b.board_notified_at).toLocaleString()} (ref ${b.board_reference || '-'})`
-                : 'Not recorded';
-            document.getElementById('board-record-row').classList.toggle('hidden', !!b.board_notified_at || IS_OPERATOR);
-            document.getElementById('notify-principals-btn').classList.toggle('hidden', IS_OPERATOR);
-            document.getElementById('detail-principals-notified').textContent =
-                b.principals_notified_at ? new Date(b.principals_notified_at).toLocaleString() : 'not yet';
-
-            statusUpdateForm.setAttribute('data-id', id);
-            document.getElementById('manage-modal-overlay').style.display = 'flex';
-        } catch (e) { alert("Error fetching breach details."); }
-    }
-
-    async function downloadReport(id) {
-        try {
-            const response = await fetch(API_URL_BREACH, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "download_breach_report", "id": id })
-            });
-            if (!response.ok) { alert("Failed to generate PDF report."); return; }
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `breach-report-${id}.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-        } catch (e) {
-            alert("Network error while downloading report.");
-        }
-    }
-
-    // --- Init ---
-    tableBody = document.getElementById('breach-table-body');
-    countSpan = document.getElementById('breach-count');
-    statusFilter = document.getElementById('status-filter');
-    reportForm = document.getElementById('report-form');
-    statusUpdateForm = document.getElementById('status-update-form');
-
-    document.getElementById('menu-toggle').addEventListener('click', toggleMenu);
-    document.getElementById('sidebar-backdrop').addEventListener('click', toggleMenu);
-    statusFilter.addEventListener('change', loadBreaches);
-
-    function readFileAsText(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsText(file);
-        });
-    }
-
-    document.getElementById('breach-user-ids-csv').addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        const summary = document.getElementById('breach-csv-summary');
-        if (!file) {
-            summary.textContent = '';
-            return;
-        }
-        const content = await readFileAsText(file);
-        const count = content.split(/\r?\n/).map(l => l.trim()).filter(l => l).length;
-        summary.textContent = `${count} Principal ID(s) found in ${file.name}.`;
-    });
-
-    reportForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const btn = document.getElementById('report-submit-btn');
-        btn.disabled = true;
-        btn.textContent = 'Reporting...';
-
-        try {
-            const userIdsRaw = document.getElementById('breach-user-ids').value.trim();
-            const affectedUserIds = userIdsRaw ? userIdsRaw.split(',').map(s => s.trim()).filter(s => s) : [];
-
-            const csvFile = document.getElementById('breach-user-ids-csv').files[0];
-            const affectedUserIdsCsv = csvFile ? await readFileAsText(csvFile) : undefined;
-
-            const payload = {
-                "_func": "report_breach",
-                "fiduciary_id": FIDUCIARY_ID,
-                "title": document.getElementById('breach-title').value,
-                "description": document.getElementById('breach-description').value,
-                "detected_at": new Date(document.getElementById('breach-detected-at').value).toISOString(),
-                "severity": document.getElementById('breach-severity').value,
-                "breach_category": document.getElementById('breach-category').value || undefined,
-                "affected_purpose_id": document.getElementById('breach-purpose').value || undefined,
-                "affected_user_ids": affectedUserIds.length ? affectedUserIds : undefined,
-                "affected_user_ids_csv": affectedUserIdsCsv,
-                "actionable_steps": document.getElementById('breach-actionable-steps').value
-            };
-
-            const response = await fetch(API_URL_BREACH, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify(payload)
-            });
-
-            if (response.ok) {
-                const result = await response.json();
-                const message = `Breach reported. ${result.notified || 0} affected principal(s) notified. `
-                    + `Intimate the Data Protection Board by ${new Date(result.board_notification_deadline).toLocaleString()} and record it here.`;
-                alert(message);
-                closeModal('report-modal-overlay');
-                reportForm.reset();
-                document.getElementById('breach-csv-summary').textContent = '';
-                loadBreaches();
-            } else {
-                alert("Failed to report breach.");
-            }
-        } catch (err) {
-            alert("Network error while reporting breach.");
-        } finally {
-            btn.disabled = false;
-            btn.textContent = 'Report Breach & Notify Principals';
-        }
-    });
-
-    statusUpdateForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const id = statusUpdateForm.getAttribute('data-id');
-        const btn = document.getElementById('status-update-btn');
-        btn.disabled = true;
-        btn.textContent = 'Saving...';
-
-        try {
-            const payload = {
-                "_func": "update_breach_status",
-                "id": id,
-                "status": document.getElementById('new-status').value,
-                "resolution_notes": document.getElementById('resolution-notes').value
-            };
-            const response = await fetch(API_URL_BREACH, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify(payload)
-            });
-            if (response.ok) {
-                alert("Breach status updated.");
-                closeModal('manage-modal-overlay');
-                loadBreaches();
-            } else {
-                alert("Failed to update status.");
-            }
-        } finally {
-            btn.disabled = false;
-            btn.textContent = 'Save Status';
-        }
-    });
-
-    async function breachCall(payload) {
-        const response = await fetch(API_URL_BREACH, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-            body: JSON.stringify(payload)
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.message || body.error || 'Request failed');
-        return body;
-    }
-
-    document.getElementById('board-record-btn').addEventListener('click', async () => {
-        const id = statusUpdateForm.getAttribute('data-id');
-        const reference = document.getElementById('board-reference').value.trim();
-        if (!reference) { alert('Enter the Board acknowledgement or filing reference.'); return; }
-        try {
-            const out = await breachCall({ "_func": "record_board_intimation", "id": id, "board_reference": reference });
-            alert(out.late ? 'Intimation recorded - after the 72-hour deadline.' : 'Intimation recorded.');
-            viewBreach(id);
-        } catch (e) { alert(`Could not record the intimation: ${e.message}`); }
-    });
-
-    document.getElementById('notify-principals-btn').addEventListener('click', async () => {
-        const id = statusUpdateForm.getAttribute('data-id');
-        try {
-            const out = await breachCall({ "_func": "notify_affected_principals", "id": id });
-            alert(`${out.notified} principal(s) notified; ${out.affected_total} affected in total.`);
-            viewBreach(id);
-            loadBreaches();
-        } catch (e) { alert(`Could not notify principals: ${e.message}`); }
-    });
-
-    loadBreaches();
-    loadPurposeOptions();
-    loadBreachCategoryOptions();
-
-    window.openReportModal = openReportModal;
-    window.closeModal = closeModal;
-    window.viewBreach = viewBreach;
-    window.downloadReport = downloadReport;
-    window.handleLogout = () => { localStorage.clear(); window.location.href = "../index.html"; };
-</script>
+<script src="breach.js"></script>
 </body>
 </html>

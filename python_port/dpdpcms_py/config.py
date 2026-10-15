@@ -32,6 +32,19 @@ def _secret(name: str, minimum: int = 32) -> str:
     return value
 
 
+def _outbound_allowed_hosts(environment: str) -> tuple[str, ...]:
+    """Rule 14 / P12-11: an unset allowlist fails closed outside local."""
+    hosts = tuple(
+        h.strip().lower().rstrip(".") for h in os.getenv("OUTBOUND_ALLOWED_HOSTS", "").split(",") if h.strip()
+    )
+    if not hosts and environment != "local":
+        raise RuntimeError(
+            "OUTBOUND_ALLOWED_HOSTS must list the approved outbound destinations (Rule 14) outside "
+            "TSI_DPDP_CMS_ENV=local. Set it to '*' to leave destinations unrestricted deliberately."
+        )
+    return hosts
+
+
 @dataclass(frozen=True)
 class Settings:
     db_dsn: str
@@ -94,9 +107,15 @@ class Settings:
     # Rule 14: the destinations personal data may be sent to. When set, every
     # outbound webhook, SMS/push gateway and verifier URL - and the SMTP host -
     # must be one of these hosts or a subdomain of one (".gov.in", "example.in").
-    # Empty = not restricted; production deployments should list the in-India
-    # endpoints recorded in docs/security/OUTBOUND_DESTINATIONS.md.
+    # P12-11: outside TSI_DPDP_CMS_ENV=local the list is mandatory - the app
+    # refuses to start without it. "*" is the explicit, logged choice to leave
+    # destinations unrestricted. Production deployments should list the
+    # in-India endpoints recorded in docs/security/OUTBOUND_DESTINATIONS.md.
     outbound_allowed_hosts: tuple[str, ...] = ()
+    # P12-09: /healthz and /healthz/worker report a status only. A request
+    # carrying this token in X-Health-Token also gets the detail (age, failed
+    # sweeps). Empty = detail never served.
+    healthz_token: str = ""
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -162,9 +181,8 @@ class Settings:
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
             notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),
             trusted_proxy_ips=tuple(ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()),
-            outbound_allowed_hosts=tuple(
-                h.strip().lower().rstrip(".") for h in os.getenv("OUTBOUND_ALLOWED_HOSTS", "").split(",") if h.strip()
-            ),
+            outbound_allowed_hosts=_outbound_allowed_hosts(environment),
+            healthz_token=(os.getenv("HEALTHZ_TOKEN") or "").strip(),
         )
 
 

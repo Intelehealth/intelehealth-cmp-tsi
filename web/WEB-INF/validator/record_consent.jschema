@@ -55,6 +55,15 @@
           },
           "timestamp_updated": {
             "type": "string"
+          },
+          "purpose_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
           }
         },
         "required": [
@@ -62,7 +71,8 @@
           "consent_granted",
           "purpose_agreed_to",
           "timestamp_updated"
-        ]
+        ],
+        "additionalProperties": false
       }
     }
   },

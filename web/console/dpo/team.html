@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TSI DPDP CMS - Team</title>
     <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="../../vendor/tailwindcss-3.4.16.js"></script>
     <style>
         :root {
             --tsi-primary: #006A67;
@@ -89,7 +89,7 @@
 
 <!-- Mobile Header -->
 <div class="lg:hidden flex items-center justify-between p-4 bg-white border-b border-gray-200 sticky top-0 z-30">
-    <button onclick="toggleSidebar()" class="p-2 text-gray-600 focus:outline-none">
+    <button data-action="toggleSidebar" class="p-2 text-gray-600 focus:outline-none">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
         </svg>
@@ -98,7 +98,7 @@
     <div class="w-6"></div>
 </div>
 
-<div id="backdrop" class="sidebar-backdrop lg:hidden" onclick="toggleSidebar()"></div>
+<div id="backdrop" class="sidebar-backdrop lg:hidden" data-action="toggleSidebar"></div>
 
 <!-- Sidebar Navigation -->
 <div id="sidebar" class="sidebar flex flex-col justify-between">
@@ -125,7 +125,7 @@
     <div class="p-3 border-t border-gray-200">
         <div class="mt-2 text-sm text-gray-500 p-2 rounded-md flex justify-between items-center">
             <span id="username" class="font-bold text-slate-700">DPO User</span>
-            <button onclick="handleLogout()" class="text-xs font-semibold text-red-500 hover:underline">Logout</button>
+            <button data-action="handleLogout" class="text-xs font-semibold text-red-500 hover:underline">Logout</button>
         </div>
     </div>
 </div>
@@ -137,7 +137,7 @@
             <h1 class="text-2xl font-black text-slate-800 tracking-tight">Team</h1>
             <p class="text-xs font-semibold text-slate-400 mt-1">Delegate grievance and compliance closure work to Operators in your fiduciary.</p>
         </div>
-        <button onclick="showUserModal('Add Operator')" class="primary-bg text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90 shadow-md transition-all">+ Add Operator</button>
+        <button data-action="showUserModal" data-arg="Add Operator" class="primary-bg text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:opacity-90 shadow-md transition-all">+ Add Operator</button>
     </div>
 
     <div class="card">
@@ -175,7 +175,7 @@
             <div><label class="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Email</label><input type="email" id="user-email" name="email" required class="w-full p-2 border rounded-lg text-sm"></div>
             <div><label class="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Initial Password</label><input type="password" id="user-password" name="password" placeholder="Min 12 chars" class="w-full p-2 border rounded-lg text-sm"></div>
             <div class="flex justify-end gap-3 mt-6">
-                <button type="button" onclick="closeModals()" class="px-4 py-2 text-sm font-bold text-gray-500">Cancel</button>
+                <button type="button" data-action="closeModals" class="px-4 py-2 text-sm font-bold text-gray-500">Cancel</button>
                 <button type="submit" class="bg-[#006A67] text-white px-6 py-2 rounded-lg text-sm font-bold shadow-lg">Save Operator</button>
             </div>
         </form>
@@ -190,207 +190,17 @@
 
         <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 font-mono text-sm font-bold text-teal-700 flex justify-between items-center group">
             <span id="plain-passphrase">---- ---- ---- ---- ----</span>
-            <button onclick="copyPassphrase()" class="text-[10px] font-black text-slate-400 hover:text-teal-600 uppercase tracking-tighter">Copy</button>
+            <button data-action="copyPassphrase" class="text-[10px] font-black text-slate-400 hover:text-teal-600 uppercase tracking-tighter">Copy</button>
         </div>
 
         <div class="p-3 bg-amber-50 text-amber-700 rounded-lg text-[10px] font-bold border border-amber-100 mb-8 uppercase tracking-tight">
             Warning: Generating a new key invalidates any existing recovery phrase.
         </div>
 
-        <button onclick="closeModals()" class="w-full py-3 bg-[#006A67] text-white rounded-xl font-bold uppercase tracking-widest text-xs shadow-lg">Key Shared Successfully</button>
+        <button data-action="closeModals" class="w-full py-3 bg-[#006A67] text-white rounded-xl font-bold uppercase tracking-widest text-xs shadow-lg">Key Shared Successfully</button>
     </div>
 </div>
 
-<script>
-    function esc(s) {
-        if (s == null) return '';
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
-    }
-
-    const API_USERS = '/api/v1/admin/operator';
-    const AUTH_TOKEN = localStorage.getItem('authToken');
-
-    // Team management is a DPO/ADMIN delegation tool -- Operators have no one to delegate to.
-    if (localStorage.getItem('role') === 'OPERATOR') {
-        window.location.href = 'dashboard.html';
-    }
-
-    document.getElementById('username').textContent = localStorage.getItem('username') || 'DPO User';
-
-    function toggleSidebar() {
-        document.getElementById('sidebar').classList.toggle('open');
-        document.getElementById('backdrop').classList.toggle('active');
-    }
-
-    async function loadUsers() {
-        try {
-            const res = await fetch(API_USERS, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "list_users" })
-            });
-            const users = await res.json();
-            if (users.status === 401) {
-                alert("Session Expired: Authentication required");
-                handleLogout();
-                return;
-            }
-            // This DPO's own fiduciary may also contain DPO/ADMIN accounts -- Team only manages Operators.
-            const operators = users.filter(u => u.role === 'OPERATOR');
-
-            const tbody = document.getElementById('user-table-body');
-
-            if (operators.length === 0) {
-                tbody.innerHTML = `
-                <tr>
-                    <td colspan="4" class="px-4 py-12 text-center">
-                        <p class="text-sm font-bold text-slate-500">No Operators yet</p>
-                        <p class="text-xs text-slate-400 mt-1">Add an Operator to delegate grievance and compliance closure work.</p>
-                    </td>
-                </tr>`;
-            } else {
-                tbody.innerHTML = operators.map(u => {
-                    const isInactive = u.status === 'INACTIVE';
-                    const statusColor = isInactive ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700';
-
-                    let actionsHtml = '';
-                    if (isInactive) {
-                        actionsHtml = `<span class="text-[9px] font-black text-slate-400 uppercase tracking-tighter italic self-center">Account Locked</span>`;
-                    } else {
-                        actionsHtml += `<button data-action="edit" data-user-id="${esc(u.user_id)}" class="text-indigo-600 font-bold hover:underline text-xs">Edit</button>`;
-                        actionsHtml += `<button data-action="recovery" data-user-id="${esc(u.user_id)}" class="text-amber-600 font-black hover:underline text-[10px] uppercase tracking-tighter">Recovery Key</button>`;
-                        actionsHtml += `<button data-action="deactivate" data-user-id="${esc(u.user_id)}" class="text-red-500 font-bold hover:underline text-xs">Deactivate</button>`;
-                    }
-
-                    return `
-                    <tr class="hover:bg-slate-50 transition-colors">
-                        <td class="px-4 py-4 font-bold text-slate-700">${esc(u.username)}</td>
-                        <td class="px-4 py-4 text-xs text-slate-500">${esc(u.email)}</td>
-                        <td class="px-4 py-4"><span class="px-3 py-1 text-[10px] font-black rounded-full ${statusColor} uppercase">${esc(u.status)}</span></td>
-                        <td class="px-4 py-4 flex items-center gap-3">
-                            ${actionsHtml}
-                        </td>
-                    </tr>
-                `}).join('');
-            }
-            document.getElementById('user-count').textContent = `Total: ${operators.length} Operator(s)`;
-        } catch (e) { console.error("Load failed", e); }
-    }
-
-    async function editUser(id) {
-        showUserModal('Edit Operator', true);
-        try {
-            const res = await fetch(API_USERS, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "get_user", "user_id": id })
-            });
-            const u = await res.json();
-            document.getElementById('user-id-hidden').value = u.user_id;
-            document.getElementById('user-name').value = u.username;
-            document.getElementById('user-email').value = u.email;
-        } catch (e) { alert("Load Failed"); }
-    }
-
-    async function deactivateUser(id) {
-        if (!confirm("Are you sure you want to deactivate this Operator?")) return;
-        try {
-            const res = await fetch(API_USERS, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "deactivate_user", "user_id": id })
-            });
-            if (res.ok) loadUsers();
-            else alert("Failed to deactivate Operator.");
-        } catch (e) { alert("Action failed"); }
-    }
-
-    async function requestRecoveryKey(userId) {
-        if (!confirm("Initiate Master Recovery Key generation? This will rotate the existing key for this Operator.")) return;
-
-        try {
-            const res = await fetch(API_USERS, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "generate_recovery_key", "user_id": userId })
-            });
-            const data = await res.json();
-            if (data.success) {
-                document.getElementById('plain-passphrase').textContent = data.passphrase;
-                document.getElementById('recovery-modal').style.display = 'flex';
-            } else { alert("Failed to generate key: " + data.message); }
-        } catch (e) { alert("Registry communication error."); }
-    }
-
-    function copyPassphrase() {
-        const text = document.getElementById('plain-passphrase').innerText;
-        const dummy = document.createElement("textarea");
-        document.body.appendChild(dummy);
-        dummy.value = text;
-        dummy.select();
-        document.execCommand("copy");
-        document.body.removeChild(dummy);
-        alert("Copied to clipboard!");
-    }
-
-    function showUserModal(title) {
-        document.getElementById('modal-title').textContent = title;
-        document.getElementById('user-form').reset();
-        document.getElementById('user-id-hidden').value = '';
-        document.getElementById('user-modal').style.display = 'flex';
-    }
-
-    document.getElementById('user-form').onsubmit = async (e) => {
-        e.preventDefault();
-        const formData = new FormData(e.target);
-        const data = Object.fromEntries(formData.entries());
-        const isEdit = !!document.getElementById('user-id-hidden').value;
-
-        // Role and fiduciary are never sent as caller-controlled values here: the server
-        // forces role=OPERATOR and fiduciary_id=caller's own fiduciary for DPO callers.
-        const payload = {
-            "_func": isEdit ? "update_user" : "create_user",
-            "user_id": document.getElementById('user-id-hidden').value,
-            "username": data.name,
-            "email": data.email,
-            "role": "OPERATOR",
-            "password": data.password
-        };
-
-        const res = await fetch(API_USERS, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-            body: JSON.stringify(payload)
-        });
-
-        if (res.ok) { closeModals(); loadUsers(); }
-        else {
-            const err = await res.json().catch(() => ({}));
-            alert("Failed to save: " + (err.message || "Unknown error"));
-        }
-    };
-
-    function closeModals() {
-        document.querySelectorAll('.modal-overlay').forEach(m => m.style.display = 'none');
-    }
-
-    function handleLogout() {
-        localStorage.clear();
-        window.location.href = "../index.html";
-    }
-
-    // Row actions use data-* attributes + delegation instead of inline onclick (CF-02).
-    document.getElementById('user-table-body').addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-action]');
-        if (!btn) return;
-        const id = btn.getAttribute('data-user-id');
-        const action = btn.getAttribute('data-action');
-        if (action === 'edit') editUser(id);
-        else if (action === 'recovery') requestRecoveryKey(id);
-        else if (action === 'deactivate') deactivateUser(id);
-    });
-
-    loadUsers();
-</script>
+<script src="team.js"></script>
 </body>
 </html>

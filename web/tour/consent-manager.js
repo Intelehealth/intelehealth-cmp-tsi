@@ -35,7 +35,7 @@ function displayCustomModal(title, bodyHtml, actionButtonHtml = '') {
     let modalHtml = `
         <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 3000;" id="custom-message-modal-overlay">
             <div style="background-color: white; padding: 25px; border-radius: 8px; max-width: 500px; width: 90%; max-height: 90vh; overflow-y: auto; font-family: Arial, sans-serif; color: #333; position: relative;">
-                <button style="position: absolute; top: 10px; right: 10px; background: none; border: none; font-size: 1.5em; cursor: pointer; color: #888;" onclick="document.getElementById('custom-message-modal-overlay').remove();">&times;</button>
+                <button style="position: absolute; top: 10px; right: 10px; background: none; border: none; font-size: 1.5em; cursor: pointer; color: #888;" data-cm-action="close-modal">&times;</button>
                 <h2 style="color:#006A67; margin-top:0;">${title}</h2>
                 <div style="font-size: 0.95em; margin-top: 15px; line-height: 1.5;">${bodyHtml}</div>
                 <div style="margin-top:20px;">${actionButtonHtml}</div>
@@ -43,6 +43,14 @@ function displayCustomModal(title, bodyHtml, actionButtonHtml = '') {
         </div>
     `;
     document.body.insertAdjacentHTML('beforeend', modalHtml);
+    // P12-08: no inline onclick (CSP script-src 'self'); wire the modal's buttons here.
+    document.getElementById('custom-message-modal-overlay').querySelectorAll('[data-cm-action]').forEach(btn => {
+        btn.onclick = () => {
+            const action = btn.getAttribute('data-cm-action');
+            if (action === 'close-modal') document.getElementById('custom-message-modal-overlay').remove();
+            else if (action === 'manage-preferences') handleManagePreferences();
+        };
+    });
 }
 
 /**
@@ -263,7 +271,7 @@ function renderCookieBanner() {
 function renderPreferenceCenter() {
     if (!currentLanguageContent || !preferenceCenterContent) return;
     let html = `
-        <div style="display:flex; justify-content:flex-end;"><button onclick="closePreferenceCenter()" style="border:none; background:none; font-size:1.5rem; cursor:pointer; color:#888;">&times;</button></div>
+        <div style="display:flex; justify-content:flex-end;"><button id="close-prefs-btn" style="border:none; background:none; font-size:1.5rem; cursor:pointer; color:#888;">&times;</button></div>
         <h2 style="color:#006A67;">${currentLanguageContent.title}</h2>
         <div style="margin-top:20px;">
     `;
@@ -283,6 +291,7 @@ function renderPreferenceCenter() {
     html += `</div><div style="text-align:right; margin-top:20px;"><button id="save-prefs-btn" style="background:#006A67; color:white; border:none; padding:12px 25px; border-radius:4px; cursor:pointer; font-weight:bold;">Save My Choices</button></div>`;
     preferenceCenterContent.innerHTML = html;
     document.getElementById('save-prefs-btn').onclick = handleSavePreferences;
+    document.getElementById('close-prefs-btn').onclick = closePreferenceCenter;
 }
 
 // --- Event Handlers & Tour Logic ---
@@ -362,7 +371,7 @@ async function initConsentManager() {
         if (state && state.purpose_community_engagement) {
             displayCustomModal("Access Granted!", "Your consent for 'Community Engagement' is active. You are eligible to add a post.");
         } else {
-            displayCustomModal("Access Denied", "This feature requires 'Community Engagement' consent.", `<button onclick="handleManagePreferences()" style="background:#006A67; color:white; border:none; padding:10px 20px; border-radius:4px; cursor:pointer;">Update Preferences</button>`);
+            displayCustomModal("Access Denied", "This feature requires 'Community Engagement' consent.", `<button data-cm-action="manage-preferences" style="background:#006A67; color:white; border:none; padding:10px 20px; border-radius:4px; cursor:pointer;">Update Preferences</button>`);
         }
     });
 
@@ -371,7 +380,7 @@ async function initConsentManager() {
         if (state && state.purpose_solution_service_training_showcase) {
             displayCustomModal("Access Granted!", "Verified: 'Solutions & Services Showcase' consent is active. Proceeding to Provider Zone.");
         } else {
-            displayCustomModal("Access Denied", "Provider Zone requires 'Solutions & Services Showcase' consent.", `<button onclick="handleManagePreferences()" style="background:#006A67; color:white; border:none; padding:10px 20px; border-radius:4px; cursor:pointer;">Manage Preferences</button>`);
+            displayCustomModal("Access Denied", "Provider Zone requires 'Solutions & Services Showcase' consent.", `<button data-cm-action="manage-preferences" style="background:#006A67; color:white; border:none; padding:10px 20px; border-radius:4px; cursor:pointer;">Manage Preferences</button>`);
         }
     });
 

@@ -381,6 +381,9 @@ def latest_chain_verification() -> dict | None:
     return db.to_jsonable(row) if row else None
 
 
+AUDIT_READ_MAX = 5000
+
+
 def list_logs(payload: dict) -> list[dict]:
     from .services.base import canonical_purpose_id
 
@@ -404,7 +407,9 @@ def list_logs(payload: dict) -> list[dict]:
     if payload.get("initiator"):
         where.append("initiator = %s")
         params.append(payload["initiator"])
-    limit = int(payload.get("limit") or 50)
+    # R6-c: one read returns at most AUDIT_READ_MAX rows; bulk export is the
+    # AUDIT job, which writes a re-verifiable file instead.
+    limit = min(max(int(payload.get("limit") or 50), 1), AUDIT_READ_MAX)
     params.append(limit)
     return db.to_jsonable(
         db.all(

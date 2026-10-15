@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
@@ -129,9 +130,15 @@ app = FastAPI(title="TSI DPDP CMS Python", docs_url=_docs, redoc_url=_docs and "
 CONTENT_SECURITY_POLICY = "; ".join(
     (
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com",
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
-        "font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com",
+        # P12-08: every page script is a same-origin file (web/vendor/ holds the
+        # pinned Tailwind, qrcodejs and SheetJS builds), and no page carries an
+        # inline script or handler, so script-src is 'self' alone. Styles keep
+        # 'unsafe-inline': the Tailwind runtime injects a <style> element.
+        "script-src 'self'",
+        "script-src-attr 'none'",
+        # No page loads a third-party stylesheet or font any more.
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
         "img-src 'self' data: blob:",
         # The voice-consent tour page calls the Sarvam text-to-speech API.
         "connect-src 'self' https://api.sarvam.ai",
@@ -179,13 +186,18 @@ class _DbJSONResponse(JSONResponse):
         return json.dumps(content, ensure_ascii=False, allow_nan=False, default=str).encode("utf-8")
 
 
-def _json_response(data: Any, status: int = 200) -> Response:
+# The download name of each function that returns a PDF.
+PDF_FILENAMES = {"download_breach_report": "breach-report.pdf"}
+
+
+def _json_response(data: Any, status: int = 200, func: str = "") -> Response:
     if isinstance(data, bytes):
-        # Binary exports (UD-04 PDF) are served as a download.
+        # Binary exports (UD-04 PDF, the P12-12 breach report) are served as a download.
+        filename = PDF_FILENAMES.get(func, "consent-history.pdf")
         return Response(
             data,
             media_type="application/pdf",
-            headers={"Content-Disposition": 'attachment; filename="consent-history.pdf"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     if isinstance(data, str):
         return PlainTextResponse(data)
@@ -217,37 +229,48 @@ async def healthz():
                         status_code=503,
                     )
         return {"status": "ok"}
-    except Exception as exc:
-        return JSONResponse({"status": "unavailable", "detail": str(exc)}, status_code=503)
+    except Exception:
+        # P12-09: the exception text names hosts, roles and schema; it goes to
+        # the log, never to an unauthenticated caller.
+        log.exception("healthz: database check failed")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+
+
+def _health_detail_allowed(request: Request) -> bool:
+    """P12-09: detail only for a caller presenting HEALTHZ_TOKEN."""
+    token = settings.healthz_token
+    supplied = request.headers.get("x-health-token") or ""
+    return bool(token) and hmac.compare_digest(supplied.encode(), token.encode())
 
 
 @app.get("/healthz/worker")
-async def healthz_worker():
+async def healthz_worker(request: Request):
     """R6-d: 503 when the background worker has not completed a cycle within
-    five poll intervals (minimum ten minutes), or a sweep failed last cycle."""
+    five poll intervals (minimum ten minutes), or a sweep failed last cycle.
+    P12-09: the body is the status alone unless X-Health-Token matches."""
     try:
         row = db.one(
             "SELECT last_cycle_at, poll_seconds, failed_sweeps,"
             " EXTRACT(EPOCH FROM NOW() - last_cycle_at) AS age_seconds"
             " FROM worker_heartbeat WHERE worker_name = 'default'"
         )
-    except Exception as exc:
-        return JSONResponse({"status": "unavailable", "detail": str(exc)}, status_code=503)
+    except Exception:
+        log.exception("healthz/worker: heartbeat read failed")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
     if not row:
-        return JSONResponse({"status": "stale", "detail": "the worker has never completed a cycle"}, status_code=503)
+        return JSONResponse({"status": "stale"}, status_code=503)
     limit = max(600, 5 * int(row["poll_seconds"] or 30))
     age = float(row["age_seconds"])
-    body = {
-        "status": "ok",
-        "last_cycle_at": row["last_cycle_at"].isoformat(),
-        "age_seconds": round(age),
-        "failed_sweeps": row["failed_sweeps"] or [],
-    }
-    if age > limit:
-        return JSONResponse({**body, "status": "stale"}, status_code=503)
-    if body["failed_sweeps"]:
-        return JSONResponse({**body, "status": "degraded"}, status_code=503)
-    return body
+    failed = row["failed_sweeps"] or []
+    status = "stale" if age > limit else ("degraded" if failed else "ok")
+    body: dict[str, Any] = {"status": status}
+    if _health_detail_allowed(request):
+        body.update(
+            last_cycle_at=row["last_cycle_at"].isoformat(),
+            age_seconds=round(age),
+            failed_sweeps=failed,
+        )
+    return JSONResponse(body, status_code=200 if status == "ok" else 503)
 
 
 async def payload_from(request: Request) -> dict:
@@ -492,9 +515,22 @@ async def dispatch(request: Request, category: str, service: str, func: str | No
             raise ApiError(400, "Bad Request", "; ".join(errors))
         result = service_cls().handle(ctx)
         status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_", "submit_")) else 200
-        return _json_response(result, status=status)
+        return _json_response(result, status=status, func=ctx.func)
     except ApiError as exc:
         return JSONResponse(error_body(exc.status, exc.error, exc.message, path), status_code=exc.status)
+    except psycopg.errors.DataError:
+        # PT-01: a malformed id, an over-long value or a bad date reaching SQL is
+        # the caller's error. It used to surface as a 500.
+        log.info("Data error on %s", path)
+        return JSONResponse(
+            error_body(400, "Bad Request", "A value is malformed, out of range or too long.", path), status_code=400
+        )
+    except psycopg.errors.UniqueViolation:
+        # P12-06: a duplicate is the caller's conflict, not a server fault.
+        log.info("Unique violation on %s", path)
+        return JSONResponse(
+            error_body(409, "Conflict", "A record with these identifiers already exists.", path), status_code=409
+        )
     except Exception:
         log.exception("Unhandled error on %s", path)
         return JSONResponse(

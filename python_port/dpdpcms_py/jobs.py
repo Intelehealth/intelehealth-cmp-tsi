@@ -10,6 +10,7 @@ from typing import Any
 from . import db
 from .audit import log_event
 from .config import settings
+from .services.base import csv_safe
 from .services.lifecycle import close_purpose_exec
 
 log = logging.getLogger("dpdpcms.jobs")
@@ -632,8 +633,14 @@ def _write_export(job: dict[str, Any]) -> Path:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
+        # PT-02: neutralise formula cells - except in the AUDIT export, whose
+        # cells must stay byte-exact so every row hash recomputes from the file
+        # (P9-08). Open that file as text data, never as a live spreadsheet.
+        audit = str(job["subtype"]).upper() == "AUDIT"
         for row in rows:
-            writer.writerow({key: _csv_value(value) for key, value in row.items()})
+            writer.writerow(
+                {key: _csv_value(value) if audit else csv_safe(_csv_value(value)) for key, value in row.items()}
+            )
     context: dict[str, Any] = {"output_file_path": str(path), "rows": len(rows)}
     if str(job["subtype"]).upper() == "AUDIT":
         # P9-08: ship the chain verdict for the exported range with the file.

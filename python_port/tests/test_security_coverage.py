@@ -4,6 +4,9 @@ DB-backed tests reuse the transaction-per-test fixture of test_integration_db
 and skip without a live Postgres; the rest are pure unit tests.
 """
 
+import json
+from types import SimpleNamespace
+
 import pytest
 from tests.test_integration_db import (
     _DB_READY,
@@ -127,18 +130,20 @@ def test_worker_health_reports_stale_and_failed_sweeps(tx):
 
     from dpdpcms_py import main, worker
 
-    def status():
-        response = asyncio.run(main.healthz_worker())
-        return getattr(response, "status_code", 200), response
+    def status(headers=None):
+        request = SimpleNamespace(headers=headers or {})
+        response = asyncio.run(main.healthz_worker(request))
+        return response.status_code, json.loads(response.body)
 
     with tx.cursor() as cur:
         cur.execute("DELETE FROM worker_heartbeat")
     assert status()[0] == 503
     worker.record_heartbeat({"delivery": {"sent": 1}})
     code, body = status()
-    assert code == 200 and body["status"] == "ok"
+    assert code == 200 and body == {"status": "ok"}  # P12-09: status only
     worker.record_heartbeat({"delivery": {"error": "boom"}})
-    assert status()[0] == 503
+    code, body = status()
+    assert code == 503 and body == {"status": "degraded"}
     with tx.cursor() as cur:
         cur.execute("UPDATE worker_heartbeat SET failed_sweeps = '[]', last_cycle_at = NOW() - INTERVAL '2 hours'")
     assert status()[0] == 503
@@ -154,10 +159,9 @@ def test_tenant_reader_role_sees_only_its_own_tenant(tx):
         fid_b, pol_b = _seed_tenant(cur)
         _seed_consent(cur, fid_a, pol_a, "asha")
         _seed_consent(cur, fid_b, pol_b, "ravi")
+        # P12-05: the mapping lives in an application-owned table.
+        cur.execute("INSERT INTO tsi_reader_tenants (role_name, tenant_id) VALUES ('tsi_tenant_reader', %s)", (fid_a,))
         cur.execute("SET LOCAL ROLE tsi_tenant_reader")
-        cur.execute("SELECT COUNT(*) AS n FROM consent_records")
-        assert cur.fetchone()["n"] == 0  # no tenant named: nothing
-        cur.execute("SELECT set_config('tsi.fiduciary_id', %s, true)", (fid_a,))
         cur.execute("SELECT DISTINCT fiduciary_id::text AS f FROM consent_records")
         assert [r["f"] for r in cur.fetchall()] == [fid_a]
         cur.execute("SELECT COUNT(*) AS n FROM audit_logs WHERE fiduciary_id::text = %s", (fid_b,))
@@ -223,8 +227,9 @@ def test_ci_audits_dependencies():
 def test_client_readers_resolve_aliases_in_the_server_order():
     """P11-10: the record-detail modal and the wallet read id before purpose_id."""
     portal = (REPO / "web" / "rights" / "portal.js").read_text(encoding="utf-8")
-    dashboard = (REPO / "web" / "rights" / "dashboard.html").read_text(encoding="utf-8")
-    wallet = (REPO / "web" / "tour" / "dpdp-wallet.html").read_text(encoding="utf-8")
+    # P12-08: each page's script now lives in its own file.
+    dashboard = (REPO / "web" / "rights" / "dashboard.js").read_text(encoding="utf-8")
+    wallet = (REPO / "web" / "tour" / "dpdp-wallet.js").read_text(encoding="utf-8")
     order = "['data_point_id', 'purpose_id', 'id']"
     assert order in portal and order in wallet
     for page in (dashboard, wallet):

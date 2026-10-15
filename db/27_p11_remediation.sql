@@ -12,8 +12,8 @@
 --          array instead of coercing it, so one UPDATE can no longer replace
 --          every recorded decision.
 --   P11-09 the two legacy template names db/26 kept (PURGE_ONHOLD_NOTIFICATION,
---          EXPIRY_NOTIFICATION) are migrated into live types the engine sends
---          and the console edits; the original rows are archived, not lost.
+--          EXPIRY_NOTIFICATION) are archived with the live type each maps to,
+--          and removed; their text is not merged into the live type (P12-07).
 -- ============================================================================
 
 -- ---- P11-01: one definition of "granted", shared with the application ----------
@@ -117,9 +117,12 @@ $$ LANGUAGE plpgsql;
 -- EXPIRY_NOTIFICATION   -> PURPOSE_CLOSED  (DD-01: purpose closure replaced expiry)
 -- PURGE_ONHOLD_NOTIFICATION -> ERASURE_REQUESTED_NOTIFICATION (the principal's
 --   erasure acknowledgement, which is what reports a request held under law)
--- The DPO's live text wins where both exist; the legacy text fills only the
--- languages the live template lacks. Every legacy row is archived verbatim
--- first, so no text the DPO wrote is destroyed by the merge.
+-- Every legacy row is archived verbatim, with the live type it maps to, and
+-- then removed. P12-07: the legacy text is NOT merged into the live type - it
+-- was written for a different event (an 'on hold' notice is not an erasure
+-- acknowledgement), so a language the live template lacks falls back to the
+-- default text instead. The DPO re-homes archived text by hand; the console
+-- shows it beside the live type.
 CREATE TABLE IF NOT EXISTS notification_message_templates_archive (
     fiduciary_id      UUID NOT NULL,
     notification_type VARCHAR(100) NOT NULL,
@@ -137,18 +140,6 @@ FROM notification_message_templates t
 WHERE t.notification_type IN ('PURGE_ONHOLD_NOTIFICATION', 'EXPIRY_NOTIFICATION')
 ON CONFLICT (fiduciary_id, notification_type) DO UPDATE SET
     messages = EXCLUDED.messages, migrated_to = EXCLUDED.migrated_to, archived_at = NOW();
-
-WITH legacy(old_type, new_type) AS (
-    VALUES ('EXPIRY_NOTIFICATION', 'PURPOSE_CLOSED'),
-           ('PURGE_ONHOLD_NOTIFICATION', 'ERASURE_REQUESTED_NOTIFICATION')
-)
-INSERT INTO notification_message_templates (fiduciary_id, notification_type, messages, last_updated_at)
-SELECT t.fiduciary_id, l.new_type, t.messages, NOW()
-FROM notification_message_templates t JOIN legacy l ON l.old_type = t.notification_type
-WHERE jsonb_typeof(t.messages) = 'object' AND t.messages <> '{}'::jsonb
-ON CONFLICT (fiduciary_id, notification_type) DO UPDATE SET
-    messages = EXCLUDED.messages || notification_message_templates.messages,
-    last_updated_at = NOW();
 
 DELETE FROM notification_message_templates
 WHERE notification_type IN ('PURGE_ONHOLD_NOTIFICATION', 'EXPIRY_NOTIFICATION');

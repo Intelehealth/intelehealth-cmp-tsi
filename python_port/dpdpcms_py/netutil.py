@@ -100,16 +100,18 @@ def resolve_public(host: str) -> str:
 
 
 def outbound_host_allowed(host: str, allowed: tuple[str, ...] | None = None) -> bool:
-    """Rule 14: is `host` an approved destination? True when no allowlist is set.
+    """Rule 14: is `host` an approved destination?
 
-    An entry matches the host itself or any subdomain of it; a leading dot is
-    accepted ('.example.in' and 'example.in' mean the same).
+    True when no allowlist is set (only possible under TSI_DPDP_CMS_ENV=local,
+    P12-11) or when it is the explicit wildcard "*". An entry matches the host
+    itself or any subdomain of it; a leading dot is accepted ('.example.in'
+    and 'example.in' mean the same).
     """
     if allowed is None:
         from .config import settings
 
         allowed = settings.outbound_allowed_hosts
-    if not allowed:
+    if not allowed or "*" in allowed:
         return True
     host = (host or "").lower().rstrip(".")
     for entry in allowed:
