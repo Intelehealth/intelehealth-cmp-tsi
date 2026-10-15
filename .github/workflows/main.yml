@@ -62,6 +62,12 @@ jobs:
           assert not missing, f"requirements.lock is stale; re-run pip-compile (python_port/README.md): {missing}"
           EOF
 
+      # P13-05: the browser libraries in web/vendor/ are outside pip-audit.
+      # Hashes must match the manifest, and any OSV advisory must be accepted
+      # there with a reason and an unexpired review_by date.
+      - name: Audit vendored web libraries
+        run: python scripts/supply_chain/vendor_audit.py
+
       - name: No compiled bytecode in the repository
         run: |
           if git ls-files | grep -E '(\.py[co]$|__pycache__/)'; then

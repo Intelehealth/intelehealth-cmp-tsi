@@ -203,7 +203,8 @@ def test_board_intimation_cannot_be_backdated_or_future_dated(tx):
             fid, {"id": breach, "board_reference": "DPB-1", "intimated_at": (detected + timedelta(hours=1)).isoformat()}
         )
     )
-    assert out["late"] is False  # asserted within the 72 hours
+    # P13-02: recorded 10 days after detection, so late; the assertion is context only.
+    assert out["late"] is True and out["late_as_asserted"] is False
     recorded = datetime.fromisoformat(out["board_notified_at"])
     assert abs((recorded - datetime.now(UTC)).total_seconds()) < 120  # server time, not the asserted one
     with tx.cursor() as cur:
@@ -474,7 +475,7 @@ def test_empty_allowlist_refuses_to_start_outside_local(monkeypatch):
     with pytest.raises(RuntimeError, match="OUTBOUND_ALLOWED_HOSTS"):
         config._outbound_allowed_hosts("production")
     monkeypatch.setenv("OUTBOUND_ALLOWED_HOSTS", "*")
-    assert config._outbound_allowed_hosts("production") == ("*",)
+    assert config._outbound_allowed_hosts("staging") == ("*",)
 
 
 def test_wildcard_allowlist_is_explicitly_unrestricted():

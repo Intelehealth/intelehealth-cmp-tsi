@@ -37,6 +37,16 @@ def resolve_fiduciary(ctx: RequestContext) -> str | None:
     return operator_fiduciary_id(authenticated_user_id(ctx))
 
 
+def policy_fiduciary(ctx: RequestContext) -> str:
+    """P13-01: the tenant a by-id policy operation acts on.
+
+    consent_policies is keyed per tenant (P12-06), so a policy id alone can
+    name rows in several tenants. A tenant-bound caller is pinned to its own
+    tenant; a global ADMIN must name one in the payload, never "all of them".
+    """
+    return str(require(resolve_fiduciary(ctx), "fiduciary_id"))
+
+
 def _policy_purposes(policy_content: Any) -> list[dict]:
     """Purpose objects of the first language block that declares any."""
     if not isinstance(policy_content, dict):
@@ -618,14 +628,10 @@ class PolicyService(Service):
     def get_policy(self, ctx: RequestContext) -> dict:
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
-        where = ["id = %s", "version = %s"]
-        params: list[Any] = [pid, version]
-        if ctx.fiduciary_id:
-            where.append("fiduciary_id = %s")
-            params.append(ctx.fiduciary_id)
+        fid = policy_fiduciary(ctx)
         row = db.one(
-            f"SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE {' AND '.join(where)}",
-            params,
+            "SELECT id AS policy_id, version, fiduciary_id, effective_date, status, jurisdiction, policy_content, created_at, last_updated_at FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+            (pid, version, fid),
         )
         if not row:
             raise ApiError(404, "Not Found", "Policy not found.")
@@ -723,19 +729,13 @@ class PolicyService(Service):
         validate_duration_flags(content)  # PL-01: every purpose is open-ended or time-bound
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
-        scope, scope_params = tenant_filter(ctx)
+        fid = policy_fiduciary(ctx)
         updated = db.execute(
-            f"UPDATE consent_policies SET policy_content = %s, last_updated_at = NOW() WHERE id = %s AND version = %s AND status = 'DRAFT'{scope}",
-            (
-                db.as_jsonb(content),
-                pid,
-                version,
-                *scope_params,
-            ),
+            "UPDATE consent_policies SET policy_content = %s, last_updated_at = NOW() WHERE id = %s AND version = %s AND status = 'DRAFT' AND fiduciary_id = %s",
+            (db.as_jsonb(content), pid, version, fid),
         )
         if updated == 0:
             raise ApiError(400, "Bad Request", "Policy not found or not in DRAFT status.")
-        fid = require(ctx.payload.get("fiduciary_id") or resolve_fiduciary(ctx), "fiduciary_id")
         sync_purpose_lifecycle(fid, content)
         return {"success": True, "message": "Policy updated successfully."}
 
@@ -743,14 +743,13 @@ class PolicyService(Service):
         reject_operator(ctx)
         pid = require(ctx.payload.get("policy_id"), "policy_id")
         version = ctx.payload.get("version") or ""
-        scope, scope_params = tenant_filter(ctx)
+        fid = policy_fiduciary(ctx)
         row = db.one(
-            f"SELECT fiduciary_id, jurisdiction FROM consent_policies WHERE id = %s AND version = %s{scope}",
-            (pid, version, *scope_params),
+            "SELECT jurisdiction FROM consent_policies WHERE id = %s AND version = %s AND fiduciary_id = %s",
+            (pid, version, fid),
         )
         if not row:
             raise ApiError(404, "Not Found", "Policy not found.")
-        fid = str(row["fiduciary_id"])
         db.execute(
             "UPDATE consent_policies SET status = 'UNDER_REVIEW', last_updated_at = NOW() WHERE id = %s AND version = %s AND fiduciary_id = %s AND status = 'DRAFT'",
             (pid, version, fid),
@@ -880,10 +879,10 @@ class PolicyService(Service):
 
     def delete_policy(self, ctx: RequestContext) -> dict:
         reject_operator(ctx)
-        scope, scope_params = tenant_filter(ctx)
+        pid = require(ctx.payload.get("policy_id"), "policy_id")
         updated = db.execute(
-            f"UPDATE consent_policies SET status = 'ARCHIVED', last_updated_at = NOW() WHERE id = %s{scope}",
-            (require(ctx.payload.get("policy_id"), "policy_id"), *scope_params),
+            "UPDATE consent_policies SET status = 'ARCHIVED', last_updated_at = NOW() WHERE id = %s AND fiduciary_id = %s",
+            (pid, policy_fiduciary(ctx)),
         )
         # SEC-12: an archive that did not happen is not reported as done.
         if updated == 0:

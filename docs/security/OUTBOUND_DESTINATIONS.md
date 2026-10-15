@@ -1,6 +1,6 @@
 # Outbound destinations (Rule 14)
 
-Every place the CMS sends personal data, or a principal identifier, outside its own database. Outside `TSI_DPDP_CMS_ENV=local` the application refuses to start unless `OUTBOUND_ALLOWED_HOSTS` is set (`*` means deliberately unrestricted). Any destination not listed there is refused:
+Every place the CMS sends personal data, or a principal identifier, outside its own database. Outside `TSI_DPDP_CMS_ENV=local` the application refuses to start unless `OUTBOUND_ALLOWED_HOSTS` is set (`*` means deliberately unrestricted, and is refused with `TSI_DPDP_CMS_ENV=production`, where the hosts must be listed). Any destination not listed there is refused:
 
 - **webhooks**, at save time and at dispatch;
 - **SMS, push and verifier calls**, at dispatch;

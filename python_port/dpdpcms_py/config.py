@@ -42,6 +42,13 @@ def _outbound_allowed_hosts(environment: str) -> tuple[str, ...]:
             "OUTBOUND_ALLOWED_HOSTS must list the approved outbound destinations (Rule 14) outside "
             "TSI_DPDP_CMS_ENV=local. Set it to '*' to leave destinations unrestricted deliberately."
         )
+    # R14 (workbook v11): in production the allowlist must name the approved
+    # destinations; the '*' opt-out is for local, test and staging only.
+    if "*" in hosts and environment == "production":
+        raise RuntimeError(
+            "OUTBOUND_ALLOWED_HOSTS='*' is refused with TSI_DPDP_CMS_ENV=production: list the approved "
+            "destinations (docs/security/OUTBOUND_DESTINATIONS.md)."
+        )
     return hosts
 
 

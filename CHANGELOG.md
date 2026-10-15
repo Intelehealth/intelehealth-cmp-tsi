@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (428 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (457 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the workbook v11 findings in `test_p13_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -921,11 +921,53 @@ and the DPO register. Each is closed below, with a regression in
   parsed, are 400.
 - Tests: `test_pentest_findings.py`; 427 passed, 1 skipped (428 collected).
 
+### Fixed (Security workbook v11, p14 remediation round)
+
+Workbook v11 (revision 15) re-verified `db2caff`. It left CC-01 Partial on one
+new High finding (P13-01) and raised four Low ones (P13-02..P13-05). Each is
+closed below, with a regression in `test_p13_remediation.py`.
+
+- **P13-01 (CC-01, SA-03)** Since P12-06 made policy ids per tenant, a global
+  ADMIN's `get_policy`, `update_policy`, `publish_policy` and `delete_policy`
+  matched every tenant's copy of the id (a `delete_policy` naming tenant B
+  archived tenant A's live notice).
+  - All four now act on exactly one tenant, `policy_fiduciary(ctx)`: the
+    caller's own for a tenant-bound caller, the payload's `fiduciary_id` for a
+    global ADMIN, which is refused (400) without one.
+  - The DPO console sends the policy's `fiduciary_id` on update and publish.
+  - New pen-test case: same-id policies in two tenants, operated on by a
+    global ADMIN (`pentest/test_authorization.py`).
+- **P13-02 (Rule 7(2))** `record_board_intimation` decides `late` from the
+  server-recorded time. The DPO's asserted time is reported beside it as
+  `late_as_asserted`, and the breach PDF prints both, the assertion marked
+  unverified.
+- **P13-03 (Rule 6(1)(b))** `db/30_p13_remediation.sql`: the tenant-reader RLS
+  policies consult the security-barrier view `tsi_reader_my_tenants`, which
+  returns only the querying role's mappings. The helper
+  `tsi_reader_may_see(role, tenant)`, which let a reader test any role's
+  mapping, is dropped. Readers still cannot read or write `tsi_reader_tenants`.
+- **P13-04 (CC-02)** `language_selected` is an `enum` in the `record_consent`
+  and `request_reconsent` schemas (`en` plus the 22 Eighth Schedule codes),
+  matching `NOTIFICATION_LANGUAGES`, and documented in `python_port/README.md`.
+  Upper-case codes are now refused at the schema.
+- **P13-05 (M-02)** `scripts/supply_chain/vendor_audit.py` runs in the
+  `supply-chain` CI job. It checks every file in `web/vendor/` against
+  `vendor_manifest.json` (SHA-256) and fails on any OSV.dev advisory not
+  accepted there with a reason and an unexpired `review_by` date. The two
+  SheetJS 0.18.5 parsing advisories are accepted until 15 Jan 2027, and a test
+  fails the build if any page calls `XLSX.read`/`XLSX.readFile`.
+- **R14 (Security Coverage)** `OUTBOUND_ALLOWED_HOSTS='*'` is refused when
+  `TSI_DPDP_CMS_ENV=production`; production must list its destinations.
+- DB script: `db/30_p13_remediation.sql` (idempotent).
+- Tests: 456 passed, 1 skipped (457 collected) against Postgres 16 with
+  `db/01..30` applied; pen test 113 passed, 2 remote-only skipped.
+
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
-- **Existing database:** Run `db/13` through `db/29` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
-- **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker. Outside `local`, also set `OUTBOUND_ALLOWED_HOSTS` (or `*`), or the app will not start. Optionally set `HEALTHZ_TOKEN` for health detail.
+- **Existing database:** Run `db/13` through `db/30` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
+- **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker. Outside `local`, also set `OUTBOUND_ALLOWED_HOSTS` (or `*`), or the app will not start. With `TSI_DPDP_CMS_ENV=production`, `*` is refused: list the hosts. Optionally set `HEALTHZ_TOKEN` for health detail.
+- **Global ADMIN policy calls:** send `fiduciary_id` with `get_policy`, `update_policy`, `publish_policy` and `delete_policy`.
 - **Tenant readers:** after db/29, a role in `tsi_tenant_reader` sees nothing until a row in `tsi_reader_tenants` maps it to a tenant; `tsi.fiduciary_id` is no longer read.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
 - **Roles:** Built-in DPO/OPERATOR/AUDITOR permissions are extended by `17`; review custom roles, which now need explicit `<resource>:<action>` grants for every admin function they call.

@@ -14,6 +14,19 @@ refresh the table below.
 
 Verify with `sha256sum web/vendor/*.js`.
 
+Supply-chain audit (P13-05): `scripts/supply_chain/vendor_manifest.json` lists
+every file here with its npm package, version and SHA-256, and
+`scripts/supply_chain/vendor_audit.py` runs in CI. It fails on a file that is not
+in the manifest or does not match its hash, and on any OSV.dev advisory for a
+listed version that is not recorded under `accepted` with a reason and a
+`review_by` date that has not passed. When upgrading, update the manifest too.
+
+SheetJS 0.18.5 carries two accepted advisories (GHSA-4r6h-8v6p-xvw6 prototype
+pollution, GHSA-5pgg-2g8v-p4x9 ReDoS). Both need the library to PARSE a crafted
+file; the console only writes workbooks, and a test fails the build if any page
+calls `XLSX.read`/`XLSX.readFile`. If parsing is ever needed, move to a
+maintained SheetJS build (0.20.2 or later from the SheetJS CDN) first.
+
 Note: the Tailwind Play runtime generates CSS in the browser and injects it as a
 `<style>` element, so `style-src` still needs `'unsafe-inline'` (the pages also
 use inline `style` attributes). It does not use `eval`/`new Function`, so

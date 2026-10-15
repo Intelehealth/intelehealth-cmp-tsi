@@ -1248,11 +1248,16 @@ def _fmt_time(value: object) -> str:
 
 def breach_report_lines(breach: dict) -> list[str]:
     """The lines of the Rule 7 breach report PDF (P12-12)."""
-    late = None
+    # P13-02: 'late' is judged on the recorded time; the DPO's assertion is
+    # printed beside it as unverified context.
+    late = late_as_asserted = None
     deadline = breach.get("board_notification_deadline")
-    intimated = breach.get("board_intimated_at_asserted") or breach.get("board_notified_at")
-    if deadline and intimated:
-        late = intimated > deadline
+    recorded = breach.get("board_notified_at")
+    asserted = breach.get("board_intimated_at_asserted")
+    if deadline and recorded:
+        late = recorded > deadline
+    if deadline and asserted:
+        late_as_asserted = asserted > deadline
     categories = breach.get("affected_data_categories") or []
     return [
         f"Breach id: {breach['id']}",
@@ -1286,7 +1291,8 @@ def breach_report_lines(breach: dict) -> list[str]:
         f"Intimation recorded in the CMS: {_fmt_time(breach.get('board_notified_at'))}",
         f"Intimation time asserted by the DPO: {_fmt_time(breach.get('board_intimated_at_asserted'))}",
         f"Board reference: {breach.get('board_reference') or '-'}",
-        f"Late: {'-' if late is None else ('yes' if late else 'no')}",
+        f"Late (by the recorded time): {'-' if late is None else ('yes' if late else 'no')}",
+        f"Late by the DPO's asserted time (unverified): {'-' if late_as_asserted is None else ('yes' if late_as_asserted else 'no')}",
         "",
         "Detailed report (Rule 7(2)(b))",
         f"Submitted: {_fmt_time(breach.get('board_report_submitted_at'))}",
@@ -1562,8 +1568,12 @@ class BreachService(Service):
 
         P12-04: board_notified_at is the server's time of recording, never the
         caller's. An intimation made earlier through another channel may be
-        asserted as intimated_at; it is kept in its own column, must fall
-        between detection and now, and is what decides 'late'.
+        asserted as intimated_at; it is kept in its own column and must fall
+        between detection and now.
+
+        P13-02: 'late' is decided by the recorded time only. An assertion is
+        unverified, so it is reported beside it as late_as_asserted - context
+        for the Board, never a way to turn a late record into an on-time one.
         """
         breach = self._breach_row(ctx)
         if breach.get("board_notified_at"):
@@ -1583,7 +1593,8 @@ class BreachService(Service):
             "UPDATE breach_incidents SET board_notified_at = NOW(), board_intimated_at_asserted = %s,"
             " board_reference = %s, board_notified_by = %s, last_updated_at = NOW() WHERE id = %s"
             " RETURNING board_notified_at, board_intimated_at_asserted,"
-            " COALESCE(board_intimated_at_asserted, board_notified_at) > board_notification_deadline AS late",
+            " board_notified_at > board_notification_deadline AS late,"
+            " board_intimated_at_asserted > board_notification_deadline AS late_as_asserted",
             (asserted, reference, authenticated_user_id(ctx), breach["id"]),
         )
         log_event(
@@ -1598,6 +1609,7 @@ class BreachService(Service):
                 "recorded_at": row["board_notified_at"].isoformat(),
                 "intimated_at_asserted": asserted.isoformat() if asserted else None,
                 "late": bool(row["late"]),
+                "late_as_asserted": row["late_as_asserted"],
             },
         )
         return {
@@ -1606,4 +1618,5 @@ class BreachService(Service):
             "board_notified_at": row["board_notified_at"].isoformat(),
             "intimated_at_asserted": asserted.isoformat() if asserted else None,
             "late": bool(row["late"]),
+            "late_as_asserted": row["late_as_asserted"],
         }

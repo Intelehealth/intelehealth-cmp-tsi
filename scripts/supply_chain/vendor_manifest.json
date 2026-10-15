@@ -1,0 +1,44 @@
+{
+  "_comment": "P13-05: the third-party scripts served from web/vendor/, audited by vendor_audit.py in CI. An advisory is tolerated only while it is listed under 'accepted' with a reason and a review_by date that has not passed.",
+  "libraries": [
+    {
+      "file": "tailwindcss-3.4.16.js",
+      "ecosystem": "npm",
+      "package": "tailwindcss",
+      "version": "3.4.16",
+      "sha256": "3f81aa7f6ecdb1acc14c202e513dfee00b6c7703cd81ce1be25bf5215a92e8cb",
+      "accepted": []
+    },
+    {
+      "file": "qrcode-1.0.0.min.js",
+      "ecosystem": "npm",
+      "package": "qrcodejs",
+      "version": "1.0.0",
+      "sha256": "c541ef06327885a8415bca8df6071e14189b4855336def4f36db54bde8484f36",
+      "accepted": []
+    },
+    {
+      "file": "xlsx-0.18.5.full.min.js",
+      "ecosystem": "npm",
+      "package": "xlsx",
+      "version": "0.18.5",
+      "sha256": "c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99",
+      "accepted": [
+        {
+          "id": "GHSA-4r6h-8v6p-xvw6",
+          "aliases": ["CVE-2023-30533"],
+          "reason": "Prototype pollution when PARSING a crafted file. The console only writes workbooks (XLSX.utils, XLSX.writeFile); no page calls XLSX.read/readFile, and tests/test_p13_remediation.py fails the build if one does.",
+          "reviewed": "2026-10-15",
+          "review_by": "2027-01-15"
+        },
+        {
+          "id": "GHSA-5pgg-2g8v-p4x9",
+          "aliases": ["CVE-2024-22363"],
+          "reason": "ReDoS when PARSING a crafted file. Unreachable for the same reason: the console never parses spreadsheets.",
+          "reviewed": "2026-10-15",
+          "review_by": "2027-01-15"
+        }
+      ]
+    }
+  ]
+}

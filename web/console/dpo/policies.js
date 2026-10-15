@@ -38,6 +38,8 @@
     let tableBody, searchInput, statusFilter, policyModalOverlay, policyForm, errorMessageP;
     let policyIdHidden, policyIdInput, policyJurisdictionSelect;
     let parsedPolicyJson = null;
+    // P13-01: policy ids are per tenant; every by-id call names the tenant.
+    let editingFiduciaryId = null;
 
     async function loadPolicies() {
         const searchTerm = searchInput.value || "";
@@ -150,6 +152,7 @@
                 body: JSON.stringify({ "_func": "get_policy", "policy_id": id, "fiduciary_id": fid })
             });
             const p = await res.json();
+            editingFiduciaryId = p.fiduciary_id || fid;
             policyIdInput.value = id;
             policyIdInput.disabled = true;
             policyIdHidden.value = id;
@@ -192,6 +195,7 @@
         document.getElementById('validation-errors').classList.add('hidden');
         document.getElementById('error-list').innerHTML = '';
         policyIdHidden.value = '';
+        editingFiduciaryId = null;
         policyIdInput.disabled = false;
         document.getElementById('ropa-review-panel').style.display = 'none';
         document.getElementById('save-policy-btn').textContent = 'Next →';
@@ -262,7 +266,8 @@
                 "_func": isEditing ? "update_policy" : "create_policy",
                 "policy_id": isEditing ? policyIdHidden.value : policyIdInput.value.trim(),
                 "policy_content": json,
-                "jurisdiction": policyJurisdictionSelect.value
+                "jurisdiction": policyJurisdictionSelect.value,
+                "fiduciary_id": (isEditing && editingFiduciaryId) || localStorage.getItem('fiduciary_id')
             };
 
             const errArea = document.getElementById('validation-errors');
@@ -279,7 +284,7 @@
                 const data = await res.json();
                 if (res.ok && (data.success || data.policy_id)) {
                     const savedPolicyId = data.policy_id || (isEditing ? policyIdHidden.value : policyIdInput.value.trim());
-                    const fidId = localStorage.getItem('fiduciary_id');
+                    const fidId = payload.fiduciary_id;
                     const pubRes = await fetch(API_URL_POLICY, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },

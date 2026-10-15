@@ -454,7 +454,7 @@ def test_deactivate_user_404_when_no_row(monkeypatch):
     [
         ("delete_app", {"app_id": "missing"}, "app"),
         ("delete_fiduciary", {"fiduciary_id": "missing"}, "fiduciary"),
-        ("delete_policy", {"policy_id": "missing"}, "policy"),
+        ("delete_policy", {"policy_id": "missing", "fiduciary_id": "f-1"}, "policy"),
     ],
 )
 def test_catalog_deletes_404_when_no_row(monkeypatch, func, payload, service):

@@ -44,4 +44,5 @@ remote-only checks (`/docs` hidden; HTTP redirects to HTTPS).
 | --- | --- | --- | --- | --- | --- |
 | 15 Oct 2026 | Automated suite | Local, `p11_changes` + v10 remediation | Automated (`python_port/pentest/`) | 2 findings, both fixed; 112/112 refused | This page |
 | 15 Oct 2026 | Automated suite | CI (GitHub Actions), `p12_changes` | Automated | 1 finding (PT-03), fixed; 112/112 refused after the fix | This page |
+| 15 Oct 2026 | Automated suite | Local, `p12_changes` + v11 remediation | Automated | Added the same-id cross-tenant policy case (P13-01, a global ADMIN acting on every tenant's copy of a policy id); it failed on the old code and is refused after the fix. 113/113 refused, 2 remote-only skipped | This page |
 | | External authenticated test | Staging | | | |
