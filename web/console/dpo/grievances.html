@@ -207,6 +207,7 @@
 <main class="flex-1 p-4 lg:p-8 overflow-y-auto">
     <div class="flex justify-between items-center mb-6">
         <h1 class="text-2xl font-black text-slate-800 tracking-tight">Grievance Management</h1>
+        <button type="button" id="log-grievance-btn" data-action="openLogGrievance" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">+ Log Grievance</button>
     </div>
 
     <!-- Grievance List Card -->
@@ -232,6 +233,7 @@
                 <tr class="table-header">
                     <th class="px-4 py-3 text-sm">ID</th>
                     <th class="px-4 py-3 text-sm">Type</th>
+                    <th class="px-4 py-3 text-sm">Channel</th>
                     <th class="px-4 py-3 text-sm">Subject</th>
                     <th class="px-4 py-3 text-sm">Submitted</th>
                     <th class="px-4 py-3 text-sm">Status</th>
@@ -265,6 +267,7 @@
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm mb-4">
             <div class="space-y-1">
                 <p><strong>Type:</strong> <span id="detail-type"></span></p>
+                <p><strong>Channel:</strong> <span id="detail-channel"></span></p>
                 <p><strong>Submitted By:</strong> <span id="detail-user-id"></span></p>
                 <p><strong>Submitted On:</strong> <span id="detail-date"></span></p>
             </div>
@@ -325,6 +328,56 @@
             <div class="modal-footer">
                 <button type="button" id="close-modal-btn-inner" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Close</button>
                 <button type="submit" id="update-status-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Update Grievance Status</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Modal for a DPO-logged grievance (one that arrived by email, phone or letter, not via the app) -->
+<div id="log-grievance-modal-overlay" class="modal-overlay">
+    <div class="modal-content" style="max-width: 600px;">
+        <h2 class="text-2xl font-semibold primary-text mb-2">Log a Grievance</h2>
+        <p class="text-sm text-gray-500 mb-4">For a grievance that reached you outside the principal's usual self-service flow (an email, a phone call, a letter), so it is tracked in the same queue and against the same SLA as one submitted through the app. This will be recorded against your operator account.</p>
+        <form id="log-grievance-form" class="space-y-3">
+            <div>
+                <label for="log-grievance-user-id" class="block text-sm font-medium text-gray-700">Data Principal Identifier (email or mobile)</label>
+                <input type="text" id="log-grievance-user-id" name="user_id" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm" placeholder="e.g. name@example.com">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label for="log-grievance-channel" class="block text-sm font-medium text-gray-700">How it was received</label>
+                    <select id="log-grievance-channel" name="channel" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+                        <option value="EMAIL">Email</option>
+                        <option value="PHONE">Phone</option>
+                        <option value="LETTER">Letter</option>
+                        <option value="IN_PERSON">In Person</option>
+                        <option value="OTHER">Other</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="log-grievance-type" class="block text-sm font-medium text-gray-700">Category</label>
+                    <select id="log-grievance-type" name="type" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm">
+                        <option value="GENERAL_COMPLAINT">General Complaint</option>
+                        <option value="ERASURE_REQUEST">Erasure Request</option>
+                        <option value="DATA_ACCESS_REQUEST">Data Access Request</option>
+                        <option value="CORRECTION_REQUEST">Correction Request</option>
+                        <option value="CONSENT_COMPLAINT">Consent Complaint</option>
+                        <option value="DATA_HANDLING_COMPLAINT">Data Handling Complaint</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label for="log-grievance-subject" class="block text-sm font-medium text-gray-700">Subject</label>
+                <input type="text" id="log-grievance-subject" name="subject" required maxlength="255" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm" placeholder="Short summary">
+            </div>
+            <div>
+                <label for="log-grievance-description" class="block text-sm font-medium text-gray-700">Description</label>
+                <textarea id="log-grievance-description" name="description" rows="4" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm" placeholder="What the principal told you, in as much detail as they gave..."></textarea>
+            </div>
+            <p id="log-grievance-error" class="text-sm text-red-600 hidden"></p>
+            <div class="modal-footer">
+                <button type="button" id="log-grievance-cancel-btn" data-action="closeLogGrievance" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-300">Cancel</button>
+                <button type="submit" id="log-grievance-submit-btn" class="primary-bg text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-opacity-90">Log Grievance</button>
             </div>
         </form>
     </div>

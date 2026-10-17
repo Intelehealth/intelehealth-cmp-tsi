@@ -33,6 +33,17 @@
       "type": "array",
       "items": {}
     },
+    "channel": {
+      "type": "string",
+      "enum": [
+        "PORTAL",
+        "EMAIL",
+        "PHONE",
+        "LETTER",
+        "IN_PERSON",
+        "OTHER"
+      ]
+    },
     "language": {
       "type": "string"
     },

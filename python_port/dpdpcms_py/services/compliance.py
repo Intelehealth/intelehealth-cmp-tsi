@@ -44,6 +44,7 @@ PURGE_COMPLETION_STATUSES = {"COMPLETED", "PURGE_COMPLETED"}
 
 # GR-02: the complaint categories the rights portal offers, plus the two
 # consent-specific ones the BRD names (consent and data handling).
+GRIEVANCE_CHANNELS = ("PORTAL", "EMAIL", "PHONE", "LETTER", "IN_PERSON", "OTHER")
 GRIEVANCE_TYPES = {
     "GENERAL_COMPLAINT",
     "ERASURE_REQUEST",
@@ -729,6 +730,13 @@ class GrievanceService(Service):
         if grievance_type not in GRIEVANCE_TYPES:
             raise ApiError(400, "Bad Request", f"type must be one of {sorted(GRIEVANCE_TYPES)}.")
         sla_days = 7 if grievance_type == "ERASURE_REQUEST" else 30
+        # How the grievance arrived. Only a console operator logging an offline
+        # complaint may name a channel; principals and API callers are PORTAL.
+        channel = "PORTAL"
+        if ctx.operator_id and ctx.payload.get("channel"):
+            channel = str(ctx.payload["channel"]).strip().upper()
+            if channel not in GRIEVANCE_CHANNELS:
+                raise ApiError(400, "Bad Request", f"channel must be one of {list(GRIEVANCE_CHANNELS)}.")
         consent_record_id = ctx.payload.get("consent_record_id")
         # GR-14: the complaint may be linked to the consent record it concerns.
         if consent_record_id:
@@ -756,9 +764,9 @@ class GrievanceService(Service):
             INSERT INTO grievances
                 (id, user_id, fiduciary_id, type, subject, description,
                  submission_timestamp, status, communication_log, attachments, due_date,
-                 reference_number, consent_record_id, language)
+                 reference_number, consent_record_id, language, channel)
             VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), 'NEW', %s, %s,
-                    NOW() + make_interval(days => %s), %s, %s, %s)
+                    NOW() + make_interval(days => %s), %s, %s, %s, %s)
             RETURNING id, reference_number
             """,
             (
@@ -773,6 +781,7 @@ class GrievanceService(Service):
                 reference_number,
                 consent_record_id,
                 language,
+                channel,
             ),
         )
         gid = str(row["id"])

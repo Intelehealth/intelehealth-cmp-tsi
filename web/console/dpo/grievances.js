@@ -4,6 +4,8 @@
 (function wireStaticHandlers() {
     const clickHandlers = {
         handleLogout: () => handleLogout(),
+        openLogGrievance: () => openLogGrievance(),
+        closeLogGrievance: () => closeLogGrievance(),
     };
     document.querySelectorAll('[data-action]').forEach((el) => {
         const fn = clickHandlers[el.getAttribute('data-action')];
@@ -83,6 +85,12 @@
         return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(String(status || '').replace(/_/g, ' '))}</span>`;
     }
 
+    function createChannelBadge(channel) {
+        const value = channel || 'PORTAL';
+        const colorClass = value === 'PORTAL' ? 'bg-gray-100 text-gray-800' : 'bg-purple-100 text-purple-800';
+        return `<span class="px-3 py-1 text-xs font-medium rounded-full ${colorClass}">${esc(value.replace(/_/g, ' '))}</span>`;
+    }
+
     function calculateDeadlineDisplay(deadline,status) {
         if (!deadline) return 'N/A';
         const now = new Date();
@@ -104,6 +112,7 @@
         row.innerHTML = `
             <td class="px-4 py-3 text-sm text-gray-600">...${esc(grievance.grievance_id.slice(-8))}</td>
             <td class="px-4 py-3 text-sm font-medium text-gray-900">${esc(grievance.type.replace(/_/g, ' '))}</td>
+            <td class="px-4 py-3 text-sm text-gray-600">${createChannelBadge(grievance.channel)}</td>
             <td class="px-4 py-3 text-sm text-gray-600">${esc(grievance.subject || 'N/A')}</td>
             <td class="px-4 py-3 text-sm text-gray-600">${esc(new Date(grievance.submission_timestamp).toLocaleDateString())}</td>
             <td class="px-4 py-3 whitespace-nowrap text-sm">${createStatusBadge(status)}</td>
@@ -151,7 +160,7 @@
 
 
     async function loadGrievances(searchTerm = "") {
-        tableBody.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-gray-500">Loading Grievance data...</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-gray-500">Loading Grievance data...</td></tr>`;
         errorMessageP.classList.add('hidden');
 
         try {
@@ -191,7 +200,7 @@
                 tableBody.innerHTML = '';
 
                 if (grievances.length === 0) {
-                    tableBody.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-gray-500">No grievances found matching criteria.</td></tr>`;
+                    tableBody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-gray-500">No grievances found matching criteria.</td></tr>`;
                 } else {
                     grievances.forEach(g => {
                         tableBody.appendChild(createGrievanceRow(g));
@@ -204,7 +213,7 @@
 
         } catch (error) {
             console.error("Error loading Grievances:", error);
-            tableBody.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-red-600">
+            tableBody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-red-600">
                 Error connecting to the Grievance API.
             </td></tr>`;
             errorMessageP.classList.remove('hidden');
@@ -249,6 +258,7 @@
 
         // Populate modal details
         document.getElementById('modal-grievance-id').textContent = grievance.id;
+        document.getElementById('detail-channel').innerHTML = createChannelBadge(grievance.channel);
         document.getElementById('detail-user-id').textContent = grievance.user_id;
         document.getElementById('detail-date').textContent = new Date(grievance.submission_timestamp).toLocaleString();
         document.getElementById('detail-status').innerHTML = createStatusBadge(grievance.status);
@@ -465,6 +475,64 @@
 
     // Attachment Upload
     document.getElementById('upload-attachment-btn').addEventListener('click', uploadAttachment);
+
+    // --- DPO-logged grievance (Log Grievance) ---
+    const logGrievanceModalOverlay = document.getElementById('log-grievance-modal-overlay');
+    const logGrievanceForm = document.getElementById('log-grievance-form');
+    const logGrievanceError = document.getElementById('log-grievance-error');
+
+    function openLogGrievance() {
+        logGrievanceForm.reset();
+        logGrievanceError.classList.add('hidden');
+        logGrievanceModalOverlay.style.display = 'flex';
+    }
+
+    function closeLogGrievance() {
+        logGrievanceModalOverlay.style.display = 'none';
+    }
+
+    logGrievanceForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        logGrievanceError.classList.add('hidden');
+
+        const payload = {
+            "_func": "submit_grievance",
+            "user_id": document.getElementById('log-grievance-user-id').value.trim(),
+            "fiduciary_id": localStorage.getItem('fiduciary_id'),
+            "channel": document.getElementById('log-grievance-channel').value,
+            "type": document.getElementById('log-grievance-type').value,
+            "subject": document.getElementById('log-grievance-subject').value.trim(),
+            "description": document.getElementById('log-grievance-description').value.trim()
+        };
+
+        const submitBtn = document.getElementById('log-grievance-submit-btn');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Logging...';
+
+        try {
+            const response = await fetch(API_URL_GRIEVANCE, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify(payload)
+            });
+            const responseData = await response.json();
+
+            if (response.ok) {
+                closeLogGrievance();
+                alert(`Grievance logged (Reference: ${responseData.reference_number || responseData.grievance_id}).`);
+                loadGrievances(searchInput.value.trim());
+            } else {
+                logGrievanceError.textContent = responseData.message || `Failed to log grievance (status ${response.status}).`;
+                logGrievanceError.classList.remove('hidden');
+            }
+        } catch (error) {
+            logGrievanceError.textContent = "Network error: could not reach the API.";
+            logGrievanceError.classList.remove('hidden');
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Log Grievance';
+        }
+    });
 
     // Handle Operator Assignment (DPO/ADMIN only)
     if (!IS_OPERATOR) {
