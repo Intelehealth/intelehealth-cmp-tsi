@@ -15,6 +15,7 @@ from .context import RequestContext
 from .errors import ApiError, error_body
 from .security import api_key_valid, bearer_token, decode_token
 from .services import SERVICE_REGISTRY
+from .services.base import same_principal
 from .services.consent import resolve_wallet_action
 from .services.roles import FUNC_PERMISSIONS, MFA_EXEMPT_FUNCS, READ_PREFIXES, enforce_role_permission
 from .validators import validate_payload
@@ -458,7 +459,7 @@ def authenticate(ctx: RequestContext) -> None:
             ctx.principal_user_id = str(principal_claims.get("sub"))
             ctx.auth_via_principal_jwt = True
             ctx.session_id = str(principal_claims.get("jti") or "") or None
-            if ctx.payload.get("user_id") and ctx.payload["user_id"] != ctx.principal_user_id:
+            if ctx.payload.get("user_id") and not same_principal(ctx.payload["user_id"], ctx.principal_user_id):
                 raise ApiError(
                     403, "Forbidden", "User ID mismatch: token does not authorize access to the requested principal."
                 )

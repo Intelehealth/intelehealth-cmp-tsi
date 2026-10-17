@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .. import db, principal_otp
+from .. import db, pii, principal_otp
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
@@ -27,8 +27,28 @@ def _fid(ctx: RequestContext) -> str:
     return require(resolve_fiduciary(ctx), "fiduciary_id")
 
 
-def _consent_row(row: dict | None) -> dict | None:
-    return db.to_jsonable(row) if row else None
+# Principal identifiers are stored as <col>_enc (pgp ciphertext) and <col>_hmac
+# (lookup key). Every match goes through the HMAC; a read decrypts the pair
+# back to <col> and hands it through pii.principal_view (masked for operators).
+_USER_MATCH = f"user_id_hmac = {pii.HMAC_SQL}"
+# SELECT list for a full consent_records row with the identifier decrypted;
+# bind *db.bind_key() ahead of the WHERE parameters.
+_CONSENT_COLUMNS = f"*, {pii.dec_sql('user_id_enc')} AS user_id"
+
+
+def _principal_row(ctx: RequestContext, row: dict, *columns: str) -> dict:
+    """Drop each column's _enc/_hmac pair and show its decrypted value as the caller may see it."""
+    out = db.to_jsonable(row)
+    for column in columns:
+        out.pop(f"{column}_enc", None)
+        out.pop(f"{column}_hmac", None)
+        if column in out:
+            out[column] = pii.principal_view(ctx, out[column])
+    return out
+
+
+def _consent_row(ctx: RequestContext, row: dict | None) -> dict | None:
+    return _principal_row(ctx, row, "user_id") if row else None
 
 
 NOTIF_CONSENT_GIVEN = "CONSENT_GIVEN_NOTIFICATION"
@@ -290,8 +310,9 @@ def _raise_consent_alert(fiduciary_id: str, alert_type: str, record_id: str | No
 
 def _notify_principal(user_id: str, fiduciary_id: str, notification_type: str) -> None:
     db.execute(
-        "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('PRINCIPAL', %s, %s, %s)",
-        (user_id, fiduciary_id, notification_type),
+        "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id, notification_type)"
+        f" VALUES ('PRINCIPAL', {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s)",
+        (*pii.enc_params(user_id), *pii.hmac_params(user_id), fiduciary_id, notification_type),
     )
 
 
@@ -354,8 +375,8 @@ class ConsentService(Service):
         # and cannot be flipped to ADULT over the wire, since nothing downstream
         # compares the two values.
         stored = db.one(
-            "SELECT age_category FROM data_principal WHERE user_id = %s AND fiduciary_id = %s",
-            (user_id, fid),
+            f"SELECT age_category FROM data_principal WHERE {_USER_MATCH} AND fiduciary_id = %s",
+            (*pii.hmac_params(user_id), fid),
         )
         stored_age = str(stored["age_category"]).strip().upper() if stored and stored.get("age_category") else None
         if stored_age == "MINOR" and age_category == "ADULT":
@@ -368,16 +389,19 @@ class ConsentService(Service):
         if effective_age == "MINOR":
             # CC-05: a minor's consent always rests on a VERIFIED guardian log;
             # naming a guardian_id alone is an assertion, not a verification.
-            where = "child_principal_id = %s AND fiduciary_id = %s AND verification_status = 'VERIFIED'"
-            params: list[Any] = [user_id, fid]
+            where = (
+                f"child_principal_id_hmac = {pii.HMAC_SQL} AND fiduciary_id = %s AND verification_status = 'VERIFIED'"
+            )
+            params: list[Any] = [*db.bind_key(), *pii.hmac_params(user_id), fid]
             if guardian_id:
-                where += " AND guardian_principal_id = %s"
-                params.append(guardian_id)
+                where += f" AND guardian_principal_id_hmac = {pii.HMAC_SQL}"
+                params.extend(pii.hmac_params(guardian_id))
             if verification_log_id:
                 where += " AND id = %s"
                 params.append(verification_log_id)
             parent_log = db.one(
-                f"SELECT id, guardian_principal_id FROM parental_verification_logs WHERE {where} ORDER BY verified_at DESC LIMIT 1",
+                f"SELECT id, {pii.dec_sql('guardian_principal_id_enc')} AS guardian_principal_id"
+                f" FROM parental_verification_logs WHERE {where} ORDER BY verified_at DESC LIMIT 1",
                 params,
             )
             if not parent_log:
@@ -391,24 +415,26 @@ class ConsentService(Service):
             cur.execute(
                 # CW-03/UD-05: a principal holds one active record per policy. Recording
                 # consent under one policy must not retire their consent under another.
-                "UPDATE consent_records SET is_active_consent = FALSE, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s AND policy_id = %s AND is_active_consent IS TRUE RETURNING id",
-                (user_id, fid, policy_id),
+                "UPDATE consent_records SET is_active_consent = FALSE, last_updated_at = NOW()"
+                f" WHERE {_USER_MATCH} AND fiduciary_id = %s AND policy_id = %s AND is_active_consent IS TRUE RETURNING id",
+                (*pii.hmac_params(user_id), fid, policy_id),
             )
             prior = cur.fetchone()
             cur.execute(
-                """
+                f"""
                 INSERT INTO consent_records
-                    (id, user_id, fiduciary_id, policy_id, policy_version, timestamp,
+                    (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, timestamp,
                      jurisdiction, language_selected, consent_status_general, consent_mechanism,
                      ip_address, user_agent, data_point_consents, is_active_consent,
                      verification_log_id, session_id, session_source, client_metadata,
                      supersedes_record_id, created_at, last_updated_at)
-                VALUES (uuid_generate_v4(), %s, %s, %s, %s, NOW(), %s, %s, %s, %s,
+                VALUES (uuid_generate_v4(), {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s, %s, NOW(), %s, %s, %s, %s,
                         %s, %s, %s, TRUE, %s, %s, %s, %s, %s, NOW(), NOW())
                 RETURNING id
                 """,
                 (
-                    user_id,
+                    *pii.enc_params(user_id),
+                    *pii.hmac_params(user_id),
                     fid,
                     policy_id,
                     version,
@@ -428,21 +454,26 @@ class ConsentService(Service):
             )
             cid = str(cur.fetchone()["id"])
             cur.execute(
-                """
-                INSERT INTO data_principal (user_id, fiduciary_id, last_consent_mechanism, age_category, guardian_id, verification_status)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id, fiduciary_id) DO UPDATE SET
+                f"""
+                INSERT INTO data_principal
+                    (user_id_enc, user_id_hmac, fiduciary_id, last_consent_mechanism, age_category,
+                     guardian_id_enc, guardian_id_hmac, verification_status)
+                VALUES ({pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s, %s, {pii.ENC_SQL}, {pii.HMAC_SQL}, %s)
+                ON CONFLICT (user_id_hmac, fiduciary_id) DO UPDATE SET
                     last_consent_mechanism = EXCLUDED.last_consent_mechanism,
                     age_category = COALESCE(EXCLUDED.age_category, data_principal.age_category),
-                    guardian_id = COALESCE(EXCLUDED.guardian_id, data_principal.guardian_id),
+                    guardian_id_enc = COALESCE(EXCLUDED.guardian_id_enc, data_principal.guardian_id_enc),
+                    guardian_id_hmac = COALESCE(EXCLUDED.guardian_id_hmac, data_principal.guardian_id_hmac),
                     verification_status = COALESCE(EXCLUDED.verification_status, data_principal.verification_status)
                 """,
                 (
-                    user_id,
+                    *pii.enc_params(user_id),
+                    *pii.hmac_params(user_id),
                     fid,
                     observed["mechanism"],
                     effective_age,
-                    guardian_id,
+                    *pii.enc_params(guardian_id),
+                    *pii.hmac_params(guardian_id),
                     "GUARDIAN_VERIFIED" if effective_age == "MINOR" else None,
                 ),
             )
@@ -516,7 +547,7 @@ class ConsentService(Service):
         mechanism = str(require(payload.get("verification_mechanism"), "verification_mechanism")).upper()
         if mechanism not in GUARDIAN_MECHANISMS:
             raise ApiError(400, "Bad Request", f"verification_mechanism must be one of {sorted(GUARDIAN_MECHANISMS)}.")
-        if guardian == child:
+        if pii.normalize(str(guardian)) == pii.normalize(str(child)):
             raise ApiError(400, "Bad Request", "A principal cannot act as their own guardian.")
         ref_id = payload.get("verification_ref_id")
         status, detail = "ASSERTED", "Recorded as an assertion; only EXISTING_ACCOUNT or DIGILOCKER can verify."
@@ -525,8 +556,8 @@ class ConsentService(Service):
             # ADULT, never by the column default. A principal whose age the CMS
             # has not attested (NULL) cannot vouch for a minor.
             adult = db.one(
-                "SELECT 1 FROM data_principal WHERE user_id = %s AND fiduciary_id = %s AND age_category = 'ADULT'",
-                (guardian, fid),
+                f"SELECT 1 FROM data_principal WHERE {_USER_MATCH} AND fiduciary_id = %s AND age_category = 'ADULT'",
+                (*pii.hmac_params(guardian), fid),
             )
             status = "VERIFIED" if adult else "REJECTED"
             detail = None if adult else "Guardian has no adult account with this fiduciary."
@@ -534,16 +565,20 @@ class ConsentService(Service):
             require(ref_id, "verification_ref_id")
             status, detail = _verify_with_digilocker(fid, guardian, str(ref_id))
         row = db.insert_returning(
-            """
+            f"""
             INSERT INTO parental_verification_logs
-                (id, child_principal_id, guardian_principal_id, verification_mechanism,
+                (id, child_principal_id_enc, child_principal_id_hmac,
+                 guardian_principal_id_enc, guardian_principal_id_hmac, verification_mechanism,
                  provider_name, verification_ref_id, proof_metadata, fiduciary_id, verification_status)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (uuid_generate_v4(), {pii.ENC_SQL}, {pii.HMAC_SQL}, {pii.ENC_SQL}, {pii.HMAC_SQL},
+                    %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
-                child,
-                guardian,
+                *pii.enc_params(child),
+                *pii.hmac_params(child),
+                *pii.enc_params(guardian),
+                *pii.hmac_params(guardian),
                 mechanism,
                 payload.get("provider_name") or ("DigiLocker" if mechanism == "DIGILOCKER" else None),
                 ref_id,
@@ -571,20 +606,27 @@ class ConsentService(Service):
 
     def get_active_consent(self, ctx: RequestContext) -> dict:
         bind_principal_field(ctx, "user_id")
-        where = ["user_id = %s", "fiduciary_id = %s", "is_active_consent IS TRUE"]
-        params: list[Any] = [require(ctx.payload.get("user_id"), "user_id"), _fid(ctx)]
+        where = [_USER_MATCH, "fiduciary_id = %s", "is_active_consent IS TRUE"]
+        params: list[Any] = [
+            *db.bind_key(),
+            *pii.hmac_params(require(ctx.payload.get("user_id"), "user_id")),
+            _fid(ctx),
+        ]
         if ctx.payload.get("policy_id"):
             where.append("policy_id = %s")
             params.append(ctx.payload["policy_id"])
-        rows = db.all(f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC", params)
+        rows = db.all(
+            f"SELECT {_CONSENT_COLUMNS} FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC",
+            params,
+        )
         if not rows:
             raise ApiError(404, "Not Found", "No active consent found.")
         # P11-07: a principal can hold one active record per policy. The top
         # level stays the most recent record (the response shape integrators
         # already read); active_records carries every one of them, so a reader
         # that did not name a policy is never silently handed a partial answer.
-        out = _consent_row(rows[0])
-        out["active_records"] = [_consent_row(r) for r in rows]
+        out = _consent_row(ctx, rows[0])
+        out["active_records"] = [_consent_row(ctx, r) for r in rows]
         out["active_record_count"] = len(rows)
         return out
 
@@ -594,7 +636,7 @@ class ConsentService(Service):
         # principal's active record for that policy.
         bind_principal_field(ctx, "user_id")
         where: list[str] = []
-        params: list[Any] = []
+        params: list[Any] = [*db.bind_key()]
         record_id = ctx.payload.get("record_id")
         policy_id = ctx.payload.get("policy_id")
         if record_id:
@@ -606,22 +648,24 @@ class ConsentService(Service):
             # authenticate; an integrator key must send an explicit user_id, so a
             # READ key can no longer read an arbitrary principal's active record
             # without naming one.
-            where.append("user_id = %s")
+            where.append(_USER_MATCH)
             where.append("policy_id = %s")
             where.append("is_active_consent IS TRUE")
-            params.extend([require(ctx.payload.get("user_id"), "user_id"), policy_id])
+            params.extend([*pii.hmac_params(require(ctx.payload.get("user_id"), "user_id")), policy_id])
         else:
             raise ApiError(400, "Bad Request", "'record_id' or 'policy_id' is required.")
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
         row = db.one(
-            f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT 1", params
+            f"SELECT {_CONSENT_COLUMNS} FROM consent_records WHERE {' AND '.join(where)}"
+            " ORDER BY timestamp DESC LIMIT 1",
+            params,
         )
         if not row:
             raise ApiError(404, "Not Found", "Consent record not found.")
         ensure_principal_owns(ctx, row.get("user_id"), label="Consent record")
-        out = _consent_row(row)
+        out = _consent_row(ctx, row)
         # P4-01: give the wallet the policy title and persona labels alongside
         # the record, mirroring what GET_POLICY_PURPOSES returns.
         if out is not None:
@@ -695,8 +739,8 @@ class ConsentService(Service):
         bind_principal_field(ctx, "user_id")
         payload = ctx.payload
         page, limit = page_limit(payload)
-        where = ["user_id = %s", "fiduciary_id = %s"]
-        params: list[Any] = [require(payload.get("user_id"), "user_id"), _fid(ctx)]
+        where = [_USER_MATCH, "fiduciary_id = %s"]
+        params: list[Any] = [*db.bind_key(), *pii.hmac_params(require(payload.get("user_id"), "user_id")), _fid(ctx)]
         # UD-03: search and filter by purpose, date and status.
         if payload.get("purpose_id"):
             where.append(
@@ -720,15 +764,16 @@ class ConsentService(Service):
             where.append("timestamp <= %s::timestamptz")
             params.append(payload["end_date"])
         rows = db.all(
-            f"SELECT * FROM consent_records WHERE {' AND '.join(where)} ORDER BY timestamp DESC LIMIT %s OFFSET %s",
+            f"SELECT {_CONSENT_COLUMNS} FROM consent_records WHERE {' AND '.join(where)}"
+            " ORDER BY timestamp DESC LIMIT %s OFFSET %s",
             [*params, limit, (page - 1) * limit],
         )
-        out = db.to_jsonable(rows)
+        out = [_consent_row(ctx, row) for row in rows]
         # The wallet sync token is a principal credential: only the principal's own
         # session receives it, never an integrator or console reading the history.
         if ctx.auth_via_principal_jwt:
-            for item in out:
-                item["sync_token"] = principal_token(str(item["fiduciary_id"]), item["user_id"])
+            for item, row in zip(out, rows, strict=True):
+                item["sync_token"] = principal_token(str(item["fiduciary_id"]), row["user_id"])
         return out
 
     def list_consents(self, ctx: RequestContext) -> dict:
@@ -738,8 +783,10 @@ class ConsentService(Service):
         where = ["fiduciary_id = %s"]
         params: list[Any] = [_fid(ctx)]
         if payload.get("user_id"):
-            where.append("user_id ILIKE %s")
-            params.append(f"%{payload['user_id']}%")
+            # The identifier is stored encrypted: the search matches a whole
+            # identifier (spaces trimmed, case kept) through its HMAC.
+            where.append(_USER_MATCH)
+            params.extend(pii.hmac_params(str(payload["user_id"])))
         if payload.get("policy_id"):
             where.append("policy_id = %s")
             params.append(payload["policy_id"])
@@ -758,16 +805,17 @@ class ConsentService(Service):
         total = db.one(f"SELECT COUNT(*) AS count FROM consent_records WHERE {clause}", params)
         rows = db.all(
             f"""
-            SELECT id AS record_id, user_id, policy_id, policy_version, consent_status_general,
-                   is_active_consent, timestamp, language_selected, consent_mechanism,
+            SELECT id AS record_id, {pii.dec_sql("user_id_enc")} AS user_id, policy_id, policy_version,
+                   consent_status_general, is_active_consent, timestamp, language_selected, consent_mechanism,
                    jurisdiction, data_point_consents
             FROM consent_records WHERE {clause}
             ORDER BY timestamp DESC LIMIT %s OFFSET %s
             """,
-            [*params, limit, (page - 1) * limit],
+            [*db.bind_key(), *params, limit, (page - 1) * limit],
         )
         out = []
         for row in db.to_jsonable(rows):
+            row["user_id"] = pii.principal_view(ctx, row["user_id"])
             points = row.pop("data_point_consents", None) or []
             points = [p for p in points if isinstance(p, dict)]
             row["purposes_total"] = len(points)
@@ -789,17 +837,17 @@ class ConsentService(Service):
         fid = _fid(ctx)
         user_id = require(ctx.payload.get("user_id"), "user_id")
         rows = db.all(
-            """
+            f"""
             SELECT cr.timestamp, cr.policy_id, cr.policy_version, cr.language_selected,
                    cr.consent_status_general, cr.is_active_consent, cr.data_point_consents,
                    p.policy_content
             FROM consent_records cr
             LEFT JOIN consent_policies p
                    ON p.id = cr.policy_id AND p.version = cr.policy_version AND p.fiduciary_id = cr.fiduciary_id
-            WHERE cr.user_id = %s AND cr.fiduciary_id = %s
+            WHERE cr.{_USER_MATCH} AND cr.fiduciary_id = %s
             ORDER BY cr.timestamp DESC
             """,
-            (user_id, fid),
+            (*pii.hmac_params(user_id), fid),
         )
         output = io.StringIO()
         writer = csv.writer(output)
@@ -870,12 +918,12 @@ class ConsentService(Service):
         return output.getvalue()
 
     def list_principals(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(
-            db.all(
-                "SELECT * FROM data_principal WHERE fiduciary_id = %s ORDER BY created_at DESC LIMIT %s",
-                (_fid(ctx), int(ctx.payload.get("limit") or 20)),
-            )
+        rows = db.all(
+            f"SELECT *, {pii.dec_sql('user_id_enc')} AS user_id, {pii.dec_sql('guardian_id_enc')} AS guardian_id"
+            " FROM data_principal WHERE fiduciary_id = %s ORDER BY created_at DESC LIMIT %s",
+            (*db.bind_key(), *db.bind_key(), _fid(ctx), int(ctx.payload.get("limit") or 20)),
         )
+        return [_principal_row(ctx, row, "user_id", "guardian_id") for row in rows]
 
     def link_user(self, ctx: RequestContext) -> dict:
         reject_principal(ctx, "Linking anonymous sessions requires an application API key.")
@@ -885,8 +933,9 @@ class ConsentService(Service):
         with db.connection() as conn, conn.cursor() as cur:
             db.allow_consent_maintenance(cur)
             cur.execute(
-                "UPDATE consent_records SET user_id = %s, last_updated_at = NOW() WHERE user_id = %s AND fiduciary_id = %s",
-                (auth, anon, fid),
+                f"UPDATE consent_records SET user_id_enc = {pii.ENC_SQL}, user_id_hmac = {pii.HMAC_SQL},"
+                f" last_updated_at = NOW() WHERE {_USER_MATCH} AND fiduciary_id = %s",
+                (*pii.enc_params(auth), *pii.hmac_params(auth), *pii.hmac_params(anon), fid),
             )
         # SEC-05: age_category and verification_status are server-derived from
         # the guardian/consent flows (CC-05), never from this payload. The link
@@ -895,9 +944,10 @@ class ConsentService(Service):
         # own; an existing row is never overwritten, and no default 'ADULT'
         # value is fabricated for a user whose age the server has not attested.
         db.execute(
-            "UPDATE data_principal SET user_id = %s WHERE user_id = %s AND fiduciary_id = %s"
-            " AND NOT EXISTS (SELECT 1 FROM data_principal p WHERE p.user_id = %s AND p.fiduciary_id = %s)",
-            (auth, anon, fid, auth, fid),
+            f"UPDATE data_principal SET user_id_enc = {pii.ENC_SQL}, user_id_hmac = {pii.HMAC_SQL}"
+            f" WHERE {_USER_MATCH} AND fiduciary_id = %s"
+            f" AND NOT EXISTS (SELECT 1 FROM data_principal p WHERE p.{_USER_MATCH} AND p.fiduciary_id = %s)",
+            (*pii.enc_params(auth), *pii.hmac_params(auth), *pii.hmac_params(anon), fid, *pii.hmac_params(auth), fid),
         )
         return {"success": True, "message": "User consent records linked successfully."}
 
@@ -914,13 +964,13 @@ class ConsentService(Service):
         # record that names the purpose decides; if none names it, it was never
         # consented to.
         rows = db.all(
-            """
+            f"""
             SELECT id, data_point_consents, timestamp, consent_status_general, policy_id, policy_version
             FROM consent_records
-            WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE
+            WHERE {_USER_MATCH} AND fiduciary_id = %s AND is_active_consent IS TRUE
             ORDER BY timestamp DESC
             """,
-            (user_id, fid),
+            (*pii.hmac_params(user_id), fid),
         )
         valid = False
         purpose_state = "NO_CONSENT"
@@ -968,8 +1018,9 @@ class ConsentService(Service):
             )
         else:
             db.execute(
-                "INSERT INTO consent_validations (fiduciary_id, user_id, purpose_id, status) VALUES (%s, %s, %s, %s)",
-                (fid, user_id, purpose, "VALID" if valid else "INVALID"),
+                "INSERT INTO consent_validations (fiduciary_id, user_id_enc, user_id_hmac, purpose_id, status)"
+                f" VALUES (%s, {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s)",
+                (fid, *pii.enc_params(user_id), *pii.hmac_params(user_id), purpose, "VALID" if valid else "INVALID"),
             )
         # CV-07: a denied validation must notify the principal, and the denial
         # leaves an audit trail with the purpose and outcome as discrete columns
@@ -1022,8 +1073,8 @@ class ConsentService(Service):
         fid = _fid(ctx)
         user_id = require(ctx.payload.get("user_id"), "user_id")
         language = str(ctx.payload.get("language") or "en")
-        where = "cr.user_id = %s AND cr.fiduciary_id = %s AND cr.is_active_consent IS TRUE"
-        params: list[Any] = [user_id, fid]
+        where = f"cr.{_USER_MATCH} AND cr.fiduciary_id = %s AND cr.is_active_consent IS TRUE"
+        params: list[Any] = [*pii.hmac_params(user_id), fid]
         if ctx.payload.get("policy_id"):
             where += " AND cr.policy_id = %s"
             params.append(ctx.payload["policy_id"])
@@ -1105,15 +1156,15 @@ class ConsentService(Service):
             # advisory lock before any row lock and cannot deadlock.
             from .compliance import lock_principal_purges
 
-            lock_principal_purges(cur, fid, str(user_id))
+            lock_principal_purges(cur, fid, pii.normalize(str(user_id)))
             # CW-03: one active record per policy. Withdraw from every active record
             # (optionally only the named policy's) that holds a named purpose.
             policy_filter = ctx.payload.get("policy_id")
             cur.execute(
-                "SELECT * FROM consent_records WHERE user_id = %s AND fiduciary_id = %s AND is_active_consent IS TRUE"
+                f"SELECT * FROM consent_records WHERE {_USER_MATCH} AND fiduciary_id = %s AND is_active_consent IS TRUE"
                 + (" AND policy_id = %s" if policy_filter else "")
                 + " ORDER BY timestamp DESC FOR UPDATE",
-                (user_id, fid, policy_filter) if policy_filter else (user_id, fid),
+                (*pii.hmac_params(user_id), fid, *([policy_filter] if policy_filter else [])),
             )
             active_rows = cur.fetchall()
             # P9-07 / CW-06: with no active consent there is nothing to withdraw.
@@ -1174,17 +1225,18 @@ class ConsentService(Service):
                 cur.execute(
                     """
                     INSERT INTO consent_records
-                        (id, user_id, fiduciary_id, policy_id, policy_version, timestamp,
+                        (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, timestamp,
                          jurisdiction, language_selected, consent_status_general, consent_mechanism,
                          ip_address, user_agent, data_point_consents, is_active_consent,
                          verification_log_id, session_id, session_source, client_metadata,
                          supersedes_record_id, created_at, last_updated_at)
-                    VALUES (uuid_generate_v4(), %s, %s, %s, %s, NOW(), %s, %s, %s, %s,
+                    VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                     RETURNING id
                     """,
                     (
-                        row["user_id"],
+                        row["user_id_enc"],
+                        row["user_id_hmac"],
                         row["fiduciary_id"],
                         row["policy_id"],
                         row["policy_version"],
@@ -1217,8 +1269,8 @@ class ConsentService(Service):
                 # record before a key may open an erasure on a principal.
                 if ctx.permissions and not ctx.auth_via_principal_jwt:
                     exists = db.one(
-                        "SELECT 1 FROM consent_records WHERE user_id = %s AND fiduciary_id = %s LIMIT 1",
-                        (user_id, fid),
+                        f"SELECT 1 FROM consent_records WHERE {_USER_MATCH} AND fiduciary_id = %s LIMIT 1",
+                        (*pii.hmac_params(user_id), fid),
                     )
                     if not exists:
                         raise ApiError(
@@ -1237,14 +1289,16 @@ class ConsentService(Service):
                     # data to be kept; a held request says so and cites the rule.
                     hold = legal_hold_for(fid, target)
                     cur.execute(
-                        """
+                        f"""
                         INSERT INTO purge_requests
-                            (user_id, fiduciary_id, purpose_id, trigger_event, details, status, legal_reference, hold_until, app_id)
-                        VALUES (%s, %s, %s, 'ErasureRequest', %s, %s, %s,
+                            (user_id_enc, user_id_hmac, fiduciary_id, purpose_id, trigger_event, details, status,
+                             legal_reference, hold_until, app_id)
+                        VALUES ({pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s, 'ErasureRequest', %s, %s, %s,
                                 CASE WHEN %s::int IS NULL THEN NULL ELSE NOW() + make_interval(days => %s::int) END, %s)
                         """,
                         (
-                            user_id,
+                            *pii.enc_params(user_id),
+                            *pii.hmac_params(user_id),
                             fid,
                             target,
                             ctx.payload.get("reason"),

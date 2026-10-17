@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import pii
 from ..context import RequestContext
 from ..errors import ApiError
 
@@ -132,11 +133,16 @@ def reject_principal(ctx: RequestContext, message: str = "This action is not per
         raise ApiError(403, "Forbidden", message)
 
 
+def same_principal(a: Any, b: Any) -> bool:
+    """Two principal ids name one principal when they match after trimming spaces (case is kept)."""
+    return a is not None and b is not None and pii.normalize(str(a)) == pii.normalize(str(b))
+
+
 def bind_principal_field(ctx: RequestContext, field: str) -> None:
     """Force a payload field to the authenticated principal when using a principal JWT."""
     if ctx.auth_via_principal_jwt and ctx.principal_user_id:
         supplied = ctx.payload.get(field)
-        if supplied and str(supplied) != ctx.principal_user_id:
+        if supplied and not same_principal(supplied, ctx.principal_user_id):
             raise ApiError(
                 403,
                 "Forbidden",
@@ -154,7 +160,7 @@ def ensure_principal_owns(
     """Block cross-principal access for principal JWT sessions (404 avoids ID leakage)."""
     if not ctx.auth_via_principal_jwt:
         return
-    if owner_user_id is None or str(owner_user_id) != ctx.principal_user_id:
+    if not same_principal(owner_user_id, ctx.principal_user_id):
         raise ApiError(404, "Not Found", f"{label} not found.")
 
 
@@ -164,7 +170,7 @@ def principal_list_filter(ctx: RequestContext, field: str) -> str | None:
         if not ctx.principal_user_id:
             raise ApiError(401, "Unauthorized", "Principal identity is missing from the token.")
         supplied = ctx.payload.get(field)
-        if supplied and str(supplied) != ctx.principal_user_id:
+        if supplied and not same_principal(supplied, ctx.principal_user_id):
             raise ApiError(
                 403,
                 "Forbidden",

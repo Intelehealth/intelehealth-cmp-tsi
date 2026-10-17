@@ -322,7 +322,8 @@ def test_record_consent_retires_only_the_same_policy():
 
 A_RECORD = {
     "id": "rec-a",
-    "user_id": "asha",
+    "user_id_enc": "enc(asha)",
+    "user_id_hmac": "hmac(asha)",
     "fiduciary_id": FID,
     "policy_id": "pol-a",
     "policy_version": "1",

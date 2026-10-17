@@ -117,15 +117,32 @@ def _seed_tenant(cur, purposes=("care",)):
     return fid, pol
 
 
+# SQL literals for "asha" stored as db/34 stores it, for tests that write a
+# consent row inline (the tx fixture sets app.enc_key on the connection).
+_ASHA_ENC = "encode(pgp_sym_encrypt('asha', current_setting('app.enc_key')), 'base64')"
+_ASHA_HMAC = "encode(hmac('asha', current_setting('app.enc_key'), 'sha256'), 'hex')"
+
+
+def _pid(cur, value):
+    """(enc, hmac) of a principal id, exactly as the services store it (db/34)."""
+    from dpdpcms_py import pii
+
+    cur.execute(
+        f"SELECT {pii.ENC_SQL} AS enc, {pii.HMAC_SQL} AS hmac", (*pii.enc_params(value), *pii.hmac_params(value))
+    )
+    row = cur.fetchone()
+    return row["enc"], row["hmac"]
+
+
 def _seed_consent(cur, fid, pol, user, purposes=("care",), ip="1.2.3.4", user_agent=None, language="en", granted=True):
     cur.execute(
-        "INSERT INTO consent_records (id, user_id, fiduciary_id, policy_id, policy_version, timestamp, "
-        " jurisdiction, language_selected, data_point_consents, is_active_consent, "
+        "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, "
+        " timestamp, jurisdiction, language_selected, data_point_consents, is_active_consent, "
         " consent_status_general, consent_mechanism, ip_address, user_agent, created_at, last_updated_at) "
-        "VALUES (uuid_generate_v4(), %s, %s, %s, 'v1', NOW(), 'IN', %s, %s, TRUE, "
+        "VALUES (uuid_generate_v4(), %s, %s, %s, %s, 'v1', NOW(), 'IN', %s, %s, TRUE, "
         " 'CONSENT_GIVEN', 'WEB', %s, %s, NOW(), NOW())",
         (
-            user,
+            *_pid(cur, user),
             fid,
             pol,
             language,
@@ -139,8 +156,12 @@ def _seed_consent(cur, fid, pol, user, purposes=("care",), ip="1.2.3.4", user_ag
 
 
 def _consents(cur, fid):
+    from dpdpcms_py import pii
+
     cur.execute(
-        "SELECT user_id, data_point_consents FROM consent_records WHERE fiduciary_id = %s ORDER BY user_id", (fid,)
+        f"SELECT {pii.dec_sql('user_id_enc')} AS user_id, data_point_consents FROM consent_records"
+        " WHERE fiduciary_id = %s ORDER BY 1",
+        (*real_db.bind_key(), fid),
     )
     return {r["user_id"]: r["data_point_consents"] for r in cur.fetchall()}
 
@@ -1770,7 +1791,10 @@ def test_maintenance_opt_in_cannot_forge_consent(tx):
             with pytest.raises(psycopg.errors.InsufficientPrivilege), tx.transaction():
                 cur.execute(sql, (fid,))
         cur.execute(
-            "UPDATE consent_records SET user_id = 'erased:x', ip_address = '0.0.0.0' WHERE fiduciary_id = %s", (fid,)
+            "UPDATE consent_records SET user_id_enc = encode(pgp_sym_encrypt('erased:x', current_setting('app.enc_key')), 'base64'),"
+            " user_id_hmac = encode(hmac('erased:x', current_setting('app.enc_key'), 'sha256'), 'hex'),"
+            " ip_address = '0.0.0.0' WHERE fiduciary_id = %s",
+            (fid,),
         )
         assert cur.rowcount == 1
 

@@ -61,7 +61,9 @@ def test_maintenance_guard_still_allows_real_maintenance(tx):
         _seed_consent(cur, fid, pol, "asha", purposes=("research",), granted=False)
         real_db.allow_consent_maintenance(cur)
         cur.execute(
-            "UPDATE consent_records SET user_id = 'erased:x', data_point_consents = %s WHERE fiduciary_id = %s",
+            "UPDATE consent_records SET user_id_enc = encode(pgp_sym_encrypt('erased:x', current_setting('app.enc_key')), 'base64'),"
+            " user_id_hmac = encode(hmac('erased:x', current_setting('app.enc_key'), 'sha256'), 'hex'),"
+            " data_point_consents = %s WHERE fiduciary_id = %s",
             (real_db.as_jsonb([{"data_point_id": "research", "consent_granted": False, "status": "withdrawn"}]), fid),
         )
         assert cur.rowcount == 1

@@ -544,3 +544,101 @@ def test_delivery_floor_allows_only_encrypted_erasure_of_recipient(tx):
         )
         cur.execute("SELECT recipient_hmac, status FROM notification_deliveries WHERE id = %s", (did,))
         assert cur.fetchone() == {"recipient_hmac": e_h, "status": "SENT"}
+
+
+# ---- Task 5: consent, principal and wallet services on the encrypted columns --------
+
+
+def _api_ctx(fid, payload):
+    """An integrator API-key caller of `fid` (no operator, no principal token)."""
+    from dpdpcms_py.context import RequestContext
+
+    return RequestContext(
+        path="/api/v1/consent",
+        category="client",
+        service="consent",
+        payload=payload,
+        headers={},
+        fiduciary_id=fid,
+        permissions={"READ", "WRITE"},
+        app_id="app-1",
+    )
+
+
+def _grant(fid, pol, user, purpose="care"):
+    from dpdpcms_py.services.consent import ConsentService
+
+    return ConsentService().record_consent(
+        _api_ctx(
+            fid,
+            {"user_id": user, "policy_id": pol, "data_point_consents": [{"id": purpose, "consent_granted": True}]},
+        )
+    )
+
+
+@needs_db
+def test_record_list_withdraw_consent_round_trip_encrypted(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+    from dpdpcms_py.services.consent import ConsentService
+
+    pid = "satish@test.com"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    _grant(fid, pol, pid)
+    service = ConsentService()
+
+    active = service.get_active_consent(_api_ctx(fid, {"user_id": pid}))
+    assert active["user_id"] == pid
+    assert "user_id_enc" not in active and "user_id_hmac" not in active
+    assert all(r["user_id"] == pid for r in active["active_records"])
+
+    listed = service.list_consents(_ctx(fid, {}, operator_id="op-1"))["data"]
+    assert [r["user_id"] for r in listed] == [pii.mask(pid)]
+    # The console search matches the whole identifier through its HMAC.
+    assert len(service.list_consents(_ctx(fid, {"user_id": f" {pid} "}, operator_id="op-1"))["data"]) == 1
+    assert service.list_consents(_ctx(fid, {"user_id": "satish"}, operator_id="op-1"))["data"] == []
+
+    out = service.withdraw_consent(_api_ctx(fid, {"user_id": pid, "purpose_ids": ["care"]}))
+    assert out["success"] is True
+    history = service.list_consent_history(_api_ctx(fid, {"user_id": pid}))
+    # One test transaction: both rows carry the same NOW(), so compare unordered.
+    assert sorted(r["consent_status_general"] for r in history) == ["CONSENT_GIVEN", "WITHDRAWN"]
+    assert {r["user_id"] for r in history} == {pid}
+
+    with tx.cursor() as cur:
+        for table in ("consent_records", "data_principal", "notifications"):
+            cur.execute(f"SELECT to_jsonb(t)::text AS j FROM {table} t WHERE fiduciary_id = %s", (fid,))
+            rows = cur.fetchall()
+            assert rows, f"no {table} rows written"
+            assert all(pid not in r["j"] for r in rows), f"plaintext principal id stored in {table}"
+        cur.execute(
+            f"SELECT {pii.dec_sql('user_id_enc')} AS u, user_id_hmac FROM consent_records WHERE fiduciary_id = %s",
+            (settings.db_encryption_key, fid),
+        )
+        assert {(r["u"], r["user_id_hmac"]) for r in cur.fetchall()} == {(pid, pii.hmac_hex(pid))}
+
+
+@needs_db
+def test_principal_ids_with_spaces_resolve_and_case_stays_distinct(tx):
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    service = ConsentService()
+    _grant(fid, pol, " a@b.com ")
+    active = service.get_active_consent(_api_ctx(fid, {"user_id": "a@b.com"}))
+    assert active["user_id"] == "a@b.com"
+    assert service.validate_consent(_api_ctx(fid, {"user_id": "a@b.com", "required_purpose_id": "care"}))["valid"]
+
+    _grant(fid, pol, "ABC123")
+    assert service.get_active_consent(_api_ctx(fid, {"user_id": "ABC123"}))["user_id"] == "ABC123"
+    with pytest.raises(ApiError) as err:
+        service.get_active_consent(_api_ctx(fid, {"user_id": "abc123"}))
+    assert err.value.status == 404
+    _grant(fid, pol, "abc123")
+    assert service.get_active_consent(_api_ctx(fid, {"user_id": "abc123"}))["user_id"] == "abc123"
+    with tx.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM data_principal WHERE fiduciary_id = %s", (fid,))
+        assert cur.fetchone()["n"] == 3
