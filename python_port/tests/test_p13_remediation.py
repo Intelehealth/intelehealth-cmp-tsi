@@ -387,8 +387,15 @@ def test_wildcard_allowlist_is_refused_in_production(monkeypatch):
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(None, "local"), ("", "local"), ("local", "local"), ("Production", "production"),
-     (" PRODUCTION ", "production"), ("Staging", "staging"), ("test", "test")],
+    [
+        (None, "local"),
+        ("", "local"),
+        ("local", "local"),
+        ("Production", "production"),
+        (" PRODUCTION ", "production"),
+        ("Staging", "staging"),
+        ("test", "test"),
+    ],
 )
 def test_environment_is_case_folded(monkeypatch, raw, expected):
     from dpdpcms_py import config
