@@ -1159,7 +1159,7 @@ def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
 
     from dpdpcms_py.services.consent import ConsentService
 
-    ip, ref = "203.0.113.77", "DL-REF-998877"
+    ip, ref, claimed = "203.0.113.77", "DL-REF-998877", "192.0.2.55"
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
         assert "ip_address" not in _columns(cur, "consent_records")
@@ -1167,7 +1167,14 @@ def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
     service = ConsentService()
     consent_ctx = dataclasses.replace(
         _api_ctx(
-            fid, {"user_id": "asha", "policy_id": pol, "data_point_consents": [{"id": "care", "consent_granted": True}]}
+            fid,
+            {
+                "user_id": "asha",
+                "policy_id": pol,
+                "data_point_consents": [{"id": "care", "consent_granted": True}],
+                "ip_address": claimed,
+                "consent_mechanism": "PAPER_FORM",
+            },
         ),
         source_ip=ip,
     )
@@ -1186,11 +1193,17 @@ def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
 
     with tx.cursor() as cur:
         cur.execute(
-            "SELECT ip_address_enc, to_jsonb(c)::text AS j FROM consent_records c WHERE fiduciary_id = %s", (fid,)
+            "SELECT ip_address_enc, client_metadata, to_jsonb(c)::text AS j FROM consent_records c"
+            " WHERE fiduciary_id = %s",
+            (fid,),
         )
         row = cur.fetchone()
-        assert ip not in row["j"]
+        assert ip not in row["j"] and claimed not in row["j"]
         assert _decrypt(cur, row["ip_address_enc"]) == ip
+        # The claimed IP is kept apart, encrypted; the other claims as sent.
+        meta = row["client_metadata"]
+        assert "ip_address" not in meta and meta["consent_mechanism"] == "PAPER_FORM"
+        assert _decrypt(cur, meta["ip_address_enc"]) == claimed
         cur.execute(
             "SELECT verification_ref_id_enc, proof_metadata_enc, to_jsonb(p)::text AS j"
             " FROM parental_verification_logs p WHERE id = %s",
@@ -1201,6 +1214,50 @@ def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
         assert _decrypt(cur, row["verification_ref_id_enc"]) == ref
         proof = json.loads(_decrypt(cur, row["proof_metadata_enc"]))
         assert proof["vc_hash"] == "abc123" and "verification_detail" in proof
+
+
+def _record(fid, pol, user, ip, claimed=None):
+    import dataclasses
+
+    from dpdpcms_py.services.consent import ConsentService
+
+    payload = {"user_id": user, "policy_id": pol, "data_point_consents": [{"id": "care", "consent_granted": True}]}
+    if claimed:
+        payload["ip_address"] = claimed
+    ConsentService().record_consent(dataclasses.replace(_api_ctx(fid, payload), source_ip=ip))
+
+
+@needs_db
+def test_consent_reads_never_return_ip_ciphertext(tx):
+    """Ruling S: no read returns ip_address_enc; an API-key caller sees the
+    session and claimed IPs, a console operator gets null for both."""
+    import dataclasses
+
+    from dpdpcms_py.services.consent import ConsentService
+
+    ip, claimed = "203.0.113.78", "192.0.2.56"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    _record(fid, pol, "asha", ip, claimed)
+    _record(fid, pol, "ramesh", ip)
+    service = ConsentService()
+
+    def reads(ctx, user):
+        active = service.get_active_consent(dataclasses.replace(ctx, payload={"user_id": user}))
+        details = service.get_consent_record_details(dataclasses.replace(ctx, payload={"record_id": active["id"]}))
+        history = service.list_consent_history(dataclasses.replace(ctx, payload={"user_id": user}))
+        return [active, *active["active_records"], details, *history]
+
+    for row in reads(_api_ctx(fid, {}), "asha"):
+        assert "ip_address_enc" not in row and "claimed_ip_address" not in row
+        assert row["ip_address"] == ip
+        assert row["client_metadata"] == {"ip_address": claimed}
+    for row in reads(_api_ctx(fid, {}), "ramesh"):
+        assert row["ip_address"] == ip and row["client_metadata"] == {}
+    for row in reads(_ctx(fid, {}, operator_id="op-1"), "asha"):
+        assert "ip_address_enc" not in row and "claimed_ip_address" not in row
+        assert row["ip_address"] is None
+        assert row["client_metadata"] == {"ip_address": None}
 
 
 @needs_db
@@ -1303,6 +1360,26 @@ def test_audit_source_ip_encrypted_and_chain_verifies(tx, monkeypatch):
 
 
 @needs_db
+def test_audit_source_ip_reader_keeps_legacy_plaintext_and_raises_on_wrong_key(tx):
+    import psycopg
+    from dpdpcms_py.config import settings
+
+    key = settings.db_encryption_key
+    with tx.cursor() as cur:
+        for legacy in ("10.0.0.9", "2001:db8::1", "::1"):
+            cur.execute("SELECT tsi_audit_source_ip(%s, %s) AS v", (legacy, key))
+            assert cur.fetchone()["v"] == legacy
+        cur.execute("SELECT tsi_audit_source_ip(NULL, %s) AS v", (key,))
+        assert cur.fetchone()["v"] is None
+        cur.execute("SELECT encode(pgp_sym_encrypt('198.51.100.9', %s), 'base64') AS c", (key,))
+        cipher = cur.fetchone()["c"]
+        cur.execute("SELECT tsi_audit_source_ip(%s, %s) AS v", (cipher, key))
+        assert cur.fetchone()["v"] == "198.51.100.9"
+        with pytest.raises(psycopg.Error, match="Wrong key or corrupt data"), tx.transaction():
+            cur.execute("SELECT tsi_audit_source_ip(%s, %s) AS v", (cipher, key + "-wrong"))
+
+
+@needs_db
 def test_erasure_scrubs_encrypted_ip(tx):
     from dpdpcms_py import pii
     from dpdpcms_py.config import settings
@@ -1313,17 +1390,33 @@ def test_erasure_scrubs_encrypted_ip(tx):
         fid, pol = _seed_tenant(cur)
         _seed_consent(cur, fid, pol, "asha", ip="9.9.9.9", user_agent="curl/8")
         _seed_consent(cur, fid, pol, "ramesh", ip="1.2.3.5")
+    # Recorded through the API with a claimed IP (client_metadata.ip_address_enc).
+    _record(fid, pol, "asha", "9.9.9.8", claimed="8.8.4.4")
+    _record(fid, pol, "ramesh", "1.2.3.5", claimed="8.8.8.8")
     counts = erase_cms_copy(fid, "asha")
-    assert counts["consent_records.metadata"] == 1
+    assert counts["consent_records.metadata"] == 2
+    key = settings.db_encryption_key
+    claimed_sql = pii.dec_sql("client_metadata->>'ip_address_enc'")
     with tx.cursor() as cur:
         cur.execute(
-            f"SELECT {pii.dec_sql('user_id_enc')} AS u, {pii.dec_sql('ip_address_enc')} AS ip, user_agent"
+            f"SELECT {pii.dec_sql('user_id_enc')} AS u, {pii.dec_sql('ip_address_enc')} AS ip, user_agent,"
+            f" {claimed_sql} AS claimed, client_metadata"
             " FROM consent_records WHERE fiduciary_id = %s",
-            (settings.db_encryption_key, settings.db_encryption_key, fid),
+            (key, key, key, fid),
         )
-        rows = {r["u"]: r for r in cur.fetchall()}
+        rows = {}
+        for r in cur.fetchall():
+            rows.setdefault(r["u"], []).append(r)
     erased = next(u for u in rows if u.startswith("erased:"))
-    assert rows[erased]["ip"] == "0.0.0.0" and rows[erased]["user_agent"] is None
-    assert rows["ramesh"]["ip"] == "1.2.3.5"
+    assert len(rows[erased]) == 2
+    for row in rows[erased]:
+        assert row["ip"] == "0.0.0.0" and row["user_agent"] is None
+        assert row["claimed"] in (None, "0.0.0.0")
+    # The API-recorded record had a claimed IP: it is the encrypted 0.0.0.0 now;
+    # the seeded one had none and still has none.
+    assert sorted(str(r["claimed"]) for r in rows[erased]) == ["0.0.0.0", "None"]
+    assert "8.8.4.4" not in str([r["client_metadata"] for r in rows[erased]])
+    ramesh = {(r["ip"], r["claimed"]) for r in rows["ramesh"]}
+    assert ramesh == {("1.2.3.5", None), ("1.2.3.5", "8.8.8.8")}
     # A second erasure does not trip the append-only trigger.
     assert erase_cms_copy(fid, "asha")["consent_records.metadata"] == 0

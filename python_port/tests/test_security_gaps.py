@@ -1422,11 +1422,12 @@ def test_p6_02_policy_id_branch_binds_user_id(monkeypatch):
     assert out["id"] == "rec-1"
     # The policy_id branch's WHERE clause carries user_id first, policy_id second,
     # so the query is principal-scoped rather than "anyone's newest record".
-    # (params[0] is the decryption key of the SELECT list; the principal is
-    # matched by its HMAC, whose value and key follow.)
+    # (params[0:3] are the decryption keys of the SELECT list - user_id, the
+    # session IP and the claimed IP; the principal is matched by its HMAC, whose
+    # value and key follow.)
     assert "user_id_hmac = " in captured["sql"]
-    assert captured["params"][1] == "asha"
-    assert captured["params"][3] == "p1"
+    assert captured["params"][3] == "asha"
+    assert captured["params"][5] == "p1"
 
 
 # ── P6-04 the throttle counter increments server-side (no lost updates) ──────

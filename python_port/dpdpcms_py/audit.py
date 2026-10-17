@@ -141,18 +141,11 @@ def row_hash(previous_hash: str | None, row: dict) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
-# Detail keys whose value names a principal: log_event stores each as
-# principal_pseudonym(value), at any depth, so context_details carries no
-# principal id (the row's own user_id column is pseudonymised the same way).
-PRINCIPAL_DETAIL_KEYS = pii.PRINCIPAL_KEYS | {
-    "user_id",
-    "principal_id",
-    "child_principal_id",
-    "guardian_principal_id",
-    "guardian_id",
-    "recipient_id",
-    "nominee_id",
-}
+# Detail keys whose value names a principal (Ruling K: the brief's set, all
+# already in pii.PRINCIPAL_KEYS): log_event stores each as its
+# principal_pseudonym, at any depth, so context_details carries no principal id
+# (the row's own user_id column is pseudonymised the same way).
+PRINCIPAL_DETAIL_KEYS = pii.PRINCIPAL_KEYS
 
 
 def principal_pseudonym(value: str) -> str:
@@ -161,20 +154,10 @@ def principal_pseudonym(value: str) -> str:
 
 
 def _pseudonymise_details(value):
-    """Copy of a details value with every PRINCIPAL_DETAIL_KEYS entry pseudonymised (None stays None)."""
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key in PRINCIPAL_DETAIL_KEYS and item is not None:
-                out[key] = principal_pseudonym(
-                    item if isinstance(item, str) else json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
-                )
-            else:
-                out[key] = _pseudonymise_details(item)
-        return out
-    if isinstance(value, list):
-        return [_pseudonymise_details(item) for item in value]
-    return value
+    """Copy of a details value with every principal key pseudonymised (None stays None)."""
+    return pii.map_principal_keys(
+        value, lambda key, item: (key, None if item is None else principal_pseudonym(pii.canonical_json(item)))
+    )
 
 
 def log_event(

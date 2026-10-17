@@ -79,7 +79,9 @@ def test_mechanism_and_ip_are_observed_not_claimed():
     assert meta["ip_address"] == "203.0.113.9"
     assert meta["user_agent"] == "UA/1"
     # The caller's claims are kept, but apart.
-    assert meta["client_metadata"] == {"consent_mechanism": "PAPER_FORM", "ip_address": "1.2.3.4"}
+    assert meta["client_metadata"] == {"consent_mechanism": "PAPER_FORM"}
+    # The claimed IP is held apart and stored encrypted (client_metadata.ip_address_enc).
+    assert meta["claimed_ip_address"] == "1.2.3.4"
 
 
 def test_principal_session_id_comes_from_the_cms():

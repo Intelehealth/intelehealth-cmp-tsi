@@ -114,7 +114,7 @@ PRINCIPAL_KEYS = frozenset(
 )
 
 
-def _map_principal_keys(value, replace):
+def map_principal_keys(value, replace):
     """Copy of a JSON value with replace(key, item) -> (key, item) applied to every PRINCIPAL_KEYS entry."""
     if isinstance(value, dict):
         out = {}
@@ -123,14 +123,14 @@ def _map_principal_keys(value, replace):
                 new_key, new_item = replace(key, item)
                 out[new_key] = new_item
             else:
-                out[key] = _map_principal_keys(item, replace)
+                out[key] = map_principal_keys(item, replace)
         return out
     if isinstance(value, list):
-        return [_map_principal_keys(item, replace) for item in value]
+        return [map_principal_keys(item, replace) for item in value]
     return value
 
 
-def _canonical(item) -> str:
+def canonical_json(item) -> str:
     return item if isinstance(item, str) else json.dumps(item, sort_keys=True, ensure_ascii=False)
 
 
@@ -139,14 +139,14 @@ def hmac_principal_keys(value):
 
     A non-string value (an object, a list, a number) is hashed whole, as its
     canonical JSON, so nothing under a principal key survives in the clear."""
-    return _map_principal_keys(
-        value, lambda key, item: (f"{key}_hmac", None if item is None else hmac_hex(_canonical(item)))
+    return map_principal_keys(
+        value, lambda key, item: (f"{key}_hmac", None if item is None else hmac_hex(canonical_json(item)))
     )
 
 
 def mask_principal_keys(value):
     """Copy of a JSON value with every PRINCIPAL_KEYS entry masked; a non-string value becomes `***`."""
-    return _map_principal_keys(
+    return map_principal_keys(
         value, lambda key, item: (key, mask(item) if isinstance(item, str) or item is None else "***")
     )
 

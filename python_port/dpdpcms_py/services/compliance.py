@@ -229,11 +229,16 @@ def erase_cms_copy(
         # nothing, so the session IP / user agent and the delivery recipient
         # survived erasure.
         db.allow_consent_maintenance(cur)
-        # The session IP is stored encrypted (db/35): it becomes the encrypted 0.0.0.0.
+        # The session IP and any IP the integrator claimed (client_metadata
+        # ip_address_enc) are stored encrypted (db/35): each becomes the
+        # encrypted 0.0.0.0; a record with no claimed IP keeps none.
         cur.execute(
-            f"UPDATE consent_records SET ip_address_enc = {db.enc_expr()}, user_agent = NULL"
+            f"UPDATE consent_records SET ip_address_enc = {db.enc_expr()}, user_agent = NULL,"
+            " client_metadata = CASE WHEN client_metadata ? 'ip_address_enc'"
+            f" THEN jsonb_set(client_metadata, '{{ip_address_enc}}', to_jsonb({db.enc_expr()}))"
+            " ELSE client_metadata END"
             f" WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}",
-            (*db.bind_encrypt("0.0.0.0"), fiduciary_id, *who),
+            (*db.bind_encrypt("0.0.0.0"), *db.bind_encrypt("0.0.0.0"), fiduciary_id, *who),
         )
         counts["consent_records.metadata"] = cur.rowcount
         cur.execute(

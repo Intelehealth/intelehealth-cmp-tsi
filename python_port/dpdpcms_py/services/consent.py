@@ -32,13 +32,46 @@ def _fid(ctx: RequestContext) -> str:
 # (lookup key). Every match goes through the HMAC; a read decrypts the pair
 # back to <col> and hands it through pii.principal_view (masked for operators).
 _USER_MATCH = pii.match_sql("user_id")
-# SELECT list for a full consent_records row with the identifier decrypted;
-# bind *db.bind_key() ahead of the WHERE parameters.
-_CONSENT_COLUMNS = f"*, {pii.dec_sql('user_id_enc')} AS user_id"
+# SELECT list for a full consent_records row with the identifier, the session
+# IP and the claimed IP (client_metadata.ip_address_enc) decrypted; bind
+# *_consent_keys() ahead of the WHERE parameters.
+_CLAIMED_IP_SQL = pii.dec_sql("client_metadata->>'ip_address_enc'")
+_CONSENT_COLUMNS = (
+    f"*, {pii.dec_sql('user_id_enc')} AS user_id, {pii.dec_sql('ip_address_enc')} AS ip_address,"
+    f" {_CLAIMED_IP_SQL} AS claimed_ip_address"
+)
+# client_metadata as stored: the caller's claims, with a claimed IP encrypted
+# under 'ip_address_enc' (absent when none was claimed); bind
+# (db.as_jsonb(claims), *db.bind_encrypt(claimed_ip)).
+_CLIENT_METADATA_SQL = (
+    "(%s::jsonb || jsonb_strip_nulls(jsonb_build_object('ip_address_enc',"
+    " encode(pgp_sym_encrypt(%s::text, %s), 'base64'))))"
+)
+
+
+def _consent_keys() -> tuple[str, ...]:
+    return (*db.bind_key(), *db.bind_key(), *db.bind_key())
 
 
 def _consent_row(ctx: RequestContext, row: dict | None) -> dict | None:
-    return pii.principal_row(ctx, row, "user_id") if row else None
+    """A consent record as the caller may see it. The stored ciphertext never
+    leaves; the session IP (and any IP the integrator claimed) is shown to
+    API-key and principal callers, and is null for console operators - a DPO
+    sees it through the logged reveal."""
+    if not row:
+        return None
+    out = pii.principal_row(ctx, row, "user_id")
+    out.pop("ip_address_enc", None)
+    claimed_ip = out.pop("claimed_ip_address", None)
+    operator = ctx.operator_id is not None
+    if operator:
+        out["ip_address"] = None
+    meta = out.get("client_metadata")
+    if isinstance(meta, dict) and "ip_address_enc" in meta:
+        meta = {key: value for key, value in meta.items() if key != "ip_address_enc"}
+        meta["ip_address"] = None if operator else claimed_ip
+        out["client_metadata"] = meta
+    return out
 
 
 NOTIF_CONSENT_GIVEN = "CONSENT_GIVEN_NOTIFICATION"
@@ -246,11 +279,13 @@ def _observed_metadata(ctx: RequestContext) -> dict[str, Any]:
         "session_id": session_id,
         # A principal session id comes from the CMS's own token; an integrator's is its claim.
         "session_source": "CMS" if ctx.session_id else ("CLIENT" if session_id else None),
+        # The claimed IP is stored encrypted apart from the other claims (_CLIENT_METADATA_SQL).
         "client_metadata": {
             key: payload[key]
-            for key in ("consent_mechanism", "ip_address", "user_agent", "session_id")
+            for key in ("consent_mechanism", "user_agent", "session_id")
             if payload.get(key) is not None
         },
+        "claimed_ip_address": None if payload.get("ip_address") is None else str(payload["ip_address"]),
     }
 
 
@@ -417,7 +452,7 @@ class ConsentService(Service):
                      verification_log_id, session_id, session_source, client_metadata,
                      supersedes_record_id, created_at, last_updated_at)
                 VALUES (uuid_generate_v4(), {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s, %s, NOW(), %s, %s, %s, %s,
-                        {db.enc_expr()}, %s, %s, TRUE, %s, %s, %s, %s, %s, NOW(), NOW())
+                        {db.enc_expr()}, %s, %s, TRUE, %s, %s, %s, {_CLIENT_METADATA_SQL}, %s, NOW(), NOW())
                 RETURNING id
                 """,
                 (
@@ -437,6 +472,7 @@ class ConsentService(Service):
                     observed["session_id"],
                     observed["session_source"],
                     db.as_jsonb(observed["client_metadata"]),
+                    *db.bind_encrypt(observed["claimed_ip_address"]),
                     prior["id"] if prior else None,
                 ),
             )
@@ -599,7 +635,7 @@ class ConsentService(Service):
         bind_principal_field(ctx, "user_id")
         where = [_USER_MATCH, "fiduciary_id = %s", "is_active_consent IS TRUE"]
         params: list[Any] = [
-            *db.bind_key(),
+            *_consent_keys(),
             *pii.hmac_params(require(ctx.payload.get("user_id"), "user_id")),
             _fid(ctx),
         ]
@@ -627,7 +663,7 @@ class ConsentService(Service):
         # principal's active record for that policy.
         bind_principal_field(ctx, "user_id")
         where: list[str] = []
-        params: list[Any] = [*db.bind_key()]
+        params: list[Any] = [*_consent_keys()]
         record_id = ctx.payload.get("record_id")
         policy_id = ctx.payload.get("policy_id")
         if record_id:
@@ -731,7 +767,7 @@ class ConsentService(Service):
         payload = ctx.payload
         page, limit = page_limit(payload)
         where = [_USER_MATCH, "fiduciary_id = %s"]
-        params: list[Any] = [*db.bind_key(), *pii.hmac_params(require(payload.get("user_id"), "user_id")), _fid(ctx)]
+        params: list[Any] = [*_consent_keys(), *pii.hmac_params(require(payload.get("user_id"), "user_id")), _fid(ctx)]
         # UD-03: search and filter by purpose, date and status.
         if payload.get("purpose_id"):
             where.append(
@@ -1223,7 +1259,7 @@ class ConsentService(Service):
                          verification_log_id, session_id, session_source, client_metadata,
                          supersedes_record_id, created_at, last_updated_at)
                     VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s,
-                            {db.enc_expr()}, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                            {db.enc_expr()}, %s, %s, %s, %s, %s, %s, {_CLIENT_METADATA_SQL}, %s, NOW(), NOW())
                     RETURNING id
                     """,
                     (
@@ -1244,6 +1280,7 @@ class ConsentService(Service):
                         observed["session_id"],
                         observed["session_source"],
                         db.as_jsonb(observed["client_metadata"]),
+                        *db.bind_encrypt(observed["claimed_ip_address"]),
                         row["id"],
                     ),
                 )
