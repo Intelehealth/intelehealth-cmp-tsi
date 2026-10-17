@@ -131,7 +131,7 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `35_evidence_ip_encryption.sql` | Guardian evidence (`parental_verification_logs.verification_ref_id`, `.proof_metadata`) and the consent session IP (`consent_records.ip_address`) replaced by encrypted `<col>_enc`; `audit_logs.source_ip` widened to TEXT (partitions and archive tables too) so new audit rows store the client IP encrypted; `tsi_audit_source_ip()` shows it in console audit reads. Needs `app.enc_key` set when either table has rows (fails before changing anything otherwise) |
 | `36_pii_reveal_permission.sql` | Adds `pii:reveal` to the built-in DPO role, for the audited, rate-limited `reveal_user_id` (admin `pii` service). Additive |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`36` manually (each script is idempotent). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`36` manually (each of `13`–`36` is idempotent; `01`–`12` are for an empty database only). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \

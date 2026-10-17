@@ -24,8 +24,9 @@ New and changed endpoints:
 Behaviour changes operators must know:
 
 - Console responses mask principal identifiers and return no consent IP to operators. Plaintext goes only to API-key callers on their own fiduciary, PURGE-scope processors on purge reads and `confirm_purge_status`, processor webhooks and alerts, and a principal exporting their own history.
-- Audit `details` pseudonymise principal keys (`<key>_hmac`); `audit_logs.user_id` is unchanged.
-- Principal identities now depend on `DB_ENCRYPTION_KEY`. Losing the key makes every principal unattributable, and rotating it needs re-encryption of every `_enc` column and a rebuild of every `_hmac` column (see `docs/security/KEY_MANAGEMENT.md`).
+- Audit `details` keep their key names but store each principal-valued key as its pseudonym (the same `TSI_LOOKUP_SALT` HMAC as `audit_logs.user_id`, which is unchanged); job `input_payload` stores principal keys as `<key>_hmac`.
+- API response shapes: `_enc` and `_hmac` fields are never returned, principal identifiers are masked for console operators, and consent IPs are `null` for operators (shown only through a logged reveal). Integrations that read those fields must be updated.
+- Principal identities now depend on `DB_ENCRYPTION_KEY`. Losing the key makes every principal unattributable. Do not rotate it once data exists: rotation needs re-encryption of every `_enc` column and a rebuild of every `_hmac` column (consent records only under the consent maintenance opt-in), audit IPs are append-only and stay readable only with the old key, and certificates issued before rotation fail live subject verification (see `docs/security/KEY_MANAGEMENT.md`).
 - Env: `AUDIT_LIVE_YEARS` (default `3`, minimum `1`).
 - Console: DPO audit trail and guardian details, per-purpose revoke, and a logged reveal control on the principals page.
 
