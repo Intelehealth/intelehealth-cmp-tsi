@@ -86,3 +86,15 @@ def test_grievance_channel_column_defaults_portal(tx):
         assert cur.fetchone()["channel"] == "PORTAL"
         with pytest.raises(psycopg.errors.CheckViolation), tx.transaction():
             cur.execute("UPDATE grievances SET channel = 'FAX' WHERE fiduciary_id = %s", (fid,))
+
+
+def test_operator_logged_grievance_is_audited_as_the_operator(monkeypatch):
+    from dpdpcms_py.services import compliance as compliance_mod
+
+    events = []
+    _capture_submit(monkeypatch, _ctx(FID, _payload(), operator_id="op-1"))  # installs the DB stubs
+    monkeypatch.setattr(compliance_mod, "log_event", lambda *a, **k: events.append(k))
+    compliance_mod.GrievanceService().submit_grievance(_ctx(FID, _payload(channel="PHONE"), operator_id="op-1"))
+    compliance_mod.GrievanceService().submit_grievance(_ctx(FID, _payload()))
+    assert events[0]["initiator"] == "OPERATOR:op-1"
+    assert events[1]["initiator"] == "INTEGRATOR"

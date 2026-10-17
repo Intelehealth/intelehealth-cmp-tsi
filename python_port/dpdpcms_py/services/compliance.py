@@ -830,9 +830,16 @@ class GrievanceService(Service):
             "APP",
             None,
             "GRIEVANCE_SUBMITTED",
-            {"grievance_id": gid, "type": grievance_type, "reference_number": reference_number},
+            {"grievance_id": gid, "type": grievance_type, "reference_number": reference_number, "channel": channel},
             purpose_id=consent_record_id,
-            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            # A grievance a console operator logs is attributed to that operator.
+            initiator=(
+                f"OPERATOR:{ctx.operator_id}"
+                if ctx.operator_id
+                else "PRINCIPAL"
+                if ctx.auth_via_principal_jwt
+                else "INTEGRATOR"
+            ),
             source_ip=ctx.source_ip,
         )
         return {
