@@ -85,6 +85,7 @@ def test_maintenance_guard_rejects_a_non_array_payload(tx, value):
 def test_activating_a_version_retires_the_one_it_supersedes(tx):
     """P11-03 / CU-05: two ACTIVE versions let consent rest on a superseded
     notice, for a purpose the current notice had dropped."""
+    from dpdpcms_py import pii
     from dpdpcms_py.errors import ApiError
     from dpdpcms_py.services.catalog import PolicyService
     from dpdpcms_py.services.consent import ConsentService
@@ -129,7 +130,10 @@ def test_activating_a_version_retires_the_one_it_supersedes(tx):
         )
     )
     with tx.cursor() as cur:
-        cur.execute("SELECT policy_version FROM consent_records WHERE fiduciary_id = %s AND user_id = 'ravi'", (fid,))
+        cur.execute(
+            "SELECT policy_version FROM consent_records WHERE fiduciary_id = %s AND user_id_hmac = %s",
+            (fid, pii.hmac_hex("ravi")),
+        )
         assert [r["policy_version"] for r in cur.fetchall()] == ["v2"]
 
 
@@ -230,7 +234,11 @@ def test_withdrawal_reaches_only_registered_processors(tx):
     out = ConsentService().withdraw_consent(_ctx(fid, {"user_id": "asha", "purpose_ids": ["care"]}))
     assert out["processors_notified"] == 1
     with tx.cursor() as cur:
-        cur.execute("SELECT recipient_id FROM alerts WHERE fiduciary_id = %s AND recipient_type = 'PROCESSOR'", (fid,))
+        cur.execute(
+            f"SELECT {real_db.decrypt_col('recipient_id_enc')} AS recipient_id FROM alerts"
+            " WHERE fiduciary_id = %s AND recipient_type = 'PROCESSOR'",
+            (*real_db.bind_key(), fid),
+        )
         assert [r["recipient_id"] for r in cur.fetchall()] == [ids["lab"]]
         cur.execute("SELECT app_id FROM webhook_deliveries WHERE fiduciary_id = %s AND app_id IS NOT NULL", (fid,))
         assert [str(r["app_id"]) for r in cur.fetchall()] == [ids["lab"]]

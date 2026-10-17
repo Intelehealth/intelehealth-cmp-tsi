@@ -880,7 +880,8 @@ class ConsentService(Service):
             # in (or `language`, if asked), so the export reads in their language.
             language = ctx.payload.get("language")
             lines = [
-                f"Principal: {user_id}",
+                # A principal (or their fiduciary's key) sees the id; a console operator a mask.
+                f"Principal: {pii.principal_view(ctx, user_id)}",
                 f"Generated: {datetime.now(UTC).isoformat()}",
                 f"Records: {len(rows)}",
                 "",

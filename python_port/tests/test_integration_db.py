@@ -492,16 +492,18 @@ def test_delivery_floor_blocks_delete_truncate_and_in_place_rewrites(tx):
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
-            " VALUES ('PRINCIPAL', 'asha', %s, 'CONSENT_RECORDED') RETURNING id",
-            (fid,),
+            "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            " notification_type) VALUES ('PRINCIPAL', %s, %s, %s, 'CONSENT_RECORDED') RETURNING id",
+            (*_pid(cur, "asha"), fid),
         )
         nid = cur.fetchone()["id"]
         cur.execute(
-            "INSERT INTO notification_deliveries (notification_id, channel, recipient) VALUES (%s, 'SMS', '+911234') RETURNING id",
-            (nid,),
+            "INSERT INTO notification_deliveries (notification_id, channel, recipient_enc, recipient_hmac)"
+            " VALUES (%s, 'SMS', %s, %s) RETURNING id",
+            (nid, *_pid(cur, "+911234")),
         )
         did = cur.fetchone()["id"]
+        erased_enc, erased_hmac = _pid(cur, "erased:abc")
         cur.execute(
             "INSERT INTO webhook_deliveries (fiduciary_id, category, event_type, payload)"
             " VALUES (%s, 'NOTIFICATION', 'CONSENT_GIVEN', %s) RETURNING id",
@@ -512,7 +514,7 @@ def test_delivery_floor_blocks_delete_truncate_and_in_place_rewrites(tx):
     assert "one-year floor" in _raises(tx, "DELETE FROM notification_deliveries WHERE id = %s", (did,))
     assert "TRUNCATE" in _raises(tx, "TRUNCATE notification_deliveries")
     assert "TRUNCATE" in _raises(tx, "TRUNCATE webhook_deliveries")
-    assert "recipient" in _raises(tx, "UPDATE notification_deliveries SET recipient = '' WHERE id = %s", (did,))
+    assert "recipient" in _raises(tx, "UPDATE notification_deliveries SET recipient_enc = '' WHERE id = %s", (did,))
     assert "immutable" in _raises(tx, "UPDATE notification_deliveries SET channel = 'EMAIL' WHERE id = %s", (did,))
     assert "payload" in _raises(tx, "UPDATE webhook_deliveries SET payload = payload - 'purpose' WHERE id = %s", (wid,))
     # P8-03: deleting the parent notification names the real cause.
@@ -520,14 +522,17 @@ def test_delivery_floor_blocks_delete_truncate_and_in_place_rewrites(tx):
 
     with tx.cursor() as cur:
         cur.execute("UPDATE notification_deliveries SET status = 'SENT', attempt_count = 1 WHERE id = %s", (did,))
-        cur.execute("UPDATE notification_deliveries SET recipient = 'erased:abc' WHERE id = %s", (did,))
+        cur.execute(
+            "UPDATE notification_deliveries SET recipient_enc = %s, recipient_hmac = %s WHERE id = %s",
+            (erased_enc, erased_hmac, did),
+        )
         cur.execute(
             "UPDATE webhook_deliveries SET payload = jsonb_set(payload, '{user_id}', '\"erased:abc\"') WHERE id = %s",
             (wid,),
         )
-        cur.execute("SELECT recipient, status FROM notification_deliveries WHERE id = %s", (did,))
+        cur.execute("SELECT recipient_hmac, status FROM notification_deliveries WHERE id = %s", (did,))
         row = cur.fetchone()
-    assert row == {"recipient": "erased:abc", "status": "SENT"}
+    assert row == {"recipient_hmac": erased_hmac, "status": "SENT"}
 
 
 def test_floor_migration_is_idempotent_across_its_previous_version(tx):
@@ -639,9 +644,10 @@ def test_nomination_is_reported_with_the_status_it_was_selected_by(tx):
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO nominations (fiduciary_id, nominating_principal_id, nominated_principal_id, valid_from, valid_until)"
-            " VALUES (%s, 'asha', 'ravi', NOW() + INTERVAL '10 days', NOW() - INTERVAL '1 day')",
-            (fid,),
+            "INSERT INTO nominations (fiduciary_id, nominating_principal_id_enc, nominating_principal_id_hmac,"
+            " nominated_principal_id_enc, nominated_principal_id_hmac, valid_from, valid_until)"
+            " VALUES (%s, %s, %s, %s, %s, NOW() + INTERVAL '10 days', NOW() - INTERVAL '1 day')",
+            (fid, *_pid(cur, "asha"), *_pid(cur, "ravi")),
         )
         rows = RightsService().list_nominations(_ctx(fid, {"status": "PENDING"}))
     assert len(rows) == 1
@@ -676,8 +682,9 @@ def test_closure_with_retention_defers_then_sweep_raises_and_completes_the_purge
         )
         jobs.run_retention_sweep()
         cur.execute(
-            "SELECT id, user_id, action, trigger_event FROM purge_requests WHERE fiduciary_id = %s AND purpose_id = 'research'",
-            (fid,),
+            f"SELECT id, {real_db.decrypt_col('user_id_enc')} AS user_id, action, trigger_event FROM purge_requests"
+            " WHERE fiduciary_id = %s AND purpose_id = 'research'",
+            (*real_db.bind_key(), fid),
         )
         purges = cur.fetchall()
         assert [(p["user_id"], p["action"], p["trigger_event"]) for p in purges] == [
@@ -698,16 +705,16 @@ def test_notification_delivery_retention_prunes_only_terminal_rows_past_the_floo
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
-            " VALUES ('PRINCIPAL', 'asha', %s, 'CONSENT_RECORDED') RETURNING id",
+            "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            f" notification_type) VALUES ('PRINCIPAL', {_ASHA_ENC}, {_ASHA_HMAC}, %s, 'CONSENT_RECORDED') RETURNING id",
             (fid,),
         )
         nid = cur.fetchone()["id"]
         for status, age in (("SENT", 400), ("PENDING", 400), ("SENT", 30)):
             cur.execute(
-                "INSERT INTO notification_deliveries (notification_id, channel, recipient, status, created_at)"
-                " VALUES (%s, 'SMS', '+91', %s, NOW() - make_interval(days => %s))",
-                (nid, status, age),
+                "INSERT INTO notification_deliveries (notification_id, channel, recipient_enc, recipient_hmac, status,"
+                " created_at) VALUES (%s, 'SMS', %s, %s, %s, NOW() - make_interval(days => %s))",
+                (nid, *_pid(cur, "+91"), status, age),
             )
         # A requested 30-day retention is clamped up to the one-year floor.
         out = jobs.prune_old_notification_deliveries(days=30)
@@ -799,8 +806,9 @@ def test_backfill_never_redispatches_a_notification_whose_deliveries_were_pruned
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, created_at)"
-            " VALUES ('PRINCIPAL', 'asha', %s, 'CONSENT_RECORDED', NOW() - INTERVAL '400 days') RETURNING id",
+            "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            f" notification_type, created_at) VALUES ('PRINCIPAL', {_ASHA_ENC}, {_ASHA_HMAC}, %s, 'CONSENT_RECORDED',"
+            " NOW() - INTERVAL '400 days') RETURNING id",
             (fid,),
         )
         old = cur.fetchone()["id"]
@@ -1003,8 +1011,8 @@ def test_marking_read_by_id_is_audited(tx):
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
-            " VALUES ('PRINCIPAL', 'asha', %s, 'CONSENT_RECORDED') RETURNING id",
+            "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            f" notification_type) VALUES ('PRINCIPAL', {_ASHA_ENC}, {_ASHA_HMAC}, %s, 'CONSENT_RECORDED') RETURNING id",
             (fid,),
         )
         nid = str(cur.fetchone()["id"])
@@ -1043,14 +1051,18 @@ def test_reopening_a_purpose_cancels_its_pending_purges(tx):
             ("old", "PurposeClosed", "PENDING", "2 days"),
         ):
             cur.execute(
-                "INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, status, initiated_at)"
-                " VALUES (%s, %s, 'Care', %s, %s, NOW() - %s::interval)",
-                (user, fid, trigger, status, age),
+                "INSERT INTO purge_requests (user_id_enc, user_id_hmac, fiduciary_id, purpose_id, trigger_event, status,"
+                " initiated_at) VALUES (%s, %s, %s, 'Care', %s, %s, NOW() - %s::interval)",
+                (*_pid(cur, user), fid, trigger, status, age),
             )
     out = PurposeLifecycleService().set_purpose_state(_ctx(fid, {"purpose_id": "CARE ", "state": "OPEN"}))
     assert out["purge_requests_cancelled"] == 2
     with tx.cursor() as cur:
-        cur.execute("SELECT user_id, status, purpose_id FROM purge_requests WHERE fiduciary_id = %s", (fid,))
+        cur.execute(
+            f"SELECT {real_db.decrypt_col('user_id_enc')} AS user_id, status, purpose_id FROM purge_requests"
+            " WHERE fiduciary_id = %s",
+            (*real_db.bind_key(), fid),
+        )
         rows = cur.fetchall()
         statuses = {r["user_id"]: r["status"] for r in rows}
         cur.execute(
@@ -1353,7 +1365,9 @@ def test_wording_only_notice_change_activates_and_reconsent_completes(tx):
     out = PolicyService().publish_policy(_ctx(fid, {"policy_id": pol, "version": "v2"}))
     assert out["data"]["status"] == "ACTIVE"
     with tx.cursor() as cur:
-        cur.execute("SELECT status FROM reconsent_requests WHERE fiduciary_id = %s AND user_id = 'asha'", (fid,))
+        cur.execute(
+            f"SELECT status FROM reconsent_requests WHERE fiduciary_id = %s AND user_id_hmac = {_ASHA_HMAC}", (fid,)
+        )
         assert cur.fetchone()["status"] == "PENDING"
     granted = PolicyService().request_reconsent(
         _principal_ctx(
@@ -1480,16 +1494,20 @@ def test_closure_raises_purges_for_principals_who_already_withdrew(tx):
         _seed_consent(cur, fid, pol, "asha")
         _seed_consent(cur, fid, pol, "never", granted=False)
         cur.execute(
-            "INSERT INTO consent_records (id, user_id, fiduciary_id, policy_id, policy_version, timestamp, jurisdiction,"
-            " language_selected, data_point_consents, is_active_consent, consent_status_general, consent_mechanism,"
-            " ip_address) VALUES (uuid_generate_v4(), 'ramesh', %s, %s, 'v1', NOW(), 'IN', 'en', %s, FALSE,"
-            " 'CONSENT_GIVEN', 'WEB', '1.2.3.4')",
-            (fid, pol, real_db.as_jsonb([{"data_point_id": "care", "consent_granted": True}])),
+            "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version,"
+            " timestamp, jurisdiction, language_selected, data_point_consents, is_active_consent,"
+            " consent_status_general, consent_mechanism, ip_address) VALUES (uuid_generate_v4(), %s, %s, %s, %s,"
+            " 'v1', NOW(), 'IN', 'en', %s, FALSE, 'CONSENT_GIVEN', 'WEB', '1.2.3.4')",
+            (*_pid(cur, "ramesh"), fid, pol, real_db.as_jsonb([{"data_point_id": "care", "consent_granted": True}])),
         )
         cur.execute("INSERT INTO purpose_lifecycle (fiduciary_id, purpose_id) VALUES (%s, 'care')", (fid,))
     out = close_purpose_exec(fid, "care")
     with tx.cursor() as cur:
-        cur.execute("SELECT user_id FROM purge_requests WHERE fiduciary_id = %s ORDER BY user_id", (fid,))
+        cur.execute(
+            f"SELECT {real_db.decrypt_col('user_id_enc')} AS user_id FROM purge_requests WHERE fiduciary_id = %s"
+            " ORDER BY 1",
+            (*real_db.bind_key(), fid),
+        )
         users = [r["user_id"] for r in cur.fetchall()]
     assert users == ["asha", "ramesh"] and out["purge_requests_created"] == 2
 
@@ -1703,7 +1721,9 @@ def test_withdrawal_fans_out_to_each_processor(tx, monkeypatch):
     assert out["processors_notified"] == 2
     with tx.cursor() as cur:
         cur.execute(
-            "SELECT recipient_id, id FROM alerts WHERE fiduciary_id = %s AND recipient_type = 'PROCESSOR'", (fid,)
+            f"SELECT {real_db.decrypt_col('recipient_id_enc')} AS recipient_id, id FROM alerts"
+            " WHERE fiduciary_id = %s AND recipient_type = 'PROCESSOR'",
+            (*real_db.bind_key(), fid),
         )
         alerts = {r["recipient_id"]: str(r["id"]) for r in cur.fetchall()}
         cur.execute(

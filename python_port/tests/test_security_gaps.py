@@ -710,8 +710,9 @@ def test_generate_certificate_emits_signature_and_metadata(monkeypatch):
     monkeypatch.setattr(governance, "log_event", lambda *a, **k: None)
 
     def fake_insert(sql, params=()):
-        # columns: id,fiduciary_id,subject_principal_id,certifying_officer_id,case_ref_id,certificate_data,attestation_text
-        captured["data"] = getattr(params[4], "obj", params[4])
+        # params: fiduciary_id, subject_principal_id enc (value, key) + hmac (value, key),
+        # certifying_officer_id, case_ref_id, certificate_data, attestation_text
+        captured["data"] = getattr(params[7], "obj", params[7])
         return {"id": "cert-1"}
 
     monkeypatch.setattr(governance.db, "insert_returning", fake_insert)
@@ -1634,7 +1635,7 @@ def test_gr_07_escalation_notifies_dpo(monkeypatch):
         return []
 
     def fake_execute(sql, params=()):
-        executed.append(sql)
+        executed.append((sql, params))
         return 1
 
     def fake_one(sql, params=()):
@@ -1648,7 +1649,9 @@ def test_gr_07_escalation_notifies_dpo(monkeypatch):
     monkeypatch.setattr(jobs, "log_event", lambda *a, **k: None)
     out = jobs.escalate_overdue_grievances()
     assert out["escalated"] == 1
-    dpo_notices = [s for s in executed if "VALUES ('DPO'" in s and "GRIEVANCE_ESCALATED" in s]
+    dpo_notices = [
+        p for s, p in executed if "INSERT INTO notifications" in s and p[0] == "DPO" and "GRIEVANCE_ESCALATED" in p
+    ]
     assert len(dpo_notices) == 1
 
 

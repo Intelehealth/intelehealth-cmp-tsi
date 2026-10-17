@@ -10,7 +10,7 @@ from typing import Any
 
 from psycopg import sql
 
-from . import db
+from . import db, pii
 from .audit import log_event
 from .config import settings
 from .services.base import csv_safe
@@ -110,7 +110,7 @@ def escalate_overdue_grievances() -> dict[str, int]:
     # (GRIEVANCE_ESCALATION_HOURS) has passed. The UPDATE ... RETURNING is the
     # claim, so two workers can never escalate the same grievance twice (UD-12).
     rows = db.all(
-        """
+        f"""
         UPDATE grievances SET status = 'ESCALATED', escalated_at = NOW(), last_updated_at = NOW()
         WHERE id IN (
             SELECT id FROM grievances
@@ -120,34 +120,26 @@ def escalate_overdue_grievances() -> dict[str, int]:
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, user_id, fiduciary_id, reference_number, language
+        RETURNING id, {pii.dec_sql("user_id_enc")} AS user_id, fiduciary_id, reference_number, language
         """,
-        (settings.grievance_escalation_hours, settings.worker_batch_size),
+        (settings.grievance_escalation_hours, settings.worker_batch_size, *db.bind_key()),
     )
     count = 0
     for row in rows:
         gid = str(row["id"])
         fid = str(row["fiduciary_id"])
         # GR-03: answered in the language the grievance was filed in.
-        db.execute(
-            """
-            INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)
-            VALUES ('PRINCIPAL', %s, %s, 'GRIEVANCE_ESCALATED', %s)
-            """,
-            (
-                str(row["user_id"]),
-                fid,
-                db.as_jsonb({"reference_number": row.get("reference_number"), "language": row.get("language")}),
-            ),
+        _notify(
+            "PRINCIPAL",
+            str(row["user_id"]),
+            fid,
+            "GRIEVANCE_ESCALATED",
+            {"reference_number": row.get("reference_number"), "language": row.get("language")},
         )
         # GR-07: an escalation must reach the fiduciary's DPO too, not only the
         # complainant — the DPO owns the SLA and can reassign or drive the
         # overdue grievance to resolution.
-        db.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)"
-            " VALUES ('DPO', %s, %s, 'GRIEVANCE_ESCALATED')",
-            (_dpo_recipient(fid), fid),
-        )
+        _notify("DPO", _dpo_recipient(fid), fid, "GRIEVANCE_ESCALATED")
         log_event(str(row["user_id"]), fid, "APP", None, "GRIEVANCE_ESCALATED", {"grievance_id": gid})
         count += 1
     return {"escalated": count}
@@ -223,10 +215,7 @@ def flag_overdue_purges() -> dict[str, int]:
     )
     for row in rows:
         fid = str(row["fiduciary_id"])
-        db.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type) VALUES ('DPO', %s, %s, 'PURGE_OVERDUE')",
-            (_dpo_recipient(fid), fid),
-        )
+        _notify("DPO", _dpo_recipient(fid), fid, "PURGE_OVERDUE")
         log_event(
             "SYSTEM",
             fid,
@@ -559,14 +548,12 @@ def flag_security_anomalies() -> dict[str, int]:
             None,
             {"failures": int(row["failures"]), "window_minutes": SECURITY_WINDOW_MINUTES},
         )
-        db.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
-            " VALUES ('DPO', %s, %s, 'SECURITY_AUTH_FAILURE_BURST', %s)",
-            (
-                _dpo_recipient(fid),
-                fid,
-                db.as_jsonb({"failures": int(row["failures"]), "window_minutes": SECURITY_WINDOW_MINUTES}),
-            ),
+        _notify(
+            "DPO",
+            _dpo_recipient(fid),
+            fid,
+            "SECURITY_AUTH_FAILURE_BURST",
+            {"failures": int(row["failures"]), "window_minutes": SECURITY_WINDOW_MINUTES},
         )
         raised += 1
     return {"alerts_raised": raised}
@@ -607,15 +594,12 @@ def flag_breach_board_deadlines() -> dict[str, int]:
             str(row["id"]),
             {"breach_id": str(row["id"]), "deadline": row["board_notification_deadline"].isoformat()},
         )
-        db.execute(
-            "INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type, context)"
-            " VALUES ('DPO', %s, %s, %s, %s)",
-            (
-                _dpo_recipient(fid),
-                fid,
-                row["alert_type"],
-                db.as_jsonb({"title": row["title"], "deadline": row["board_notification_deadline"].isoformat()}),
-            ),
+        _notify(
+            "DPO",
+            _dpo_recipient(fid),
+            fid,
+            row["alert_type"],
+            {"title": row["title"], "deadline": row["board_notification_deadline"].isoformat()},
         )
     return {"alerted": len(rows)}
 
@@ -626,6 +610,23 @@ def _dpo_recipient(fiduciary_id: str) -> str:
         (fiduciary_id,),
     )
     return str(row["id"]) if row else fiduciary_id
+
+
+def _notify(
+    recipient_type: str, recipient_id: str, fiduciary_id: str, notification_type: str, context: dict | None = None
+) -> None:
+    """Queue a notification; the recipient id is stored as its _enc/_hmac pair (db/34)."""
+    db.execute(
+        "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+        f" notification_type, context) VALUES (%s, {pii.PID_VALUES}, %s, %s, %s)",
+        (
+            recipient_type,
+            *pii.pid_params(recipient_id),
+            fiduciary_id,
+            notification_type,
+            db.as_jsonb(context) if context is not None else None,
+        ),
+    )
 
 
 def run_retention_sweep() -> dict[str, int]:
@@ -649,15 +650,17 @@ def run_retention_sweep() -> dict[str, int]:
             if _claim_pending_purges(fid, purpose_id, "RetentionPolicyExpiry"):
                 rowcount = db.execute(
                     """
-                    INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details, action)
-                    SELECT DISTINCT cr.user_id, cr.fiduciary_id, %s, 'RetentionPolicyExpiry', %s, %s
+                    INSERT INTO purge_requests
+                        (user_id_enc, user_id_hmac, fiduciary_id, purpose_id, trigger_event, details, action)
+                    SELECT DISTINCT ON (cr.user_id_hmac)
+                           cr.user_id_enc, cr.user_id_hmac, cr.fiduciary_id, %s, 'RetentionPolicyExpiry', %s, %s
                     FROM consent_records cr,
                          LATERAL jsonb_array_elements(cr.data_point_consents) AS p
                     WHERE cr.fiduciary_id = %s
                       AND lower(btrim(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id'))) = lower(btrim(%s))
                       AND NOT EXISTS (
                             SELECT 1 FROM purge_requests pr
-                            WHERE pr.user_id = cr.user_id
+                            WHERE pr.user_id_hmac = cr.user_id_hmac
                               AND pr.fiduciary_id = cr.fiduciary_id
                               AND pr.purpose_id = %s
                               AND pr.trigger_event = 'RetentionPolicyExpiry'
@@ -674,31 +677,19 @@ def run_retention_sweep() -> dict[str, int]:
                     ),
                 )
                 created += rowcount or 0
-                db.execute(
-                    """
-                    INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
-                    VALUES ('DPO', %s, %s, 'PURGE_EXECUTED')
-                    """,
-                    (_dpo_recipient(fid), fid),
-                )
+                _notify("DPO", _dpo_recipient(fid), fid, "PURGE_EXECUTED")
         elif window <= float(settings.purge_notice_hours):
             existing = db.one(
-                """
+                f"""
                 SELECT 1 FROM notifications
                 WHERE fiduciary_id = %s AND notification_type = 'PURGE_SCHEDULED'
-                  AND recipient_id = %s AND created_at > NOW() - INTERVAL '24 hours'
+                  AND {pii.match_sql("recipient_id")} AND created_at > NOW() - INTERVAL '24 hours'
                 LIMIT 1
                 """,
-                (fid, _dpo_recipient(fid)),
+                (fid, *pii.hmac_params(_dpo_recipient(fid))),
             )
             if not existing:
-                db.execute(
-                    """
-                    INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
-                    VALUES ('DPO', %s, %s, 'PURGE_SCHEDULED')
-                    """,
-                    (_dpo_recipient(fid), fid),
-                )
+                _notify("DPO", _dpo_recipient(fid), fid, "PURGE_SCHEDULED")
                 notices += 1
                 log_event(
                     "SYSTEM",
@@ -729,6 +720,10 @@ _CSV_SUBSCRIPTIONS: dict[str, tuple[str, str, str]] = {
         "timestamp",
     ),
 }
+# Export columns holding a principal id: stored as <col>_enc/<col>_hmac (db/34),
+# decrypted for the export and written masked - every export job is operator
+# requested. audit_logs.user_id is already a pseudonym and is not listed.
+_CSV_PRINCIPAL_COLUMNS = {"CONSENT": {"user_id"}, "PRINCIPAL": {"user_id"}, "GRIEVANCE": {"user_id"}}
 
 
 def execute_queued_jobs() -> dict[str, int]:
@@ -785,9 +780,15 @@ def execute_queued_jobs() -> dict[str, int]:
 
 
 def _write_export(job: dict[str, Any]) -> Path:
-    table, columns, date_column = _CSV_SUBSCRIPTIONS[str(job["subtype"]).upper()]
+    subtype = str(job["subtype"]).upper()
+    table, columns, date_column = _CSV_SUBSCRIPTIONS[subtype]
+    principal_columns = _CSV_PRINCIPAL_COLUMNS.get(subtype, set())
+    fieldnames = [col.strip() for col in columns.split(",")]
+    select = ", ".join(
+        f"{pii.dec_sql(f'{col}_enc')} AS {col}" if col in principal_columns else col for col in fieldnames
+    )
     where = ["fiduciary_id = %s"]
-    params: list[Any] = [str(job["fiduciary_id"])]
+    params: list[Any] = [*(db.bind_key() * len(principal_columns)), str(job["fiduciary_id"])]
     if job.get("start_date"):
         where.append(f"{date_column} >= %s::date")
         params.append(job["start_date"])
@@ -796,11 +797,13 @@ def _write_export(job: dict[str, Any]) -> Path:
         # AUDIT chain verdict below examines (P10-06).
         where.append(f"{date_column} < %s::date + INTERVAL '1 day'")
         params.append(job["end_date"])
-    rows = db.all(f"SELECT {columns} FROM {table} WHERE {' AND '.join(where)} ORDER BY {date_column} DESC", params)
+    rows = db.all(f"SELECT {select} FROM {table} WHERE {' AND '.join(where)} ORDER BY {date_column} DESC", params)
+    for row in rows:
+        for col in principal_columns:
+            row[col] = pii.mask(row[col])
     output_dir = settings.export_path
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"job_{job['id']}_{str(job['subtype']).lower()}.csv"
-    fieldnames = [col.strip() for col in columns.split(",")]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

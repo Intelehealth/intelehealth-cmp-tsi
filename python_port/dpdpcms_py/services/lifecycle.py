@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 import uuid as uuidlib
 from typing import Any
 
-from .. import db
+from .. import db, pii
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
 from .base import Service, canonical_purpose_id, require
+
+log = logging.getLogger("dpdpcms.lifecycle")
 
 VALID_DURATION_TYPES = {"OPEN_ENDED", "TIME_BOUND"}
 VALID_STATES = {"OPEN", "CLOSED"}
@@ -124,21 +127,23 @@ def record_alert(
         return None
     try:
         row = db.insert_returning(
-            """
-            INSERT INTO alerts (fiduciary_id, recipient_type, recipient_id, alert_type, event_ref_id, payload)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            f"""
+            INSERT INTO alerts (fiduciary_id, recipient_type, recipient_id_enc, recipient_id_hmac, alert_type,
+                                event_ref_id, payload)
+            VALUES (%s, %s, {pii.PID_VALUES}, %s, %s, %s)
             RETURNING id
             """,
             (
                 str(fiduciary_id),
                 recipient_type,
-                str(recipient_id or fiduciary_id),
+                *pii.pid_params(str(recipient_id or fiduciary_id)),
                 alert_type,
                 event_ref_id,
                 db.as_jsonb(payload or {}),
             ),
         )
     except Exception:
+        log.exception("Could not record %s alert for fiduciary %s", alert_type, fiduciary_id)
         return None
     alert_id = str(row["id"]) if row else None
     # NT-10: every alert is recorded in the audit log, not only the ones raised
@@ -228,9 +233,11 @@ def close_purpose_exec(
     # every principal who granted it in ANY record, active or retired. PL-03:
     # a principal who already WITHDREW the purpose still has data held under
     # it, and closure is what orders that data erased.
+    # The encrypted pair is copied as stored (one row per HMAC), so the
+    # principal id is never decrypted here.
     holders = db.all(
         """
-        SELECT DISTINCT cr.user_id
+        SELECT DISTINCT ON (cr.user_id_hmac) cr.user_id_enc, cr.user_id_hmac
         FROM consent_records cr,
              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
         WHERE cr.fiduciary_id = %s
@@ -242,7 +249,7 @@ def close_purpose_exec(
         """,
         (fiduciary_id, purpose_id),
     )
-    principals = {str(h["user_id"]) for h in holders}
+    principals = {str(h["user_id_hmac"]): str(h["user_id_enc"]) for h in holders}
 
     # PL-03: closure and the retention sweep must agree. When a retention period
     # governs this purpose (configured policy, else the ROPA — the same lookup the
@@ -264,24 +271,25 @@ def close_purpose_exec(
             """,
             (actor, reason, action, fiduciary_id, purpose_id),
         )
-        for user_id in principals:
+        for user_hmac, user_enc in principals.items():
             if retention_days:
                 cur.execute(
                     """
-                    INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
-                    VALUES ('PRINCIPAL', %s, %s, 'PURPOSE_CLOSED')
+                    INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,
+                                               notification_type)
+                    VALUES ('PRINCIPAL', %s, %s, %s, 'PURPOSE_CLOSED')
                     """,
-                    (user_id, fiduciary_id),
+                    (user_enc, user_hmac, fiduciary_id),
                 )
                 continue
             cur.execute(
                 """
                 SELECT 1 FROM purge_requests
-                WHERE user_id = %s AND fiduciary_id = %s AND purpose_id = %s
+                WHERE user_id_hmac = %s AND fiduciary_id = %s AND purpose_id = %s
                   AND trigger_event = 'PurposeClosed' AND status IN ('PENDING', 'IN_PROGRESS')
                 LIMIT 1
                 """,
-                (user_id, fiduciary_id, purpose_id),
+                (user_hmac, fiduciary_id, purpose_id),
             )
             existing = cur.fetchone()
             if existing:
@@ -289,18 +297,20 @@ def close_purpose_exec(
                 continue
             cur.execute(
                 """
-                INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, details, action)
-                VALUES (%s, %s, %s, 'PurposeClosed', %s, %s)
+                INSERT INTO purge_requests
+                    (user_id_enc, user_id_hmac, fiduciary_id, purpose_id, trigger_event, details, action)
+                VALUES (%s, %s, %s, %s, 'PurposeClosed', %s, %s)
                 """,
-                (user_id, fiduciary_id, purpose_id, reason, action),
+                (user_enc, user_hmac, fiduciary_id, purpose_id, reason, action),
             )
             created += 1
             cur.execute(
                 """
-                INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
-                VALUES ('PRINCIPAL', %s, %s, 'PURPOSE_CLOSED')
+                INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,
+                                           notification_type)
+                VALUES ('PRINCIPAL', %s, %s, %s, 'PURPOSE_CLOSED')
                 """,
-                (user_id, fiduciary_id),
+                (user_enc, user_hmac, fiduciary_id),
             )
 
     try:
@@ -431,7 +441,7 @@ class PurposeLifecycleService(Service):
                         SELECT 1
                         FROM consent_records cr,
                              LATERAL jsonb_array_elements(cr.data_point_consents) AS p
-                        WHERE cr.fiduciary_id = pr.fiduciary_id AND cr.user_id = pr.user_id
+                        WHERE cr.fiduciary_id = pr.fiduciary_id AND cr.user_id_hmac = pr.user_id_hmac
                           AND cr.is_active_consent IS TRUE
                           AND lower(btrim(COALESCE(p ->> 'data_point_id', p ->> 'purpose_id', p ->> 'id'))) = pr.purpose_id
                           AND (p ->> 'consent_granted' = 'true' OR lower(p ->> 'status') IN ('granted', 'consent_given'))

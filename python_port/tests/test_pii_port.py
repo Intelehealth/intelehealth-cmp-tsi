@@ -830,3 +830,166 @@ def test_principal_grievance_log_entry_names_no_principal_id(tx):
         row = cur.fetchone()
     assert row["communication_log"][-1]["by"] == "PRINCIPAL"
     assert pid not in row["t"]
+
+
+# ---- Task 7: remaining services, exports and delivery ------------------------------
+
+
+@needs_db
+def test_export_job_writes_masked_principal_ids(tx, tmp_path, monkeypatch):
+    import csv
+    import dataclasses
+
+    from dpdpcms_py import jobs, pii
+    from dpdpcms_py.config import settings
+    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.services.governance import JobService
+
+    pid = "asha@example.org"
+    monkeypatch.setattr(jobs, "settings", dataclasses.replace(settings, export_path=tmp_path))
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    _grant(fid, pol, pid)
+    GrievanceService().submit_grievance(
+        _api_ctx(fid, {"user_id": pid, "type": "GENERAL_COMPLAINT", "subject": "s", "description": "d"})
+    )
+    for subtype in ("CONSENT", "PRINCIPAL", "GRIEVANCE"):
+        JobService().create_job(_ctx(fid, {"job_type": "EXPORT", "subtype": subtype}, operator_id="op-1"))
+    assert jobs.execute_queued_jobs()["completed"] >= 3
+    with tx.cursor() as cur:
+        cur.execute("SELECT subtype, output_file_path FROM jobs WHERE fiduciary_id = %s", (fid,))
+        paths = {r["subtype"]: r["output_file_path"] for r in cur.fetchall()}
+    assert set(paths) == {"CONSENT", "PRINCIPAL", "GRIEVANCE"}
+    for subtype, path in paths.items():
+        text = open(path, encoding="utf-8").read()
+        assert pid not in text, f"plaintext principal id in the {subtype} export"
+        rows = list(csv.DictReader(text.splitlines()))
+        assert rows and {r["user_id"] for r in rows} == {pii.mask(pid)}, subtype
+
+
+@needs_db
+def test_job_input_payload_has_no_raw_principal_id(tx):
+    import json
+
+    from dpdpcms_py import pii
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.governance import JobService
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    service = JobService()
+    as_dict = {"user_id": pid, "filters": [{"principal_id": f" {pid} "}], "purpose_id": "care"}
+    ids = [
+        service.create_job(_ctx(fid, {"job_type": "EXPORT", "input_payload": raw}, operator_id="op-1"))["job_id"]
+        for raw in (as_dict, json.dumps(as_dict))
+    ]
+    with tx.cursor() as cur:
+        cur.execute("SELECT input_payload FROM jobs WHERE id = ANY(%s::uuid[])", (ids,))
+        stored = [r["input_payload"] for r in cur.fetchall()]
+    assert len(stored) == 2
+    for text in stored:
+        assert pid not in text
+        assert json.loads(text) == {
+            "user_id_hmac": pii.hmac_hex(pid),
+            "filters": [{"principal_id_hmac": pii.hmac_hex(pid)}],
+            "purpose_id": "care",
+        }
+    with pytest.raises(ApiError) as err:
+        service.create_job(_ctx(fid, {"job_type": "EXPORT", "input_payload": f"user {pid}"}, operator_id="op-1"))
+    assert err.value.status == 400
+
+
+@needs_db
+def test_notification_delivery_decrypts_recipient(tx, monkeypatch):
+    import dataclasses
+
+    from dpdpcms_py import delivery, pii
+    from dpdpcms_py.config import settings
+
+    pid = "+919876543210"
+    sent = []
+    monkeypatch.setattr(delivery, "settings", dataclasses.replace(settings, sms_gateway_url="https://sms.example"))
+    monkeypatch.setattr(delivery, "post_json", lambda url, body, timeout=0: sent.append(body) or (200, "ok"))
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        enc, h = _enc_hmac(cur, pid)
+        cur.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            " notification_type) VALUES ('PRINCIPAL', %s, %s, %s, 'CONSENT_RECORDED') RETURNING id",
+            (enc, h, fid),
+        )
+        nid = cur.fetchone()["id"]
+    delivery.process_pending_notifications()
+    # Other committed notifications may be pending too; this one reaches the
+    # gateway once, under its decrypted id.
+    assert [b["recipient_id"] for b in sent].count(pid) == 1
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT channel, status, recipient_hmac, to_jsonb(d)::text AS j FROM notification_deliveries d"
+            " WHERE notification_id = %s",
+            (nid,),
+        )
+        rows = cur.fetchall()
+    assert {(r["channel"], r["status"]) for r in rows} == {("IN_APP", "SENT"), ("SMS", "SENT")}
+    assert all(r["recipient_hmac"] == pii.hmac_hex(pid) and pid not in r["j"] for r in rows)
+
+
+@needs_db
+def test_consent_history_pdf_masks_the_principal_for_operators_only(tx, monkeypatch):
+    from dpdpcms_py import pdfgen, pii
+    from dpdpcms_py.services.consent import ConsentService
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    _grant(fid, pol, pid)
+    captured = []
+    monkeypatch.setattr(pdfgen, "text_pdf", lambda title, lines: captured.append(lines) or b"%PDF")
+    service = ConsentService()
+    service.export_consent_history(_ctx(fid, {"user_id": pid, "format": "pdf"}, operator_id="op-1"))
+    service.export_consent_history(
+        _ctx(fid, {"user_id": pid, "format": "pdf"}, auth_via_principal_jwt=True, principal_user_id=pid)
+    )
+    service.export_consent_history(_api_ctx(fid, {"user_id": pid, "format": "pdf"}))
+    assert [lines[0] for lines in captured] == [
+        f"Principal: {pii.mask(pid)}",
+        f"Principal: {pid}",
+        f"Principal: {pid}",
+    ]
+    assert pid not in "\n".join(captured[0])
+
+
+@needs_db
+def test_alerts_store_encrypted_recipient_and_acknowledger(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.services.alerts import AlertService
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    service = AlertService()
+    alert_id = service.notify_alert(
+        _api_ctx(fid, {"recipient_type": "PRINCIPAL", "recipient_id": pid, "alert_type": "CONSENT_EXPIRING"})
+    )["alert_id"]
+    principal = RequestContext(
+        path="/api/v1/client/alerts",
+        category="client",
+        service="alerts",
+        payload={},
+        headers={},
+        fiduciary_id=fid,
+        principal_user_id=f" {pid} ",
+        auth_via_principal_jwt=True,
+    )
+    assert [a["recipient_id"] for a in service.list_alerts(principal)] == [pid]
+    principal.payload = {"alert_id": alert_id}
+    assert service.acknowledge_alert(principal)["status"] == "ACKNOWLEDGED"
+    [row] = service.list_alerts(_ctx(fid, {}, operator_id="op-1"))
+    assert (row["recipient_id"], row["acknowledged_by"]) == (pii.mask(pid), pii.mask(pid))
+    assert not any(k.endswith(("_enc", "_hmac")) for k in row)
+    with tx.cursor() as cur:
+        _no_plaintext(cur, fid, pid, ("alerts",))
+        cur.execute("SELECT recipient_id_hmac, acknowledged_by_hmac FROM alerts WHERE id = %s", (alert_id,))
+        assert set(cur.fetchone().values()) == {pii.hmac_hex(pid)}

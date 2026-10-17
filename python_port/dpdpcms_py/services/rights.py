@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from .. import db
+from .. import db, pii
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
@@ -37,17 +37,19 @@ class RightsService(Service):
         nominator = require(ctx.payload.get("nominating_principal_id"), "nominating_principal_id")
         nominated = require(ctx.payload.get("nominated_principal_id"), "nominated_principal_id")
         row = db.insert_returning(
-            """
+            f"""
             INSERT INTO nominations
-                (id, fiduciary_id, nominating_principal_id, nominated_principal_id,
+                (id, fiduciary_id, nominating_principal_id_enc, nominating_principal_id_hmac,
+                 nominated_principal_id_enc, nominated_principal_id_hmac,
                  relationship, valid_from, valid_until, status, created_at, last_updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, COALESCE(%s, NOW()), %s, %s, NOW(), NOW())
+            VALUES (uuid_generate_v4(), %s, {pii.PID_VALUES}, {pii.PID_VALUES}, %s, COALESCE(%s, NOW()), %s, %s,
+                    NOW(), NOW())
             RETURNING id
             """,
             (
                 fid,
-                nominator,
-                nominated,
+                *pii.pid_params(str(nominator)),
+                *pii.pid_params(str(nominated)),
                 ctx.payload.get("relationship"),
                 # P6-07: a caller-supplied valid_from (a future effective date) is
                 # honoured instead of being silently discarded; the clone-safety
@@ -80,8 +82,8 @@ class RightsService(Service):
         params: list = [fid]
         nominator = principal_list_filter(ctx, "nominating_principal_id")
         if nominator:
-            where.append("nominating_principal_id = %s")
-            params.append(nominator)
+            where.append(pii.match_sql("nominating_principal_id"))
+            params.extend(pii.hmac_params(str(nominator)))
         # P6-07: the EFFECTIVE status derives from the dates, not the stored
         # literal. A nomination dated 2030 is PENDING (not active) until
         # valid_from; one whose valid_until has passed is EXPIRED. Filtering by
@@ -100,7 +102,10 @@ class RightsService(Service):
             params.append(status_filter)
         params.append(int(ctx.payload.get("limit") or 50))
         rows = db.all(
-            f"SELECT * FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params
+            f"SELECT *, {pii.dec_sql('nominating_principal_id_enc')} AS nominating_principal_id,"
+            f" {pii.dec_sql('nominated_principal_id_enc')} AS nominated_principal_id"
+            f" FROM nominations WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s",
+            [*db.bind_key(), *db.bind_key(), *params],
         )
         # P6-07/P7-03: derive an EFFECTIVE status from the dates, but never
         # override a terminal state and never overwrite the stored value.
@@ -111,7 +116,7 @@ class RightsService(Service):
         now = datetime.now(UTC)
         out = []
         for row in rows:
-            item = db.to_jsonable(row)
+            item = pii.principal_row(ctx, row, "nominating_principal_id", "nominated_principal_id")
             stored = item.get("status")
             effective = stored
             if stored not in {"REVOKED", "EXPIRED"}:
@@ -137,12 +142,12 @@ class RightsService(Service):
             params.append(ctx.fiduciary_id)
         if ctx.auth_via_principal_jwt:
             row = db.one(
-                f"SELECT nominating_principal_id FROM nominations WHERE {' AND '.join(where)}",
+                f"SELECT nominating_principal_id_hmac FROM nominations WHERE {' AND '.join(where)}",
                 params,
             )
             if not row:
                 raise ApiError(404, "Not Found", "Nomination not found.")
-            if str(row["nominating_principal_id"]) != ctx.principal_user_id:
+            if row["nominating_principal_id_hmac"] != pii.hmac_hex(str(ctx.principal_user_id or "")):
                 raise ApiError(403, "Forbidden", "You may only revoke your own nominations.")
         updated = db.execute(
             f"UPDATE nominations SET status = 'REVOKED', last_updated_at = NOW() WHERE {' AND '.join(where)}", params
@@ -158,16 +163,16 @@ class RightsService(Service):
         bind_principal_field(ctx, "user_id")
         user_id = require(ctx.payload.get("user_id"), "user_id")
         row = db.insert_returning(
-            """
+            f"""
             INSERT INTO data_correction_requests
-                (id, fiduciary_id, user_id, field_name, current_value,
+                (id, fiduciary_id, user_id_enc, user_id_hmac, field_name, current_value,
                  requested_value, reason, status, created_at, last_updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, 'PENDING', NOW(), NOW())
+            VALUES (uuid_generate_v4(), %s, {pii.PID_VALUES}, %s, %s, %s, %s, 'PENDING', NOW(), NOW())
             RETURNING id
             """,
             (
                 fid,
-                user_id,
+                *pii.pid_params(str(user_id)),
                 require(ctx.payload.get("field_name"), "field_name"),
                 ctx.payload.get("current_value"),
                 require(ctx.payload.get("requested_value"), "requested_value"),
@@ -191,18 +196,18 @@ class RightsService(Service):
         params: list = [fid]
         user_id = principal_list_filter(ctx, "user_id")
         if user_id:
-            where.append("user_id = %s")
-            params.append(user_id)
+            where.append(pii.match_sql("user_id"))
+            params.extend(pii.hmac_params(str(user_id)))
         if ctx.payload.get("status"):
             where.append("status = %s")
             params.append(ctx.payload["status"].upper())
         params.append(int(ctx.payload.get("limit") or 50))
-        return db.to_jsonable(
-            db.all(
-                f"SELECT * FROM data_correction_requests WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s",
-                params,
-            )
+        rows = db.all(
+            f"SELECT *, {pii.dec_sql('user_id_enc')} AS user_id FROM data_correction_requests"
+            f" WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s",
+            [*db.bind_key(), *params],
         )
+        return [pii.principal_row(ctx, row, "user_id") for row in rows]
 
     def update_correction_status(self, ctx: RequestContext) -> dict:
         cid = require(ctx.payload.get("id"), "id")

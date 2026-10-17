@@ -83,6 +83,51 @@ def principal_row(ctx: RequestContext, row: dict, *columns: str) -> dict:
     return out
 
 
+def recipient_row(ctx: RequestContext, row: dict, *columns: str) -> dict:
+    """principal_row for an alert/notification row: its recipient columns name a
+    principal only when recipient_type is PRINCIPAL (else an app, fiduciary or
+    operator id), so only then are they masked for operators."""
+    if str(row.get("recipient_type") or "").upper() == "PRINCIPAL":
+        return principal_row(ctx, row, *columns)
+    out = db.to_jsonable(row)
+    for column in columns:
+        out.pop(f"{column}_enc", None)
+        out.pop(f"{column}_hmac", None)
+    return out
+
+
+# Keys that carry a principal id inside a JSON document the CMS stores.
+PRINCIPAL_KEYS = frozenset(
+    {
+        "user_id",
+        "principal_id",
+        "guardian_id",
+        "recipient_id",
+        "child_principal_id",
+        "guardian_principal_id",
+        "subject_principal_id",
+        "nominating_principal_id",
+        "nominated_principal_id",
+        "nominee_id",
+    }
+)
+
+
+def hmac_principal_keys(value):
+    """Copy of a JSON value with every PRINCIPAL_KEYS entry replaced by `<key>_hmac`: hmac_hex(id)."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key in PRINCIPAL_KEYS and isinstance(item, (str, int)) and not isinstance(item, bool):
+                out[f"{key}_hmac"] = hmac_hex(str(item))
+            else:
+                out[key] = hmac_principal_keys(item)
+        return out
+    if isinstance(value, list):
+        return [hmac_principal_keys(item) for item in value]
+    return value
+
+
 # Query fragments for the <col>_enc / <col>_hmac pairs db/34 stores.
 PID_VALUES = f"{ENC_SQL}, {HMAC_SQL}"
 

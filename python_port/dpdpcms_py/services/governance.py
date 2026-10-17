@@ -6,7 +6,7 @@ import io
 import json
 from datetime import UTC, datetime
 
-from .. import db
+from .. import db, pii
 from ..audit import (
     certificate_signature,
     get_log,
@@ -315,12 +315,15 @@ class NotificationService(Service):
             where.append("recipient_type = %s")
             params.append("PRINCIPAL")
         if recipient:
-            where.append("recipient_id = %s")
-            params.append(recipient)
+            where.append(pii.match_sql("recipient_id"))
+            params.extend(pii.hmac_params(recipient))
         params.append(int(ctx.payload.get("limit") or 50))
-        return db.to_jsonable(
-            db.all(f"SELECT * FROM notifications WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params)
+        rows = db.all(
+            f"SELECT *, {pii.dec_sql('recipient_id_enc')} AS recipient_id FROM notifications"
+            f" WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s",
+            [*db.bind_key(), *params],
         )
+        return [pii.recipient_row(ctx, row, "recipient_id") for row in rows]
 
     def mark_notification_read(self, ctx: RequestContext) -> dict:
         # NT-05: the schema and the documented sample name the field `id`; older
@@ -334,13 +337,13 @@ class NotificationService(Service):
         if ctx.auth_via_principal_jwt:
             where.append("recipient_type = %s")
             params.append("PRINCIPAL")
-            where.append("recipient_id = %s")
-            params.append(require(ctx.principal_user_id, "principal"))
+            where.append(pii.match_sql("recipient_id"))
+            params.extend(pii.hmac_params(require(ctx.principal_user_id, "principal")))
         read = db.execute(f"UPDATE notifications SET read_at = NOW() WHERE {' AND '.join(where)}", params)
         if read:
             row = db.one(
-                "SELECT recipient_id, fiduciary_id FROM notifications WHERE id = %s",
-                (nid,),
+                f"SELECT {pii.dec_sql('recipient_id_enc')} AS recipient_id, fiduciary_id FROM notifications WHERE id = %s",
+                (*db.bind_key(), nid),
             )
             if row:
                 log_event(
@@ -565,16 +568,34 @@ class NotificationService(Service):
         if context is not None and not isinstance(context, dict):
             raise ApiError(400, "Bad Request", "context must be an object.")
         row = db.insert_returning(
-            "INSERT INTO notifications (id, recipient_type, recipient_id, fiduciary_id, notification_type, context, created_at) VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW()) RETURNING id",
+            "INSERT INTO notifications (id, recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            f" notification_type, context, created_at) VALUES (uuid_generate_v4(), %s, {pii.PID_VALUES}, %s, %s, %s, NOW())"
+            " RETURNING id",
             (
                 require(ctx.payload.get("recipient_type"), "recipient_type"),
-                require(ctx.payload.get("recipient_id"), "recipient_id"),
+                *pii.pid_params(str(require(ctx.payload.get("recipient_id"), "recipient_id"))),
                 require(resolve_fiduciary(ctx), "fiduciary_id"),
                 require(ctx.payload.get("notification_type") or ctx.payload.get("template_id"), "notification_type"),
                 db.as_jsonb(context) if context else None,
             ),
         )
         return {"success": True, "notification_id": str(row["id"])}
+
+
+def _job_input_payload(raw: object) -> str | None:
+    """jobs.input_payload is stored as JSON text with every principal id replaced
+    by its HMAC (pii.hmac_principal_keys); free text, which could carry an id
+    nothing can find, is refused."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if not isinstance(raw, (dict, list)):
+        raise ApiError(400, "Bad Request", "input_payload must be a JSON object or array.")
+    return json.dumps(pii.hmac_principal_keys(raw))
 
 
 class JobService(Service):
@@ -591,7 +612,7 @@ class JobService(Service):
                 ctx.payload.get("subtype"),
                 ctx.payload.get("start_date"),
                 ctx.payload.get("end_date"),
-                ctx.payload.get("input_payload"),
+                _job_input_payload(ctx.payload.get("input_payload")),
             ),
         )
         return {"success": True, "job_id": str(row["id"])}
@@ -863,10 +884,12 @@ class LegalService(Service):
         # SEC-10: generation and verification share one canonicalisation rule.
         data["signature"] = certificate_signature(data)
         row = db.insert_returning(
-            "INSERT INTO evidence_certificates (id, fiduciary_id, subject_principal_id, certifying_officer_id, case_ref_id, certificate_data, attestation_text) VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO evidence_certificates (id, fiduciary_id, subject_principal_id_enc, subject_principal_id_hmac,"
+            " certifying_officer_id, case_ref_id, certificate_data, attestation_text)"
+            f" VALUES (uuid_generate_v4(), %s, {pii.PID_VALUES}, %s, %s, %s, %s) RETURNING id",
             (
                 fiduciary_id,
-                principal,
+                *pii.pid_params(principal),
                 ctx.operator_id or ctx.payload.get("certifying_officer_id"),
                 case_ref,
                 db.as_jsonb(data),
@@ -885,22 +908,24 @@ class LegalService(Service):
         return {"success": True, "certificate_id": str(row["id"])}
 
     def list_certificates(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(
-            db.all(
-                "SELECT id, id AS certificate_id, fiduciary_id, subject_principal_id AS principal_id, generated_at AS timestamp, case_ref_id AS case_ref FROM evidence_certificates WHERE fiduciary_id = %s ORDER BY generated_at DESC",
-                (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
-            )
+        rows = db.all(
+            f"SELECT id, id AS certificate_id, fiduciary_id, {pii.dec_sql('subject_principal_id_enc')} AS principal_id,"
+            " generated_at AS timestamp, case_ref_id AS case_ref FROM evidence_certificates"
+            " WHERE fiduciary_id = %s ORDER BY generated_at DESC",
+            (*db.bind_key(), require(ctx.payload.get("fiduciary_id"), "fiduciary_id")),
         )
+        return [pii.principal_row(ctx, row, "principal_id") for row in rows]
 
     def get_certificate(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT * FROM evidence_certificates WHERE id = %s{scope}",
-            (require(ctx.payload.get("id"), "id"), *scope_params),
+            f"SELECT *, {pii.dec_sql('subject_principal_id_enc')} AS subject_principal_id"
+            f" FROM evidence_certificates WHERE id = %s{scope}",
+            (*db.bind_key(), require(ctx.payload.get("id"), "id"), *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "Certificate not found.")
-        out = db.to_jsonable(row)
+        out = pii.principal_row(ctx, row, "subject_principal_id")
         # The console views read certificate_id, data and attestation; keep the
         # raw row under `data` so the viewer renders the signed payload.
         try:
@@ -909,6 +934,10 @@ class LegalService(Service):
                 data = json.loads(data)
         except (ValueError, TypeError):
             data = {}
+        if isinstance(data, dict) and "principal_id" in data:
+            # The signed payload names the principal; the stored copy stays
+            # intact (verify_certificate re-signs it), the console view is masked.
+            data = {**data, "principal_id": pii.principal_view(ctx, data["principal_id"])}
         out["data"] = data
         out["attestation"] = out.get("attestation_text")
         return out

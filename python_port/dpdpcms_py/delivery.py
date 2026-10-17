@@ -5,7 +5,7 @@ import re
 import smtplib
 from email.message import EmailMessage
 
-from . import db
+from . import db, pii
 from .audit import log_event
 from .config import settings
 from .defaults import (
@@ -89,9 +89,9 @@ def principal_language(fiduciary_id: str, user_id: str) -> str | None:
     if not fiduciary_id or not user_id:
         return None
     row = db.one(
-        "SELECT language_selected FROM consent_records WHERE fiduciary_id = %s AND user_id = %s"
+        f"SELECT language_selected FROM consent_records WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}"
         " ORDER BY created_at DESC LIMIT 1",
-        (fiduciary_id, user_id),
+        (fiduciary_id, *pii.hmac_params(user_id)),
     )
     return str(row["language_selected"]) if row and row.get("language_selected") else None
 
@@ -119,11 +119,11 @@ def delivery_retention_days() -> int:
 
 def _enqueue(notification_id: str, channel: str, recipient: str | None, status: str = "PENDING") -> None:
     db.execute(
-        """
-        INSERT INTO notification_deliveries (notification_id, channel, recipient, status, created_at)
-        VALUES (%s, %s, %s, %s, NOW())
+        f"""
+        INSERT INTO notification_deliveries (notification_id, channel, recipient_enc, recipient_hmac, status, created_at)
+        VALUES (%s, %s, {pii.PID_VALUES}, %s, NOW())
         """,
-        (notification_id, channel, recipient, status),
+        (notification_id, channel, *pii.pid_params(recipient), status),
     )
 
 
@@ -155,8 +155,9 @@ def _backfill_deliveries(limit: int) -> int:
     notification was delivered.
     """
     rows = db.all(
-        """
-        SELECT n.id, n.recipient_type, n.recipient_id, n.fiduciary_id, n.notification_type
+        f"""
+        SELECT n.id, n.recipient_type, {pii.dec_sql("n.recipient_id_enc")} AS recipient_id, n.fiduciary_id,
+               n.notification_type
         FROM notifications n
         LEFT JOIN notification_deliveries d ON d.notification_id = n.id
         WHERE d.id IS NULL
@@ -166,7 +167,7 @@ def _backfill_deliveries(limit: int) -> int:
         """,
         # SA-13: a notification older than the delivery retention has had its
         # delivery rows pruned on purpose; it must not be dispatched again.
-        (delivery_retention_days(), limit),
+        (*db.bind_key(), delivery_retention_days(), limit),
     )
     count = 0
     for row in rows:
@@ -272,17 +273,19 @@ def _claim_delivery(delivery_id: str) -> bool:
 
 def _deliver_pending(limit: int) -> dict[str, int]:
     _reclaim_stale_processing()
+    # The recipient address and id are decrypted only here, at send time.
     rows = db.all(
-        """
-        SELECT d.id, d.notification_id, d.channel, d.recipient, d.attempt_count,
-               n.fiduciary_id, n.notification_type, n.recipient_type, n.recipient_id, n.context
+        f"""
+        SELECT d.id, d.notification_id, d.channel, {pii.dec_sql("d.recipient_enc")} AS recipient, d.attempt_count,
+               n.fiduciary_id, n.notification_type, n.recipient_type,
+               {pii.dec_sql("n.recipient_id_enc")} AS recipient_id, n.context
         FROM notification_deliveries d
         JOIN notifications n ON n.id = d.notification_id
         WHERE d.status = 'PENDING'
         ORDER BY d.created_at
         LIMIT %s
         """,
-        (limit,),
+        (*db.bind_key(), *db.bind_key(), limit),
     )
     sent = failed = skipped = 0
     for row in rows:

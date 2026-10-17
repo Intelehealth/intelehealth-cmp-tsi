@@ -6,7 +6,7 @@ from typing import Any
 
 import psycopg
 
-from .. import db
+from .. import db, pii
 from ..audit import log_event
 from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..defaults import DEFAULT_NOTIFICATION_MESSAGES
@@ -171,9 +171,10 @@ def queue_policy_change_notices(
     responds through the /client request_reconsent endpoint.
     """
     fid = str(fiduciary_id)
+    # One row per principal (HMAC); the encrypted pair is copied as stored.
     holders = db.all(
         """
-        SELECT DISTINCT cr.user_id
+        SELECT DISTINCT ON (cr.user_id_hmac) cr.user_id_enc, cr.user_id_hmac
         FROM consent_records cr
         WHERE cr.fiduciary_id = %s AND cr.policy_id = %s AND cr.policy_version <> %s
           AND cr.is_active_consent IS TRUE
@@ -182,22 +183,23 @@ def queue_policy_change_notices(
     )
     notified = 0
     for holder in holders:
-        user_id = str(holder["user_id"])
+        user_enc, user_hmac = holder["user_id_enc"], holder["user_id_hmac"]
         try:
             db.execute(
                 """
-                INSERT INTO reconsent_requests (fiduciary_id, policy_id, policy_version, user_id, reason)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (fiduciary_id, policy_id, policy_version, user_id) DO NOTHING
+                INSERT INTO reconsent_requests (fiduciary_id, policy_id, policy_version, user_id_enc, user_id_hmac, reason)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (fiduciary_id, policy_id, policy_version, user_id_hmac) DO NOTHING
                 """,
-                (fid, policy_id, new_version, user_id, reason),
+                (fid, policy_id, new_version, user_enc, user_hmac, reason),
             )
             db.execute(
                 """
-                INSERT INTO notifications (recipient_type, recipient_id, fiduciary_id, notification_type)
-                VALUES ('PRINCIPAL', %s, %s, 'POLICY_CHANGE_RECONSENT_REQUIRED')
+                INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,
+                                           notification_type)
+                VALUES ('PRINCIPAL', %s, %s, %s, 'POLICY_CHANGE_RECONSENT_REQUIRED')
                 """,
-                (user_id, fid),
+                (user_enc, user_hmac, fid),
             )
             notified += 1
         except Exception:
@@ -824,8 +826,9 @@ class PolicyService(Service):
         user_id = require(payload.get("user_id"), "user_id")
 
         pending = db.one(
-            "SELECT id FROM reconsent_requests WHERE fiduciary_id = %s AND policy_id = %s AND policy_version = %s AND user_id = %s AND status = 'PENDING'",
-            (fid, policy_id, version, user_id),
+            "SELECT id FROM reconsent_requests WHERE fiduciary_id = %s AND policy_id = %s AND policy_version = %s"
+            f" AND {pii.match_sql('user_id')} AND status = 'PENDING'",
+            (fid, policy_id, version, *pii.hmac_params(user_id)),
         )
         if not pending:
             raise ApiError(
