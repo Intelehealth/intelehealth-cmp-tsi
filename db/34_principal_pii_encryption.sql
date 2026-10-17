@@ -28,10 +28,19 @@
 --   alerts.recipient_id                 (nullable; principal id for PRINCIPAL
 --                                        alerts, else a processor/app id)
 --   evidence_certificates.subject_principal_id
+--   alerts.acknowledged_by              (nullable; the principal id when a
+--                                        principal acknowledges, else an
+--                                        operator email - encrypted either way)
+--   grievance_attachments.uploaded_by   (the principal id on a principal
+--                                        upload, else an operator identity)
 -- Excluded: audit_logs.user_id (already security.pseudonym(), feeds the hash
 -- chain) and its legacy/partition tables; principal_otps.subject_hash (already
--- an HMAC); auth_throttles.key (already hashed). Principal ids inside JSON
--- payloads (alerts.payload, webhook_deliveries.payload, jobs.input_payload)
+-- an HMAC); auth_throttles.key (already hashed). Operator-only actor columns
+-- (breach_incidents.board_notified_by, grievance_routing_rules.updated_by,
+-- purpose_lifecycle.closed_by, ropa_history.changed_by) never hold a
+-- principal id and stay as they are. Principal ids inside JSON
+-- payloads (alerts.payload, webhook_deliveries.payload, jobs.input_payload,
+-- grievances.communication_log[].by)
 -- are not columns and are handled by the services. Migration 35 handles
 -- parental_verification_logs evidence and consent_records.ip_address.
 --
@@ -75,7 +84,9 @@ INSERT INTO tsi_pii_targets VALUES
     ('nominations', 'nominating_principal_id'),
     ('nominations', 'nominated_principal_id'),
     ('alerts', 'recipient_id'),
-    ('evidence_certificates', 'subject_principal_id');
+    ('evidence_certificates', 'subject_principal_id'),
+    ('alerts', 'acknowledged_by'),
+    ('grievance_attachments', 'uploaded_by');
 
 CREATE FUNCTION pg_temp.tsi_pii_pending(t TEXT, c TEXT) RETURNS BOOLEAN AS $$
     SELECT EXISTS (
@@ -324,6 +335,17 @@ DO $$
 BEGIN
     IF pg_temp.tsi_pii_encrypt('evidence_certificates', 'subject_principal_id') THEN
         PERFORM pg_temp.tsi_pii_drop('evidence_certificates', 'subject_principal_id');
+    END IF;
+END $$;
+
+-- ---- Actor columns that record a principal (no index used either) ----------
+DO $$
+BEGIN
+    IF pg_temp.tsi_pii_encrypt('alerts', 'acknowledged_by') THEN
+        PERFORM pg_temp.tsi_pii_drop('alerts', 'acknowledged_by');
+    END IF;
+    IF pg_temp.tsi_pii_encrypt('grievance_attachments', 'uploaded_by') THEN
+        PERFORM pg_temp.tsi_pii_drop('grievance_attachments', 'uploaded_by');
     END IF;
 END $$;
 

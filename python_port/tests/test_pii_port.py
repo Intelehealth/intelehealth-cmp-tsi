@@ -403,6 +403,8 @@ ENCRYPTED_PRINCIPAL_COLUMNS = {
     ("nominations", "nominated_principal_id"): False,
     ("alerts", "recipient_id"): True,
     ("evidence_certificates", "subject_principal_id"): False,
+    ("alerts", "acknowledged_by"): True,
+    ("grievance_attachments", "uploaded_by"): False,
 }
 
 
