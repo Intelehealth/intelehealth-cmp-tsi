@@ -5,8 +5,10 @@ test_integration_db.py and skip without a live Postgres; the rest are unit
 tests.
 """
 
+import uuid
+
 import pytest
-from tests.test_integration_db import _DB_READY, _ctx, _seed_tenant
+from tests.test_integration_db import _DB_READY, _ctx, _pid, _seed_tenant
 
 needs_db = pytest.mark.skipif(not _DB_READY, reason="no live Postgres configured")
 
@@ -1420,3 +1422,322 @@ def test_erasure_scrubs_encrypted_ip(tx):
     assert ramesh == {("1.2.3.5", None), ("1.2.3.5", "8.8.8.8")}
     # A second erasure does not trip the append-only trigger.
     assert erase_cms_copy(fid, "asha")["consent_records.metadata"] == 0
+
+
+# ---- Task 9: audited, rate-limited reveal_user_id --------------------------------------
+
+
+def _reveal_operator(cur, fid, role, name):
+    """An ACTIVE operator whose email_hmac matches what authenticate() looks up."""
+    from dpdpcms_py import db
+
+    email = f"{name}-{uuid.uuid4().hex[:8]}@example.org"
+    cur.execute(
+        "INSERT INTO operators (name, email_plaintext, role, fiduciary_id, email_enc, email_hmac)"
+        f" VALUES (%s, %s, %s, %s, 'x', {db.hmac_expr()}) RETURNING id",
+        (name, email, role, fid, *db.bind_hmac(email)),
+    )
+    return str(cur.fetchone()["id"]), email
+
+
+def _bearer(email, role):
+    from dpdpcms_py import security
+
+    return {"Authorization": f"Bearer {security.token(email, 'n', role)}"}
+
+
+def _reveal(headers, payload, category="admin", method="post"):
+    from dpdpcms_py import main
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    body = {"_func": "reveal_user_id", **payload}
+    if method == "get":
+        return client.get(f"/api/v1/{category}/pii", params=body, headers=headers)
+    return client.post(f"/api/v1/{category}/pii", json=body, headers=headers)
+
+
+def _reveal_rows(cur, initiator=None):
+    sql = "SELECT * FROM audit_logs WHERE audit_action = 'PII_REVEALED'"
+    params = ()
+    if initiator:
+        sql += " AND initiator = %s"
+        params = (initiator,)
+    cur.execute(sql + " ORDER BY timestamp", params)
+    return cur.fetchall()
+
+
+def _seed_revealable(cur, fid, pol):
+    """One row of every revealable source for principal 'asha' in tenant `fid`."""
+    from dpdpcms_py.services.consent import ConsentService
+
+    _record(fid, pol, "asha", "203.0.113.90")
+    cur.execute("SELECT id FROM consent_records WHERE fiduciary_id = %s", (fid,))
+    consent_id = str(cur.fetchone()["id"])
+    enc, hmac = _pid(cur, "asha")
+    cur.execute(
+        "INSERT INTO grievances (user_id_enc, user_id_hmac, fiduciary_id, type, subject, description,"
+        " reference_number) VALUES (%s, %s, %s, 'GENERAL_COMPLAINT', 's', 'd', %s) RETURNING id",
+        (enc, hmac, fid, f"GRV-2026-{fid[:6].upper()}"),
+    )
+    grievance_id = str(cur.fetchone()["id"])
+    cur.execute(
+        "INSERT INTO purge_requests (user_id_enc, user_id_hmac, fiduciary_id, purpose_id, trigger_event)"
+        " VALUES (%s, %s, %s, 'care', 'ERASURE_REQUEST') RETURNING id",
+        (enc, hmac, fid),
+    )
+    purge_id = str(cur.fetchone()["id"])
+    cur.execute(
+        "INSERT INTO data_principal (fiduciary_id, user_id_enc, user_id_hmac) VALUES (%s, %s, %s)"
+        " ON CONFLICT DO NOTHING",
+        (fid, enc, hmac),
+    )
+    log_id = ConsentService().record_parent_consent(
+        _api_ctx(
+            fid,
+            {
+                "child_principal_id": "kid-9",
+                "guardian_principal_id": "asha",
+                "verification_mechanism": "AADHAAR_VC",
+                "verification_ref_id": "DL-REF-4242",
+                "proof_metadata": {"vc_hash": "feed42"},
+            },
+        )
+    )["verification_log_id"]
+    return {
+        "consent_record": consent_id,
+        "grievance": grievance_id,
+        "purge_request": purge_id,
+        "data_principal": hmac,
+        "parental_verification": str(log_id),
+    }
+
+
+def _source_payload(fid, source, ref):
+    key = "user_ref" if source == "data_principal" else "id"
+    return {"source": source, "fiduciary_id": fid, key: ref}
+
+
+@needs_db
+def test_dpo_reveals_own_tenant_and_audit_row_precedes_response(tx, monkeypatch):
+    import json
+
+    from dpdpcms_py import main, security
+    from dpdpcms_py.services import pii as pii_service
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        refs = _seed_revealable(cur, fid, pol)
+        dpo, email = _reveal_operator(cur, fid, "DPO", "dee")
+    headers = _bearer(email, "DPO")
+
+    response = _reveal(headers, _source_payload(fid, "consent_record", refs["consent_record"]))
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "source": "consent_record",
+        "id": refs["consent_record"],
+        "fields": {"user_id": "asha", "ip_address": "203.0.113.90"},
+    }
+    with tx.cursor() as cur:
+        rows = _reveal_rows(cur, f"OPERATOR:{dpo}")
+    assert len(rows) == 1
+    row = rows[0]
+    assert (str(row["fiduciary_id"]), row["service_type"]) == (fid, "DPO_CONSOLE")
+    assert row["user_id"] == security.pseudonym("asha")
+    assert json.loads(row["context_details"]) == {
+        "source": "consent_record",
+        "record_id": refs["consent_record"],
+        "fields": ["user_id", "ip_address"],
+    }
+    assert "asha" not in row["context_details"] and "203.0.113.90" not in row["context_details"]
+
+    # Every whitelisted source reveals exactly its own fields.
+    expected = {
+        "grievance": {"user_id": "asha"},
+        "purge_request": {"user_id": "asha"},
+        "data_principal": {"user_id": "asha"},
+        "parental_verification": {"guardian_id": "asha", "verification_ref_id": "DL-REF-4242"},
+    }
+    for source, fields in expected.items():
+        response = _reveal(headers, _source_payload(fid, source, refs[source]))
+        assert response.status_code == 200, (source, response.text)
+        body = response.json()
+        assert (body["source"], body["id"]) == (source, refs[source])
+        if source == "parental_verification":
+            assert body["fields"].pop("proof_metadata")["vc_hash"] == "feed42"
+        assert body["fields"] == fields
+    with tx.cursor() as cur:
+        rows = _reveal_rows(cur, f"OPERATOR:{dpo}")
+    assert len(rows) == 5
+    # The guardian reveal is traced to the child principal, not the guardian.
+    assert rows[-1]["user_id"] == security.pseudonym("kid-9")
+
+    # The audit row is written (and committed) before the response is built:
+    # a failure serialising the response still leaves the row in place.
+    def broken_response(*args, **kwargs):
+        raise RuntimeError("serialisation failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(main, "_json_response", broken_response)
+        response = _reveal(headers, _source_payload(fid, "grievance", refs["grievance"]))
+    assert response.status_code == 500 and "asha" not in response.text
+    with tx.cursor() as cur:
+        assert len(_reveal_rows(cur, f"OPERATOR:{dpo}")) == 6
+
+    # No audit row, no plaintext.
+    def failing_log(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pii_service, "log_event", failing_log)
+        response = _reveal(headers, _source_payload(fid, "grievance", refs["grievance"]))
+    assert response.status_code == 500 and "asha" not in response.text
+
+
+@needs_db
+def test_admin_reveals_any_tenant(tx):
+    with tx.cursor() as cur:
+        fid_a, pol_a = _seed_tenant(cur)
+        fid_b, pol_b = _seed_tenant(cur)
+        refs_a = _seed_revealable(cur, fid_a, pol_a)
+        refs_b = _seed_revealable(cur, fid_b, pol_b)
+        admin, email = _reveal_operator(cur, None, "ADMIN", "root")
+    headers = _bearer(email, "ADMIN")
+    for fid, refs in ((fid_a, refs_a), (fid_b, refs_b)):
+        response = _reveal(headers, _source_payload(fid, "grievance", refs["grievance"]))
+        assert response.status_code == 200, response.text
+        assert response.json()["fields"] == {"user_id": "asha"}
+    # The record must belong to the named tenant.
+    response = _reveal(headers, _source_payload(fid_a, "grievance", refs_b["grievance"]))
+    assert response.status_code == 404
+    with tx.cursor() as cur:
+        rows = _reveal_rows(cur, f"OPERATOR:{admin}")
+    assert sorted(str(r["fiduciary_id"]) for r in rows) == sorted([fid_a, fid_b])
+
+
+@needs_db
+def test_operator_auditor_api_key_principal_get_403_and_no_audit_row(tx):
+    from dpdpcms_py import security
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        refs = _seed_revealable(cur, fid, pol)
+        _, op_email = _reveal_operator(cur, fid, "OPERATOR", "opi")
+        _, auditor_email = _reveal_operator(cur, fid, "AUDITOR", "aud")
+        # A custom tenant role granted pii:reveal is still neither DPO nor ADMIN.
+        cur.execute(
+            "INSERT INTO roles (code, name, permissions, fiduciary_id) VALUES ('REVEALER', 'r', %s, %s)",
+            ('["pii:reveal"]', fid),
+        )
+        _, custom_email = _reveal_operator(cur, fid, "REVEALER", "rev")
+        _, dpo_email = _reveal_operator(cur, fid, "DPO", "dee")
+    payload = _source_payload(fid, "consent_record", refs["consent_record"])
+    for email, role in ((op_email, "OPERATOR"), (auditor_email, "AUDITOR")):
+        for method in ("post", "get"):
+            response = _reveal(_bearer(email, role), payload, method=method)
+            assert response.status_code == 403, (role, method, response.text)
+            assert "asha" not in response.text
+    response = _reveal(_bearer(custom_email, "REVEALER"), payload)
+    assert response.status_code == 403 and "asha" not in response.text
+    # API keys and principal tokens never reach it: the client category refuses
+    # the function, and the admin category refuses a principal token.
+    principal = {"Authorization": f"Bearer {security.principal_token(fid, 'asha')}"}
+    api_key = {"X-API-Key": "k", "X-API-Secret": "s"}
+    for headers in (principal, api_key):
+        for method in ("post", "get"):
+            response = _reveal(headers, payload, category="client", method=method)
+            assert response.status_code == 403, response.text
+        assert _reveal(headers, payload).status_code == 401
+    # Not a read: a DPO cannot reveal over GET either.
+    assert _reveal(_bearer(dpo_email, "DPO"), payload, method="get").status_code == 405
+    with tx.cursor() as cur:
+        assert _reveal_rows(cur) == []
+
+
+@needs_db
+def test_dpo_other_tenant_403(tx):
+    with tx.cursor() as cur:
+        fid_a, _ = _seed_tenant(cur)
+        fid_b, pol_b = _seed_tenant(cur)
+        refs_b = _seed_revealable(cur, fid_b, pol_b)
+        _, email = _reveal_operator(cur, fid_a, "DPO", "dee")
+    headers = _bearer(email, "DPO")
+    response = _reveal(headers, _source_payload(fid_b, "grievance", refs_b["grievance"]))
+    assert response.status_code == 403, response.text
+    assert "asha" not in response.text
+    # Naming its own tenant does not reach another tenant's record either.
+    response = _reveal(headers, _source_payload(fid_a, "grievance", refs_b["grievance"]))
+    assert response.status_code == 404
+    with tx.cursor() as cur:
+        assert _reveal_rows(cur) == []
+
+
+@needs_db
+def test_21st_reveal_in_a_minute_is_429(tx, monkeypatch):
+    from datetime import timedelta
+
+    from dpdpcms_py import audit
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        refs = _seed_revealable(cur, fid, pol)
+        dpo, email = _reveal_operator(cur, fid, "DPO", "dee")
+        _, other_email = _reveal_operator(cur, fid, "DPO", "dan")
+    headers = _bearer(email, "DPO")
+    payload = _source_payload(fid, "grievance", refs["grievance"])
+    for _ in range(20):
+        assert _reveal(headers, payload).status_code == 200
+    response = _reveal(headers, payload)
+    assert response.status_code == 429, response.text
+    assert "asha" not in response.text
+    with tx.cursor() as cur:
+        assert len(_reveal_rows(cur, f"OPERATOR:{dpo}")) == 20
+    # The limit is per operator...
+    assert _reveal(_bearer(other_email, "DPO"), payload).status_code == 200
+    # ...over a rolling 60 s: a minute later the operator may reveal again.
+    real_now = audit._now
+    monkeypatch.setattr(audit, "_now", lambda: real_now() + timedelta(seconds=61))
+    assert _reveal(headers, payload).status_code == 200
+
+
+@needs_db
+def test_unknown_source_400(tx):
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.pii import PiiService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _seed_revealable(cur, fid, pol)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    headers = _bearer(email, "DPO")
+    for payload in (
+        {"source": "operators", "fiduciary_id": fid, "id": str(uuid.uuid4())},
+        {"source": "consent_records; DROP TABLE x", "fiduciary_id": fid, "id": str(uuid.uuid4())},
+        {"source": "grievance", "fiduciary_id": fid},
+        {"source": "data_principal", "fiduciary_id": fid},
+        {"source": "grievance", "fiduciary_id": fid, "id": "not-a-uuid"},
+    ):
+        response = _reveal(headers, payload)
+        assert response.status_code == 400, (payload, response.text)
+    # The service itself refuses a source outside its whitelist.
+    ctx = _ctx_as_operator(fid, "DPO", {"_func": "reveal_user_id", "source": "operators", "id": str(uuid.uuid4())})
+    with pytest.raises(ApiError) as exc:
+        PiiService().reveal_user_id(ctx)
+    assert exc.value.status == 400
+    with tx.cursor() as cur:
+        assert _reveal_rows(cur) == []
+
+
+def _ctx_as_operator(fid, role, payload):
+    from dpdpcms_py.context import RequestContext
+
+    return RequestContext(
+        path="/api/v1/admin/pii",
+        category="admin",
+        service="pii",
+        payload={"fiduciary_id": fid, **payload},
+        headers={},
+        fiduciary_id=fid,
+        auth_token={"email": "x@example.org", "role": role},
+        operator_id=str(uuid.uuid4()),
+    )

@@ -442,6 +442,7 @@ def authenticate(ctx: RequestContext) -> None:
         # own tenant exactly like an API key: never trust a body-supplied
         # fiduciary_id. Only a global ADMIN selects a tenant via the payload.
         if operator.get("fiduciary_id") and str(operator["role"]).upper() != "ADMIN":
+            ctx.requested_fiduciary_id = ctx.payload.get("fiduciary_id")
             ctx.fiduciary_id = str(operator["fiduciary_id"])
             ctx.payload["fiduciary_id"] = ctx.fiduciary_id
         # SA-02/SA-03: every admin function is gated by the roles table.

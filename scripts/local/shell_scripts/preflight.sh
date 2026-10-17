@@ -72,6 +72,7 @@ else fail "Expected 13 fonts in python_port/dpdpcms_py/fonts, found $font_count.
 [ -f "$REPO_ROOT/db/33_audit_archive_registry.sql" ] && ok 'Migration 33 present.' || { fail 'db/33_audit_archive_registry.sql missing.'; failed=1; }
 [ -f "$REPO_ROOT/db/34_principal_pii_encryption.sql" ] && ok 'Migration 34 present.' || { fail 'db/34_principal_pii_encryption.sql missing.'; failed=1; }
 [ -f "$REPO_ROOT/db/35_evidence_ip_encryption.sql" ] && ok 'Migration 35 present.' || { fail 'db/35_evidence_ip_encryption.sql missing.'; failed=1; }
+[ -f "$REPO_ROOT/db/36_pii_reveal_permission.sql" ] && ok 'Migration 36 present.' || { fail 'db/36_pii_reveal_permission.sql missing.'; failed=1; }
 if (cd "$REPO_ROOT" && git ls-files --others --exclude-standard -- python_port/dpdpcms_py/fonts 2>/dev/null | grep -q .); then
   warn 'fonts/ is not committed to git - fine locally, but commit it before sharing the branch.'
 fi

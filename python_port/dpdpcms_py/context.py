@@ -28,6 +28,9 @@ class RequestContext:
     # CC-06: the server-side session a consent action happened in (principal JWT jti).
     session_id: str | None = None
     source_ip: str | None = None
+    # The fiduciary_id a tenant-bound operator's request body named, before
+    # authenticate() rebinds the payload to the operator's own tenant.
+    requested_fiduciary_id: str | None = None
 
     @property
     def func(self) -> str:

@@ -40,6 +40,7 @@ SERVICE_RESOURCES = {
     "purpose": "purpose",
     "retention": "retention",
     "role": "role",
+    "pii": "pii",
 }
 # Only side-effect-free prefixes classify as reads. validate_* is NOT one:
 # validate_fiduciary_domain writes the fiduciary row and validate_consent logs
@@ -57,6 +58,9 @@ FUNC_PERMISSIONS = {
     ("role", "create_role"): "role:manage",
     ("role", "set_role_permissions"): "role:manage",
     ("role", "delete_role"): "role:manage",
+    # Revealing a principal identifier in the clear is its own permission, held
+    # by the DPO role (db/36) and ADMIN; services/pii.py also checks the role.
+    ("pii", "reveal_user_id"): "pii:reveal",
 }
 # A higher action implies the lower ones on the same resource.
 ACTION_IMPLIES = {"manage": {"manage", "write", "read"}, "write": {"write", "read"}, "read": {"read"}}
