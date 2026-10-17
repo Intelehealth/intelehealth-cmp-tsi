@@ -1095,5 +1095,46 @@ def test_certificate_signs_the_principal_hmac_and_survives_erasure(tx):
         cur.execute("SELECT to_jsonb(c)::text AS j FROM evidence_certificates c WHERE id = %s", (cert_id,))
         row = cur.fetchone()["j"]
     assert pid not in row
-    # The erased subject no longer matches the signed principal: refused, not "valid".
-    assert service.verify_certificate(_ctx(fid, {"id": cert_id}))["valid"] is False
+    # Ruling O: an erased subject is not tampering - the integrity checks still
+    # run and pass, and the result says the subject was erased (no principal id).
+    result = service.verify_certificate(_ctx(fid, {"id": cert_id}))
+    assert result["valid"] is True and result["subject_erased"] is True
+    assert pid not in str(result) and "erased:" not in str(result)
+
+
+@needs_db
+def test_erased_subject_certificate_still_fails_when_tampered(tx):
+    from dpdpcms_py import audit
+    from dpdpcms_py.services import governance
+    from dpdpcms_py.services.compliance import erase_cms_copy
+    from tests.test_integration_db import _log, real_db
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        for i in range(3):
+            _log(fid, pid, f"E{i}")
+    service = governance.LegalService()
+    cert_id = service.generate_certificate(_ctx(fid, {"fiduciary_id": fid, "subject_principal_id": pid}))[
+        "certificate_id"
+    ]
+    erase_cms_copy(fid, pid)
+    with tx.cursor() as cur:
+        cur.execute("SELECT certificate_data FROM evidence_certificates WHERE id = %s", (cert_id,))
+        data = cur.fetchone()["certificate_data"]
+        # Altered without re-signing: the signature check fails.
+        cur.execute(
+            "UPDATE evidence_certificates SET certificate_data = %s WHERE id = %s",
+            (real_db.as_jsonb({**data, "case_ref_id": "forged"}), cert_id),
+        )
+    result = service.verify_certificate(_ctx(fid, {"id": cert_id}))
+    assert result["valid"] is False and "altered" in result["reason"]
+    # Re-signed but naming a hash that is not in the ledger: the trail check fails.
+    forged = {**data, "evidence_trail": [{**data["evidence_trail"][0], "hash": "0" * 64}, *data["evidence_trail"][1:]]}
+    forged["signature"] = audit.certificate_signature(forged)
+    with tx.cursor() as cur:
+        cur.execute(
+            "UPDATE evidence_certificates SET certificate_data = %s WHERE id = %s", (real_db.as_jsonb(forged), cert_id)
+        )
+    result = service.verify_certificate(_ctx(fid, {"id": cert_id}))
+    assert result["valid"] is False and "no longer present" in result["reason"]

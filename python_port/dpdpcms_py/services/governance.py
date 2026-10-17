@@ -984,8 +984,12 @@ class LegalService(Service):
         # The signed payload binds the principal by HMAC (legacy certificates
         # carry principal_id); the subject column must still be that principal.
         principal_id = data.get("principal_id")
-        if not principal_id and data.get("principal_id_hmac"):
-            subject = row.get("subject")
+        subject = row.get("subject")
+        # Ruling O: an erased subject is not tampering. The binding (and the
+        # per-principal completeness checks, which need the principal) are
+        # skipped; the signature, trail hashes, order and chain still are not.
+        subject_erased = str(subject or "").startswith("erased:")
+        if not principal_id and data.get("principal_id_hmac") and not subject_erased:
             if not subject or pii.hmac_hex(str(subject)) != data["principal_id_hmac"]:
                 return {
                     "valid": False,
@@ -1125,4 +1129,5 @@ class LegalService(Service):
             "signature": expected,
             "trail_hashes_checked": len(claimed),
             "chain_intact": chain["intact"],
+            **({"subject_erased": True} if subject_erased else {}),
         }
