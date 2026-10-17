@@ -70,7 +70,7 @@ Point `POSTGRES_HOST` at your Postgres (Compose maps it to host port **5434**). 
 | `TSI_LOOKUP_SALT` | HMAC salt for audit pseudonyms |
 | `BOOTSTRAP_TOKEN` | One-time gate for Super-Admin bootstrap (`/api/v1/bootstrap/setup`); min 32 characters |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins |
-| `TSI_DPDP_CMS_ENV` | `local` enables `/docs`; anything else hides OpenAPI and prefers SSL to Postgres |
+| `TSI_DPDP_CMS_ENV` | One of `local`, `test`, `staging`, `production` (case-insensitive; anything else refuses to start). `local` enables `/docs`; the others hide OpenAPI and require SSL to Postgres |
 | `BRAND_NAME` | Optional UI label, max 12 characters |
 | `TSI_EXPORT_PATH` | Export/report directory |
 
@@ -193,7 +193,7 @@ Admin and bootstrap routes use operator JWT or `BOOTSTRAP_TOKEN` respectively. S
 ## Production deployment
 
 1. Copy `.env.example` → `.env` and set unique secrets (`openssl rand -hex 32` for each).
-2. Set `TSI_DPDP_CMS_ENV` to anything **other than** `local` (disables `/docs`, prefers SSL to Postgres).
+2. Set `TSI_DPDP_CMS_ENV` to `staging` or `production` (disables `/docs`, requires SSL to Postgres). Other values refuse to start.
 3. Set `ALLOWED_ORIGINS` to your real console origins.
 4. Run DB migrations `13`–`23` on existing databases (see [Database upgrades](#database-upgrades)).
 5. Run **two processes**: `uvicorn dpdpcms_py.main:app` and `python -m dpdpcms_py.worker` (or Compose `python_app` + `python_worker`).

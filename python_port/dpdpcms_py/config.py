@@ -32,6 +32,24 @@ def _secret(name: str, minimum: int = 32) -> str:
     return value
 
 
+ENVIRONMENTS = ("local", "test", "staging", "production")
+
+
+def _environment() -> str:
+    """P14-01: TSI_DPDP_CMS_ENV is one of a fixed set, case-folded.
+
+    Every environment-gated control (the production '*' refusal, /docs, sslmode,
+    DUMMY_OTP) compares against these exact names, so a free-text value such as
+    'Production' or 'prod' would slip past them. Anything else refuses to start.
+    """
+    value = (os.getenv("TSI_DPDP_CMS_ENV") or "local").strip().casefold()
+    if value not in ENVIRONMENTS:
+        raise RuntimeError(
+            f"TSI_DPDP_CMS_ENV must be one of {', '.join(ENVIRONMENTS)}; got {value!r}."
+        )
+    return value
+
+
 def _outbound_allowed_hosts(environment: str) -> tuple[str, ...]:
     """Rule 14 / P12-11: an unset allowlist fails closed outside local."""
     hosts = tuple(
@@ -140,7 +158,7 @@ class Settings:
         db = os.getenv("POSTGRES_DB", "tsi_cms")
         user = quote_plus(os.getenv("POSTGRES_USER", "tsi_admin"))
         password = quote_plus(_secret("POSTGRES_PASSWD", minimum=8))
-        sslmode = "prefer" if os.getenv("TSI_DPDP_CMS_ENV", "local") == "local" else "require"
+        sslmode = "prefer" if _environment() == "local" else "require"
         return f"postgresql://{user}:{password}@{host}:{port}/{db}?sslmode={sslmode}"
 
     @classmethod
@@ -150,7 +168,7 @@ class Settings:
             raise RuntimeError("BRAND_NAME must be 12 characters or fewer.")
 
         allowed = tuple(origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip())
-        environment = os.getenv("TSI_DPDP_CMS_ENV", "local")
+        environment = _environment()
         dummy_default = "true" if environment == "local" else "false"
         return cls(
             db_dsn=cls._dsn_from_env(),

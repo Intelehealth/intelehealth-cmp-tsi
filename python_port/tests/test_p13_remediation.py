@@ -380,3 +380,39 @@ def test_wildcard_allowlist_is_refused_in_production(monkeypatch):
     assert config._outbound_allowed_hosts("production") == ("hooks.example.in",)
     monkeypatch.setenv("OUTBOUND_ALLOWED_HOSTS", "*")
     assert config._outbound_allowed_hosts("staging") == ("*",)
+
+
+# ---- P14-01: TSI_DPDP_CMS_ENV is a fixed, case-folded set ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, "local"), ("", "local"), ("local", "local"), ("Production", "production"),
+     (" PRODUCTION ", "production"), ("Staging", "staging"), ("test", "test")],
+)
+def test_environment_is_case_folded(monkeypatch, raw, expected):
+    from dpdpcms_py import config
+
+    if raw is None:
+        monkeypatch.delenv("TSI_DPDP_CMS_ENV", raising=False)
+    else:
+        monkeypatch.setenv("TSI_DPDP_CMS_ENV", raw)
+    assert config._environment() == expected
+
+
+@pytest.mark.parametrize("raw", ["prod", "live", "dev", "production-in", "loc al"])
+def test_unknown_environment_refuses_to_start(monkeypatch, raw):
+    from dpdpcms_py import config
+
+    monkeypatch.setenv("TSI_DPDP_CMS_ENV", raw)
+    with pytest.raises(RuntimeError, match="TSI_DPDP_CMS_ENV must be one of"):
+        config._environment()
+
+
+def test_capitalised_production_still_refuses_wildcard(monkeypatch):
+    from dpdpcms_py import config
+
+    monkeypatch.setenv("TSI_DPDP_CMS_ENV", "Production")
+    monkeypatch.setenv("OUTBOUND_ALLOWED_HOSTS", "*")
+    with pytest.raises(RuntimeError, match="production"):
+        config.Settings.load()

@@ -31,7 +31,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (457 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the workbook v11 findings in `test_p13_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (470 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the workbook v11 findings in `test_p13_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
@@ -958,15 +958,19 @@ closed below, with a regression in `test_p13_remediation.py`.
   fails the build if any page calls `XLSX.read`/`XLSX.readFile`.
 - **R14 (Security Coverage)** `OUTBOUND_ALLOWED_HOSTS='*'` is refused when
   `TSI_DPDP_CMS_ENV=production`; production must list its destinations.
+- **P14-01 (Rule 14)** `TSI_DPDP_CMS_ENV` must be one of `local`, `test`,
+  `staging`, `production`, case-folded; any other value refuses to start. A
+  free-text `Production` or `prod` no longer bypasses the production-only `'*'`
+  refusal.
 - DB script: `db/30_p13_remediation.sql` (idempotent).
-- Tests: 456 passed, 1 skipped (457 collected) against Postgres 16 with
+- Tests: 469 passed, 1 skipped (470 collected) against Postgres 16 with
   `db/01..30` applied; pen test 113 passed, 2 remote-only skipped.
 
 ### Upgrade notes
 
 - **New database volume:** Compose applies all `db/*.sql` on first Postgres start — no extra steps.
 - **Existing database:** Run `db/13` through `db/30` manually against the live DB (scripts are idempotent). See [README — Database upgrades](README.md#database-upgrades).
-- **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker. Outside `local`, also set `OUTBOUND_ALLOWED_HOSTS` (or `*`), or the app will not start. With `TSI_DPDP_CMS_ENV=production`, `*` is refused: list the hosts. Optionally set `HEALTHZ_TOKEN` for health detail.
+- **Environment:** Add `BOOTSTRAP_TOKEN` (min 32 characters) before starting the app or worker. Outside `local`, also set `OUTBOUND_ALLOWED_HOSTS` (or `*`), or the app will not start. `TSI_DPDP_CMS_ENV` must be `local`, `test`, `staging` or `production` (case-insensitive); rename any other value (e.g. `prod`) before upgrading. With `production`, `*` is refused: list the hosts. Optionally set `HEALTHZ_TOKEN` for health detail.
 - **Global ADMIN policy calls:** send `fiduciary_id` with `get_policy`, `update_policy`, `publish_policy` and `delete_policy`.
 - **Tenant readers:** after db/29, a role in `tsi_tenant_reader` sees nothing until a row in `tsi_reader_tenants` maps it to a tenant; `tsi.fiduciary_id` is no longer read.
 - **Rights portal:** Outside `local`, set each fiduciary's OTP mode to `EMAIL_OTP`/`MOBILE_OTP` with an `OTP` webhook, or set `ALLOW_DUMMY_OTP=true` for a demo — `DUMMY_OTP` logins are otherwise refused.
