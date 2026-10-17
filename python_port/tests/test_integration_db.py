@@ -239,6 +239,7 @@ def test_deidentification_and_erasure_never_cross_tenants(tx):
 def test_erasure_metadata_scrub_runs_on_the_original_user_id(tx):
     """P6-06 regression against a real DB: the consent-record metadata scrub
     must actually clear ip/user_agent rather than match nothing after re-keying."""
+    from dpdpcms_py import pii
     from dpdpcms_py.services.compliance import erase_cms_copy
 
     with tx.cursor() as cur:
@@ -248,8 +249,9 @@ def test_erasure_metadata_scrub_runs_on_the_original_user_id(tx):
         erase_cms_copy(fid, "asha")
 
         cur.execute(
-            "SELECT ip_address, user_agent FROM consent_records WHERE fiduciary_id = %s AND user_id LIKE 'erased:%%'",
-            (fid,),
+            "SELECT ip_address, user_agent FROM consent_records WHERE fiduciary_id = %s"
+            f" AND {pii.dec_sql('user_id_enc')} LIKE 'erased:%%'",
+            (fid, *real_db.bind_key()),
         )
         row = cur.fetchone()
     assert row is not None
@@ -260,9 +262,9 @@ def test_erasure_metadata_scrub_runs_on_the_original_user_id(tx):
 # ── P8-02: purge status vs. the legal hold ───────────────────────────────────
 def _seed_purge(cur, fid, user, purpose, status="PENDING", action="ERASE", hold_until=None, trigger="PurposeClosure"):
     cur.execute(
-        "INSERT INTO purge_requests (user_id, fiduciary_id, purpose_id, trigger_event, status, action, hold_until)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (user, fid, purpose, trigger, status, action, hold_until),
+        "INSERT INTO purge_requests (user_id_enc, user_id_hmac, fiduciary_id, purpose_id, trigger_event, status,"
+        " action, hold_until) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (*_pid(cur, user), fid, purpose, trigger, status, action, hold_until),
     )
     return str(cur.fetchone()["id"])
 
@@ -582,8 +584,8 @@ def test_console_assignment_matches_auto_route_and_notifies_the_assignee(tx):
         )
         op = str(cur.fetchone()["id"])
         cur.execute(
-            "INSERT INTO grievances (user_id, fiduciary_id, type, subject, description, reference_number)"
-            " VALUES ('asha', %s, 'CONSENT_COMPLAINT', 's', 'd', 'GRV-2026-ABC123') RETURNING id",
+            "INSERT INTO grievances (user_id_enc, user_id_hmac, fiduciary_id, type, subject, description,"
+            f" reference_number) VALUES ({_ASHA_ENC}, {_ASHA_HMAC}, %s, 'CONSENT_COMPLAINT', 's', 'd', 'GRV-2026-ABC123') RETURNING id",
             (fid,),
         )
         gid = str(cur.fetchone()["id"])
@@ -595,9 +597,9 @@ def test_console_assignment_matches_auto_route_and_notifies_the_assignee(tx):
         row = cur.fetchone()
         assert row["status"] == "NEW" and str(row["assigned_dpo_user_id"]) == op
         cur.execute(
-            "SELECT recipient_type, recipient_id, notification_type, context FROM notifications"
-            " WHERE fiduciary_id = %s ORDER BY recipient_type",
-            (fid,),
+            f"SELECT recipient_type, {real_db.decrypt_col('recipient_id_enc')} AS recipient_id, notification_type,"
+            " context FROM notifications WHERE fiduciary_id = %s ORDER BY recipient_type",
+            (*real_db.bind_key(), fid),
         )
         notes = cur.fetchall()
         _subject, body = render_message(fid, "GRIEVANCE_ROUTED", "DPO", notes[0]["context"])
@@ -939,8 +941,8 @@ def test_assign_grievance_rejects_an_officer_who_cannot_act(tx):
         fid, _ = _seed_tenant(cur)
         auditor = _seed_operator(cur, fid, "AUDITOR", "aud2")
         cur.execute(
-            "INSERT INTO grievances (user_id, fiduciary_id, type, subject, description)"
-            " VALUES ('asha', %s, 'GENERAL_COMPLAINT', 's', 'd') RETURNING id",
+            "INSERT INTO grievances (user_id_enc, user_id_hmac, fiduciary_id, type, subject, description)"
+            f" VALUES ({_ASHA_ENC}, {_ASHA_HMAC}, %s, 'GENERAL_COMPLAINT', 's', 'd') RETURNING id",
             (fid,),
         )
         gid = str(cur.fetchone()["id"])
@@ -1174,8 +1176,8 @@ def test_grievance_queue_rows_carry_grievance_id_and_resolution_carries_summary(
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO grievances (user_id, fiduciary_id, type, subject, description, reference_number)"
-            " VALUES ('asha', %s, 'GENERAL_COMPLAINT', 's', 'd', 'GRV-2026-ABCDEF') RETURNING id",
+            "INSERT INTO grievances (user_id_enc, user_id_hmac, fiduciary_id, type, subject, description,"
+            f" reference_number) VALUES ({_ASHA_ENC}, {_ASHA_HMAC}, %s, 'GENERAL_COMPLAINT', 's', 'd', 'GRV-2026-ABCDEF') RETURNING id",
             (fid,),
         )
         gid = str(cur.fetchone()["id"])
@@ -1808,7 +1810,10 @@ def test_erasure_token_cannot_be_recomputed_from_the_identifier(tx):
         fid, pol = _seed_tenant(cur)
         _seed_consent(cur, fid, pol, "asha")
         erase_cms_copy(fid, "asha", cur=cur, pending_files=set())
-        cur.execute("SELECT user_id FROM consent_records WHERE fiduciary_id = %s", (fid,))
+        cur.execute(
+            f"SELECT {real_db.decrypt_col('user_id_enc')} AS user_id FROM consent_records WHERE fiduciary_id = %s",
+            (*real_db.bind_key(), fid),
+        )
         token = cur.fetchone()["user_id"]
     assert token.startswith("erased:") and token != f"erased:{pseudonym(f'{fid}:asha')}"
 
@@ -1837,8 +1842,8 @@ def test_pending_grievance_queue_carries_grievance_id(tx):
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
         cur.execute(
-            "INSERT INTO grievances (user_id, fiduciary_id, type, subject, description)"
-            " VALUES ('asha', %s, 'GENERAL_COMPLAINT', 's', 'd') RETURNING id",
+            "INSERT INTO grievances (user_id_enc, user_id_hmac, fiduciary_id, type, subject, description)"
+            f" VALUES ({_ASHA_ENC}, {_ASHA_HMAC}, %s, 'GENERAL_COMPLAINT', 's', 'd') RETURNING id",
             (fid,),
         )
         gid = str(cur.fetchone()["id"])

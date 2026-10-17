@@ -12,7 +12,7 @@ from pathlib import Path
 
 import jwt as pyjwt
 import pytest
-from dpdpcms_py import throttle
+from dpdpcms_py import pii, throttle
 from dpdpcms_py.context import RequestContext
 from dpdpcms_py.errors import ApiError
 from dpdpcms_py.services import admin, compliance, consent, governance, rights, roles
@@ -1954,7 +1954,7 @@ def test_pl_03_deidentify_is_scoped_by_user_id(monkeypatch):
 
     monkeypatch.setattr(compliance.db, "connection", fake_connection)
     compliance.deidentify_purpose_cms_copy(FID, "asha", "care", action="ERASE")
-    assert any("user_id = %s" in s for s in cursor.sql), "UPDATE must be scoped by user_id"
+    assert any(f"user_id_hmac = {pii.HMAC_SQL}" in s for s in cursor.sql), "UPDATE must be scoped by user_id"
     assert any("fiduciary_id = %s" in s for s in cursor.sql)
     # A tenant-wide (no user_id) UPDATE would be the regression.
     assert not any("user_id" not in s and "UPDATE consent_records" in s for s in cursor.sql)

@@ -12,7 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from dpdpcms_py import main, netutil
+from dpdpcms_py import main, netutil, pii
+from dpdpcms_py.config import settings
 from dpdpcms_py.context import RequestContext
 from dpdpcms_py.errors import ApiError
 from dpdpcms_py.services import compliance, consent, roles
@@ -193,8 +194,9 @@ def test_attachment_retrieval_scoped_to_principal(monkeypatch, tmp_path):
     out = compliance.GrievanceService().get_grievance_attachment(ctx)
     assert base64.b64decode(out["content_base64"]) == b"evidence"
     assert "storage_path" not in out
-    assert "a.fiduciary_id = %s" in seen["sql"] and "g.user_id = %s" in seen["sql"]
-    assert seen["params"] == ("att-1", FID, "asha")
+    assert "a.fiduciary_id = %s" in seen["sql"] and f"g.user_id_hmac = {pii.HMAC_SQL}" in seen["sql"]
+    assert seen["params"] == (settings.db_encryption_key, "att-1", FID, *pii.hmac_params("asha"))
+    assert out["uploaded_by"] == "asha"
 
 
 def test_attachment_retrieval_not_found(monkeypatch):

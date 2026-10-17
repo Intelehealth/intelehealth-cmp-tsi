@@ -642,3 +642,161 @@ def test_principal_ids_with_spaces_resolve_and_case_stays_distinct(tx):
     with tx.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM data_principal WHERE fiduciary_id = %s", (fid,))
         assert cur.fetchone()["n"] == 3
+
+
+# ---- Task 6: compliance (purge, grievance, breach, erasure) on the encrypted columns --
+
+
+def _processor_ctx(fid, payload):
+    """A PURGE-scope processor API key of `fid` (app bound, no operator)."""
+    from dpdpcms_py.context import RequestContext
+
+    return RequestContext(
+        path="/api/v1/compliance",
+        category="client",
+        service="compliance",
+        payload=payload,
+        headers={},
+        fiduciary_id=fid,
+        permissions={"PURGE"},
+        app_id="app-1",
+    )
+
+
+def _no_plaintext(cur, fid, pid, tables):
+    for table in tables:
+        cur.execute(f"SELECT to_jsonb(t)::text AS j FROM {table} t WHERE fiduciary_id = %s", (fid,))
+        assert all(pid not in r["j"] for r in cur.fetchall()), f"plaintext principal id stored in {table}"
+
+
+@needs_db
+def test_erasure_writes_encrypted_placeholder_and_is_repeatable(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+    from dpdpcms_py.services.compliance import GrievanceService, erase_cms_copy
+    from tests.test_integration_db import _seed_consent
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _seed_consent(cur, fid, pol, pid, ip="9.9.9.9", user_agent="curl/8")
+        _seed_consent(cur, fid, pol, "ramesh@example.org", ip="1.2.3.5")
+    GrievanceService().submit_grievance(
+        _api_ctx(fid, {"user_id": pid, "type": "GENERAL_COMPLAINT", "subject": "s", "description": "d"})
+    )
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM notifications WHERE fiduciary_id = %s AND recipient_id_hmac = %s",
+            (fid, pii.hmac_hex(pid)),
+        )
+        nid = cur.fetchone()["id"]
+        r_enc, r_h = _enc_hmac(cur, pid)
+        cur.execute(
+            "INSERT INTO notification_deliveries (notification_id, channel, recipient_enc, recipient_hmac)"
+            " VALUES (%s, 'EMAIL', %s, %s)",
+            (nid, r_enc, r_h),
+        )
+
+    counts = erase_cms_copy(fid, f" {pid} ")
+    assert counts["consent_records"] == 1 and counts["grievances"] == 1
+    assert counts["notification_deliveries"] == 1 and counts["consent_records.metadata"] == 1
+
+    key = settings.db_encryption_key
+    with tx.cursor() as cur:
+        cur.execute(
+            f"SELECT {pii.dec_sql('user_id_enc')} AS u, user_id_hmac, ip_address, user_agent FROM consent_records"
+            " WHERE fiduciary_id = %s",
+            (key, fid),
+        )
+        rows = {r["u"]: r for r in cur.fetchall()}
+        erased = [u for u in rows if u.startswith("erased:")]
+        assert len(erased) == 1 and "ramesh@example.org" in rows
+        token = erased[0]
+        assert rows[token]["user_id_hmac"] == pii.hmac_hex(token)
+        assert str(rows[token]["ip_address"]) == "0.0.0.0" and rows[token]["user_agent"] is None
+        assert str(rows["ramesh@example.org"]["ip_address"]) == "1.2.3.5"
+        for table, col in (("grievances", "user_id"), ("notifications", "recipient_id")):
+            cur.execute(
+                f"SELECT {pii.dec_sql(col + '_enc')} AS u, {col}_hmac AS h FROM {table} WHERE fiduciary_id = %s",
+                (key, fid),
+            )
+            assert {(r["u"], r["h"]) for r in cur.fetchall()} == {(token, pii.hmac_hex(token))}
+        cur.execute(
+            f"SELECT {pii.dec_sql('recipient_enc')} AS u, recipient_hmac AS h FROM notification_deliveries"
+            " WHERE notification_id = %s",
+            (key, nid),
+        )
+        assert cur.fetchone() == {"u": token, "h": pii.hmac_hex(token)}
+        _no_plaintext(cur, fid, pid, ("consent_records", "grievances", "notifications"))
+
+    # A second erasure (the principal re-requests, or a retry) must neither
+    # fail on the append-only / delivery-floor triggers nor re-key anything.
+    again = erase_cms_copy(fid, pid)
+    assert again["consent_records"] == 0 and again["consent_records.metadata"] == 0
+    with tx.cursor() as cur:
+        cur.execute(
+            f"SELECT {pii.dec_sql('user_id_enc')} AS u FROM consent_records WHERE fiduciary_id = %s", (key, fid)
+        )
+        assert {r["u"] for r in cur.fetchall()} == {token, "ramesh@example.org"}
+
+
+@needs_db
+def test_processor_sees_plaintext_purge_user_id_operator_sees_mask(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.services.compliance import ComplianceService
+    from tests.test_integration_db import _seed_consent, _seed_purge
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _seed_consent(cur, fid, pol, pid)
+        first = _seed_purge(cur, fid, pid, "care", action="DE_IDENTIFY")
+        second = _seed_purge(cur, fid, pid, "care", action="DE_IDENTIFY")
+    service = ComplianceService()
+    operator = _ctx(fid, {}, operator_id="op-1")
+
+    for row in service.list_purge_requests(_processor_ctx(fid, {})):
+        assert row["user_id"] == pid and "user_id_enc" not in row and "user_id_hmac" not in row
+    assert {r["user_id"] for r in service.list_purge_requests(operator)} == {pii.mask(pid)}
+    assert service.get_purge_request(_processor_ctx(fid, {"id": first}))["user_id"] == pid
+    got = service.get_purge_request(_ctx(fid, {"id": first}, operator_id="op-1"))
+    assert got["user_id"] == pii.mask(pid) and "user_id_enc" not in got
+
+    confirm = {"status": "PURGE_COMPLETED", "records_affected_count": 1}
+    out = service.confirm_purge_status(_processor_ctx(fid, {**confirm, "purge_request_id": first}))
+    assert out["status"] == "PURGE_COMPLETED" and out["user_id"] == pid
+    assert out["cms_copy_erased"] == {"consent_records_touched": 1}
+    out = service.confirm_purge_status(_ctx(fid, {**confirm, "purge_request_id": second}, operator_id="op-1"))
+    assert out["user_id"] == pii.mask(pid)
+    with tx.cursor() as cur:
+        _no_plaintext(cur, fid, pid, ("purge_requests",))
+
+
+@needs_db
+def test_grievance_search_by_principal_is_exact_match(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.services.compliance import GrievanceService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    service = GrievanceService()
+    for user in ("asha@example.org", "asha@example.org.in", "Asha@example.org"):
+        service.submit_grievance(
+            _api_ctx(fid, {"user_id": user, "type": "GENERAL_COMPLAINT", "subject": "s", "description": "d"})
+        )
+
+    def search(term):
+        return service.list_grievances(_ctx(fid, {"user_id": term}, operator_id="op-1"))
+
+    found = search(" asha@example.org ")
+    assert [g["user_id"] for g in found] == [pii.mask("asha@example.org")]
+    assert "user_id_enc" not in found[0] and "user_id_hmac" not in found[0]
+    assert search("asha") == []
+    assert len(service.list_grievances(_ctx(fid, {}, operator_id="op-1"))) == 3
+
+    mine = service.list_user_grievances(_api_ctx(fid, {"user_id": "asha@example.org"}))
+    assert [g["user_id"] for g in mine] == ["asha@example.org"]
+    detail = service.get_grievance(_api_ctx(fid, {"grievance_id": mine[0]["grievance_id"]}))
+    assert detail["user_id"] == "asha@example.org" and "user_id_enc" not in detail
+    with tx.cursor() as cur:
+        _no_plaintext(cur, fid, "asha@example.org", ("grievances", "notifications"))

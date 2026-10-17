@@ -8,6 +8,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from dpdpcms_py import pii
+from dpdpcms_py.config import settings
 from tests.test_integration_db import (
     _DB_READY,
     REPO,
@@ -46,9 +48,9 @@ def test_reporting_a_breach_notifies_the_principals_it_names(tx):
     assert out["notified"] == 3 and out["affected_principal_count"] == 3
     with tx.cursor() as cur:
         cur.execute(
-            "SELECT recipient_id, notification_type, context FROM notifications WHERE fiduciary_id = %s"
-            " AND recipient_type = 'PRINCIPAL' ORDER BY recipient_id",
-            (fid,),
+            f"SELECT {pii.dec_sql('recipient_id_enc')} AS recipient_id, notification_type, context"
+            " FROM notifications WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL' ORDER BY 1",
+            (settings.db_encryption_key, fid),
         )
         rows = cur.fetchall()
     assert [r["recipient_id"] for r in rows] == ["asha", "meena", "ravi"]
