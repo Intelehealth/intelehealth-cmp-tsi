@@ -1189,7 +1189,11 @@ class ConsentService(Service):
             " FROM data_principal WHERE fiduciary_id = %s ORDER BY created_at DESC LIMIT %s",
             (*db.bind_key(), *db.bind_key(), _fid(ctx), int(ctx.payload.get("limit") or 20)),
         )
-        return [pii.principal_row(ctx, row, "user_id", "guardian_id") for row in rows]
+        # user_ref is the lookup HMAC, never the identifier: the handle by which the
+        # console names a masked principal to reveal_user_id (source data_principal).
+        return [
+            {**pii.principal_row(ctx, row, "user_id", "guardian_id"), "user_ref": row["user_id_hmac"]} for row in rows
+        ]
 
     def link_user(self, ctx: RequestContext) -> dict:
         reject_principal(ctx, "Linking anonymous sessions requires an application API key.")

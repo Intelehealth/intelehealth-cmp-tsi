@@ -2072,3 +2072,61 @@ def test_audit_trail_without_a_decryptable_principal_is_empty(tx, monkeypatch):
 
     monkeypatch.setattr(audit, "principal_pseudonym", pseudonym)
     assert _trail(_bearer(email, "DPO"), record, fid)["purposes"] == []
+
+
+# ---- Task 11: DPO console UI ------------------------------------------------------------
+
+
+def _dpo_page(name):
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[2] / "web" / "console" / "dpo" / name).read_text(encoding="utf-8")
+
+
+def test_dpo_pages_have_no_inline_handlers_and_call_new_funcs():
+    import re
+
+    for page in ("principals.html", "compliance.html", "grievances.html"):
+        html = _dpo_page(page)
+        assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html, re.I), f"inline <script> in {page}"
+        assert not re.search(r" on[a-z]+=", html, re.I), f"inline event handler in {page}"
+    principals = _dpo_page("principals.js")
+    for func in ("get_consent_audit_trail", "get_parental_verification", "reveal_user_id", "withdraw_consent"):
+        assert func in principals, f"principals.js does not call {func}"
+    for page in ("compliance.js", "grievances.js"):
+        assert "reveal_user_id" in _dpo_page(page), f"{page} does not call reveal_user_id"
+    for page in ("principals.js", "compliance.js", "grievances.js"):
+        script = _dpo_page(page)
+        assert "Reveal — this action is logged" in script
+        assert "/api/v1/admin/pii" in script
+        # A revealed value is never persisted in the browser.
+        assert not re.search(r"localStorage\.setItem", script), f"{page} writes localStorage"
+        assert not re.search(r"https?://", script), f"{page} loads a remote URL"
+
+
+def test_grievance_console_sends_the_filter_keys_list_grievances_reads():
+    script = _dpo_page("grievances.js")
+    start = script.index('"_func": "list_grievances"')
+    payload = script[script.rindex("{", 0, start) : script.index("}", start)]
+    assert '"user_id"' in payload and '"status"' in payload
+    assert '"search"' not in payload and '"status_filter"' not in payload
+
+
+@needs_db
+def test_list_principals_gives_the_console_a_user_ref_it_can_reveal(tx):
+    from dpdpcms_py import pii
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    _grant(fid, pol, "asha@example.org")
+    headers = _bearer(email, "DPO")
+    response = _console(headers, "list_principals", {"fiduciary_id": fid})
+    assert response.status_code == 200, response.text
+    [row] = response.json()
+    assert row["user_id"] == pii.mask("asha@example.org")
+    assert row["user_ref"] == pii.hmac_hex("asha@example.org")
+    assert "user_id_hmac" not in row and "user_id_enc" not in row
+    revealed = _reveal(headers, {"source": "data_principal", "fiduciary_id": fid, "user_ref": row["user_ref"]})
+    assert revealed.status_code == 200, revealed.text
+    assert revealed.json()["fields"] == {"user_id": "asha@example.org"}

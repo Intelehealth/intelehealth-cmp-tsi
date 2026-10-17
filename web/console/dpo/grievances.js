@@ -1,15 +1,19 @@
 // P12-08: the CSP (script-src 'self') blocks inline event-handler attributes, so the
-// page's static controls carry data-action / data-change-action and are wired here.
+// page's controls carry data-action / data-change-action and are wired here. Clicks go
+// through one delegated listener, so controls rendered later (reveal) are served too.
 // Handlers resolve their target functions at event time, exactly as the old attributes did.
 (function wireStaticHandlers() {
     const clickHandlers = {
         handleLogout: () => handleLogout(),
         openLogGrievance: () => openLogGrievance(),
         closeLogGrievance: () => closeLogGrievance(),
+        revealGrievanceRow: (el) => revealInto(el, 'grievance', el.getAttribute('data-id'), el.previousElementSibling),
+        revealGrievanceDetail: (el) => revealInto(el, 'grievance', resolutionForm.getAttribute('data-grievance-id'), document.getElementById('detail-user-id')),
     };
-    document.querySelectorAll('[data-action]').forEach((el) => {
-        const fn = clickHandlers[el.getAttribute('data-action')];
-        if (fn) el.addEventListener('click', (e) => fn(el, e));
+    document.addEventListener('click', (e) => {
+        const el = e.target.closest('[data-action]');
+        const fn = el && clickHandlers[el.getAttribute('data-action')];
+        if (fn) fn(el, e);
     });
 })();
 
@@ -29,6 +33,77 @@
     }
     const USER_NAME = localStorage.getItem('username');
     document.getElementById('username').textContent = USER_NAME || 'DPO User';
+
+    // --- Logged reveal (reveal_user_id) ---
+    // Console reads carry masked principal identifiers. A DPO or administrator sees one in
+    // the clear only through reveal_user_id, which writes an audit row before answering and
+    // allows 20 reveals a minute. A revealed value lives only in the page (re-masked after
+    // REMASK_MS) and is never written to localStorage.
+    const API_URL_PII = '/api/v1/admin/pii';
+    const REVEAL_LABEL = 'Reveal — this action is logged';
+    const REMASK_MS = 30000;
+    const CAN_REVEAL = ['DPO', 'ADMIN'].includes(String(localStorage.getItem('role') || '').toUpperCase());
+    let revealConfirmed = false;
+
+    function revealButton(action, id) {
+        if (!CAN_REVEAL) return null;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'reveal-btn block text-[10px] text-amber-700 hover:text-amber-900 underline';
+        btn.textContent = REVEAL_LABEL;
+        btn.setAttribute('data-action', action);
+        if (id) btn.setAttribute('data-id', id);
+        return btn;
+    }
+
+    // The revealed fields, or null (declined, refused or failed: the reason is shown).
+    async function revealFields(source, id) {
+        if (!CAN_REVEAL || !id) return null;
+        if (!revealConfirmed) {
+            if (!confirm("This reveal will be recorded in the audit log against your account. Continue?")) return null;
+            revealConfirmed = true;
+        }
+        let response, body = {};
+        try {
+            response = await fetch(API_URL_PII, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
+                body: JSON.stringify({ "_func": "reveal_user_id", "source": source, "id": id, "fiduciary_id": localStorage.getItem('fiduciary_id') })
+            });
+            try { body = await response.json(); } catch (e) { body = {}; }
+        } catch (e) {
+            alert("Reveal failed: the server could not be reached.");
+            return null;
+        }
+        if (response.status === 429) {
+            alert("Too many reveals: you may reveal at most 20 values a minute. Wait a minute, then try again.");
+            return null;
+        }
+        if (response.status === 403) {
+            alert("You do not have permission to reveal this value. Only a DPO or an administrator may.");
+            return null;
+        }
+        if (!response.ok) {
+            alert("Reveal failed: " + (body.message || `status ${response.status}`));
+            return null;
+        }
+        return body.fields || {};
+    }
+
+    // Reveals the principal of `source` record `id` into `target` in place of its masked
+    // text, then masks it again (unless the element has since been re-rendered).
+    async function revealInto(btn, source, id, target) {
+        btn.disabled = true;
+        const fields = await revealFields(source, id);
+        if (!fields || !target) { btn.disabled = false; return; }
+        const original = target.textContent;
+        target.textContent = fields.user_id || 'N/A';
+        const shown = target.textContent;
+        setTimeout(() => {
+            if (target.textContent === shown) target.textContent = original;
+            btn.disabled = false;
+        }, REMASK_MS);
+    }
 
     // Map of operator_id -> display name, used for the "Assigned To" column/dropdown.
     // Operators can't delegate, so they never need this lookup.
@@ -111,6 +186,7 @@
 
         row.innerHTML = `
             <td class="px-4 py-3 text-sm text-gray-600">...${esc(grievance.grievance_id.slice(-8))}</td>
+            <td class="px-4 py-3 text-sm font-mono text-gray-700"><span class="principal-id"></span></td>
             <td class="px-4 py-3 text-sm font-medium text-gray-900">${esc(grievance.type.replace(/_/g, ' '))}</td>
             <td class="px-4 py-3 text-sm text-gray-600">${createChannelBadge(grievance.channel)}</td>
             <td class="px-4 py-3 text-sm text-gray-600">${esc(grievance.subject || 'N/A')}</td>
@@ -123,6 +199,10 @@
             </td>
         `;
         row.querySelector('.view-grievance-btn').addEventListener('click', () => viewGrievance(grievance.grievance_id));
+        const idSpan = row.querySelector('.principal-id');
+        idSpan.textContent = grievance.user_id || 'N/A';
+        const reveal = revealButton('revealGrievanceRow', grievance.grievance_id);
+        if (reveal) idSpan.after(reveal);
         return row;
     }
 
@@ -160,14 +240,15 @@
 
 
     async function loadGrievances(searchTerm = "") {
-        tableBody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-gray-500">Loading Grievance data...</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="10" class="p-4 text-center text-gray-500">Loading Grievance data...</td></tr>`;
         errorMessageP.classList.add('hidden');
 
         try {
             const listPayload = {
                 "_func": "list_grievances",
-                "search": searchTerm,
-                "status_filter": statusFilter.value,
+                // list_grievances matches the whole principal id (through its HMAC) and an exact status.
+                "user_id": searchTerm,
+                "status": statusFilter.value === 'ALL' ? '' : statusFilter.value,
                 "sort_by": "SUBMISSION_DATE_DESC",
                 "fiduciary_id":localStorage.getItem("fiduciary_id"),
                 "page": 1,
@@ -200,7 +281,7 @@
                 tableBody.innerHTML = '';
 
                 if (grievances.length === 0) {
-                    tableBody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-gray-500">No grievances found matching criteria.</td></tr>`;
+                    tableBody.innerHTML = `<tr><td colspan="10" class="p-4 text-center text-gray-500">No grievances found matching criteria.</td></tr>`;
                 } else {
                     grievances.forEach(g => {
                         tableBody.appendChild(createGrievanceRow(g));
@@ -213,7 +294,7 @@
 
         } catch (error) {
             console.error("Error loading Grievances:", error);
-            tableBody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-red-600">
+            tableBody.innerHTML = `<tr><td colspan="10" class="p-4 text-center text-red-600">
                 Error connecting to the Grievance API.
             </td></tr>`;
             errorMessageP.classList.remove('hidden');
@@ -259,7 +340,8 @@
         // Populate modal details
         document.getElementById('modal-grievance-id').textContent = grievance.id;
         document.getElementById('detail-channel').innerHTML = createChannelBadge(grievance.channel);
-        document.getElementById('detail-user-id').textContent = grievance.user_id;
+        document.getElementById('detail-user-id').textContent = grievance.user_id || 'N/A';
+        document.getElementById('detail-reveal-btn').disabled = false;
         document.getElementById('detail-date').textContent = new Date(grievance.submission_timestamp).toLocaleString();
         document.getElementById('detail-status').innerHTML = createStatusBadge(grievance.status);
         document.getElementById('detail-deadline').textContent = new Date(grievance.due_date).toLocaleDateString();
@@ -451,6 +533,7 @@
     if (IS_OPERATOR) {
         document.getElementById('assignment-section').remove();
     }
+    if (CAN_REVEAL) document.getElementById('detail-reveal-btn').classList.remove('hidden');
 
     // --- Fetch Operators, Fiduciaries and Load Grievances ---
     fetchOperators().then(loadGrievances);
