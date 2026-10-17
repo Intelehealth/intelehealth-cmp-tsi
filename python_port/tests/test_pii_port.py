@@ -2198,3 +2198,137 @@ def test_api_key_caller_cannot_look_up_history_by_user_ref(tx):
     with pytest.raises(ApiError) as err:
         ConsentService().list_consent_history(_api_ctx(fid, {"user_ref": pii.hmac_hex("asha@example.org")}))
     assert err.value.status == 403
+
+
+# ---- Final review fixes -----------------------------------------------------------------
+
+
+def test_otp_subject_trims_spaces_but_keeps_case():
+    from dpdpcms_py import principal_otp
+
+    assert principal_otp.subject_key(FID, " abc123 ") == principal_otp.subject_key(FID, "abc123")
+    assert principal_otp.subject_key(FID, "abc123") != principal_otp.subject_key(FID, "ABC123")
+
+
+@needs_db
+def test_otp_issued_for_one_principal_does_not_log_in_a_case_variant(tx, monkeypatch):
+    from dpdpcms_py import principal_otp, webhooks
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.consent import PrincipalService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    codes = []
+    real_encrypt = principal_otp.encrypt_code
+
+    def capture(code):
+        codes.append(code)
+        return real_encrypt(code)
+
+    monkeypatch.setattr(principal_otp, "encrypt_code", capture)
+    monkeypatch.setattr(webhooks, "queue_webhook", lambda *a, **k: None)
+
+    def call(func, payload):
+        ctx = _ctx(fid, {"fiduciary_id": fid, **payload})
+        return getattr(PrincipalService(), func)(ctx)
+
+    call("request_principal_otp", {"user_id": "abc123"})
+    with pytest.raises(ApiError) as err:
+        call("principal_login", {"user_id": "ABC123", "otp": codes[-1]})
+    assert err.value.status == 401
+    # Spaces are not part of the id: the padded form is the same principal.
+    out = call("principal_login", {"user_id": " abc123 ", "otp": codes[-1]})
+    assert out["token"] and out["user_id"] == "abc123"
+
+
+def _log_archived_and_live(monkeypatch, cur, fid, action):
+    """One `action` row in the oldest live year (then archived) and one in a live year."""
+    from datetime import datetime
+
+    from dpdpcms_py import audit
+
+    year = _live_partition_years(cur)[0]
+    _log_at(monkeypatch, datetime(year, 3, 1), action=action, fid=fid)
+    _archive_everything(monkeypatch)
+    assert f"audit_logs_y{year}_archive" in audit.ledger_source()
+    _log_at(monkeypatch, datetime(2200, 6, 1), action=action, fid=fid)
+    return year
+
+
+@needs_db
+def test_audit_export_includes_archived_years(tx, tmp_path, monkeypatch):
+    import csv
+    import dataclasses
+    import json
+
+    from dpdpcms_py import jobs
+    from dpdpcms_py.config import settings
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        year = _log_archived_and_live(monkeypatch, cur, fid, "EXPORT_EVENT")
+    monkeypatch.setattr(jobs, "settings", dataclasses.replace(settings, export_path=tmp_path))
+    path = jobs._write_export(
+        {
+            "id": str(uuid.uuid4()),
+            "fiduciary_id": fid,
+            "subtype": "AUDIT",
+            "start_date": f"{year}-01-01",
+            "end_date": "2200-12-31",
+        }
+    )
+    with path.open(encoding="utf-8") as handle:
+        stamps = sorted(r["timestamp"][:4] for r in csv.DictReader(handle) if r["audit_action"] == "EXPORT_EVENT")
+    assert stamps == [str(year), "2200"]
+    verdict = json.loads(path.with_suffix(".verification.json").read_text(encoding="utf-8"))
+    assert verdict["attestation"] == "INTACT"
+
+
+@needs_db
+def test_access_report_includes_archived_years(tx, monkeypatch):
+    from dpdpcms_py.services.governance import AuditService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        year = _log_archived_and_live(monkeypatch, cur, fid, "LOGIN_SUCCESS")
+    report = AuditService().list_access_report(
+        _ctx(fid, {"start_date": f"{year}-01-01", "end_date": "2200-12-31T23:59:59"})
+    )
+    years = sorted(str(e["timestamp"])[:4] for e in report["events"] if e["audit_action"] == "LOGIN_SUCCESS")
+    assert years == [str(year), "2200"]
+
+
+@needs_db
+def test_pending_grievance_queue_carries_no_ciphertext_and_masks_the_principal(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.services.admin import AdminDashService
+    from tests.test_integration_db import _ASHA_ENC, _ASHA_HMAC
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        cur.execute(
+            "INSERT INTO grievances (user_id_enc, user_id_hmac, fiduciary_id, type, subject, description)"
+            f" VALUES ({_ASHA_ENC}, {_ASHA_HMAC}, %s, 'GENERAL_COMPLAINT', 's', 'd')",
+            (fid,),
+        )
+    (row,) = AdminDashService().list_pending_grievances(_ctx(fid, {"fiduciary_id": fid}, operator_id="op-1"))
+    assert "user_id_enc" not in row and "user_id_hmac" not in row
+    assert row["user_id"] == pii.mask("asha") and row["grievance_id"]
+
+
+@needs_db
+def test_dashboard_access_logs_decrypt_the_ip_and_read_archived_years(tx, monkeypatch):
+    from datetime import UTC, datetime
+
+    from dpdpcms_py import audit
+    from dpdpcms_py.services.admin import AdminDashService
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        year = _live_partition_years(cur)[0]
+    monkeypatch.setattr(audit, "_now", lambda: datetime(year, 3, 1, tzinfo=UTC))
+    audit.log_event("asha", fid, "SYSTEM", None, "DASH_EVENT", {}, source_ip="203.0.113.7")
+    _archive_everything(monkeypatch)
+    rows = AdminDashService().list_access_logs(_ctx(fid, {"limit": 50}))
+    (row,) = [r for r in rows if r["audit_action"] == "DASH_EVENT"]
+    assert row["source_ip"] == "203.0.113.7"

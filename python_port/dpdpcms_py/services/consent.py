@@ -1723,7 +1723,7 @@ class PrincipalService(Service):
         an expiry; principal_login consumes it exactly once.
         """
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
-        user_id = str(require(ctx.payload.get("user_id"), "user_id")).strip()
+        user_id = pii.normalize(str(require(ctx.payload.get("user_id"), "user_id")))
         mode, template = self._otp_mode(fid)
         if mode == "DUMMY_OTP":
             if not principal_otp.dummy_allowed():
@@ -1773,7 +1773,7 @@ class PrincipalService(Service):
 
     def principal_login(self, ctx: RequestContext) -> dict:
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
-        user_id = str(require(ctx.payload.get("user_id"), "user_id")).strip()
+        user_id = pii.normalize(str(require(ctx.payload.get("user_id"), "user_id")))
         supplied = str(require(ctx.payload.get("otp"), "otp")).strip()
         mode, _ = self._otp_mode(fid)
         if mode == "DUMMY_OTP":

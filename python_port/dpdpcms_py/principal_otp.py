@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import secrets
 
+from . import pii
 from .config import settings
 
 TTL_MINUTES = 5
@@ -39,7 +40,10 @@ def generate_code() -> str:
 
 
 def subject_key(fiduciary_id: str, user_id: str) -> str:
-    message = f"{fiduciary_id}:{str(user_id).strip().lower()}".encode()
+    # Same normalisation as the principal-ID HMAC (pii.normalize: spaces
+    # trimmed, case kept), so `abc123` and `ABC123` - two principals - never
+    # share a login code.
+    message = f"{fiduciary_id}:{pii.normalize(str(user_id))}".encode()
     return hmac.new(settings.lookup_salt.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 

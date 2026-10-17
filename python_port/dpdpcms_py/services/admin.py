@@ -3,8 +3,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from .. import db, throttle
-from ..audit import log_event
+from .. import db, pii, throttle
+from ..audit import SOURCE_IP_SQL, ledger_source, log_event
 from ..context import ADMIN_FIDUCIARY_ID, RequestContext
 from ..errors import ApiError
 from ..security import hash_password, passphrase, token, verify_password
@@ -755,12 +755,11 @@ class AdminDashService(Service):
 
     def list_pending_grievances(self, ctx: RequestContext) -> list[dict]:
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
-        return db.to_jsonable(
-            db.all(
-                "SELECT *, id AS grievance_id FROM grievances WHERE fiduciary_id = %s AND status IN ('NEW','IN_PROGRESS','ESCALATED') ORDER BY due_date ASC NULLS LAST LIMIT %s",
-                (fid, int(ctx.payload.get("limit") or 10)),
-            )
+        rows = db.all(
+            f"SELECT *, id AS grievance_id, {pii.dec_sql('user_id_enc')} AS user_id FROM grievances WHERE fiduciary_id = %s AND status IN ('NEW','IN_PROGRESS','ESCALATED') ORDER BY due_date ASC NULLS LAST LIMIT %s",
+            (*db.bind_key(), fid, int(ctx.payload.get("limit") or 10)),
         )
+        return [pii.principal_row(ctx, row, "user_id") for row in rows]
 
     def list_access_logs(self, ctx: RequestContext) -> list[dict]:
         from .roles import require_audit_access
@@ -768,9 +767,13 @@ class AdminDashService(Service):
         require_audit_access(ctx)
         limit = int(ctx.payload.get("limit") or 10)
         scope, scope_params = tenant_filter(ctx)
-        return db.to_jsonable(
-            db.all(
-                f"SELECT * FROM audit_logs WHERE 1 = 1{scope} ORDER BY timestamp DESC LIMIT %s",
-                (*scope_params, limit),
-            )
+        # The whole ledger (archived years too), with the stored IP decrypted
+        # as every other console audit read shows it.
+        rows = db.all(
+            f"SELECT *, {SOURCE_IP_SQL} AS source_ip_plain FROM {ledger_source()}"
+            f" WHERE 1 = 1{scope} ORDER BY timestamp DESC LIMIT %s",
+            (*db.bind_key(), *scope_params, limit),
         )
+        for row in rows:
+            row["source_ip"] = row.pop("source_ip_plain")
+        return db.to_jsonable(rows)

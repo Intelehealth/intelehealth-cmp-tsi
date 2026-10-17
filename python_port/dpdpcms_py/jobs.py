@@ -797,6 +797,12 @@ def _write_export(job: dict[str, Any]) -> Path:
         # AUDIT chain verdict below examines (P10-06).
         where.append(f"{date_column} < %s::date + INTERVAL '1 day'")
         params.append(job["end_date"])
+    if subtype == "AUDIT":
+        # The whole ledger, archived years included: the chain verdict below
+        # covers them, so the file must too.
+        from .audit import ledger_source
+
+        table = ledger_source()
     rows = db.all(f"SELECT {select} FROM {table} WHERE {' AND '.join(where)} ORDER BY {date_column} DESC", params)
     for row in rows:
         for col in principal_columns:

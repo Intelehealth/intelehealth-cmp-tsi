@@ -289,7 +289,7 @@ class AuditService(Service):
                 f"""
                 SELECT id, timestamp, fiduciary_id, user_id, service_type, service_id, audit_action,
                        context_details, {SOURCE_IP_SQL} AS source_ip
-                FROM audit_logs WHERE {" AND ".join(where)}
+                FROM {ledger_source()} WHERE {" AND ".join(where)}
                 ORDER BY timestamp DESC LIMIT %s
                 """,
                 params,
