@@ -116,12 +116,19 @@ class _AuditCursor:
     def __init__(self, previous):
         self.previous = previous
         self.inserted = None
+        self.encrypting = None
 
     def execute(self, sql, params=()):
+        self.encrypting = None
         if sql.lstrip().startswith("INSERT INTO audit_logs"):
             self.inserted = params
+        elif "pgp_sym_encrypt" in sql:
+            self.encrypting = params[0]
 
     def fetchone(self):
+        # The source_ip ciphertext comes from the database; a stand-in here.
+        if self.encrypting is not None:
+            return {"c": f"enc:{self.encrypting}"}
         return self.previous
 
     def __enter__(self):

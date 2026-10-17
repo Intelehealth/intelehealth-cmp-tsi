@@ -8,19 +8,21 @@ from datetime import UTC, datetime
 
 from .. import db, pii
 from ..audit import (
+    SOURCE_IP_SQL,
     certificate_signature,
     get_log,
     latest_chain_verification,
     ledger_source,
     list_logs,
     log_event,
+    principal_pseudonym,
     verify_chain,
 )
 from ..config import settings
 from ..context import RequestContext
 from ..errors import ApiError
 from ..netutil import validate_outbound_url
-from ..security import hash_password, pseudonym, random_secret
+from ..security import hash_password, random_secret
 from .admin import authenticated_user_id
 from .base import Service, bind_principal_field, csv_safe, principal_list_filter, require, tenant_filter
 from .catalog import activate_policy_if_complete, resolve_fiduciary
@@ -258,7 +260,7 @@ class AuditService(Service):
 
         require_audit_access(ctx)
         where = ["audit_action = ANY(%s)"]
-        params: list = [sorted(ACCESS_REPORT_ACTIONS)]
+        params: list = [*db.bind_key(), sorted(ACCESS_REPORT_ACTIONS)]
         if ctx.fiduciary_id:
             where.append("fiduciary_id = %s")
             params.append(ctx.fiduciary_id)
@@ -276,7 +278,7 @@ class AuditService(Service):
             db.all(
                 f"""
                 SELECT id, timestamp, fiduciary_id, user_id, service_type, service_id, audit_action,
-                       context_details, source_ip
+                       context_details, {SOURCE_IP_SQL} AS source_ip
                 FROM audit_logs WHERE {" AND ".join(where)}
                 ORDER BY timestamp DESC LIMIT %s
                 """,
@@ -1048,7 +1050,7 @@ class LegalService(Service):
                         " AND timestamp >= %s AND timestamp <= %s ORDER BY timestamp DESC, id DESC",
                         (
                             str(row["fiduciary_id"]),
-                            pseudonym(str(principal_id)),
+                            principal_pseudonym(str(principal_id)),
                             found[claimed[-1]]["timestamp"],
                             found[claimed[0]]["timestamp"],
                         ),
@@ -1067,7 +1069,7 @@ class LegalService(Service):
                 # signed payload explicitly says the trail is complete.
                 if data.get("trail_truncated") is False and db.one(
                     f"SELECT 1 FROM {ledger} WHERE fiduciary_id = %s AND user_id = %s AND timestamp < %s LIMIT 1",
-                    (str(row["fiduciary_id"]), pseudonym(str(principal_id)), found[claimed[-1]]["timestamp"]),
+                    (str(row["fiduciary_id"]), principal_pseudonym(str(principal_id)), found[claimed[-1]]["timestamp"]),
                 ):
                     return {
                         "valid": False,

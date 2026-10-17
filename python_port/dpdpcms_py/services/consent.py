@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -260,8 +261,6 @@ def _verify_with_digilocker(fiduciary_id: str, guardian_id: str, ref_id: str) ->
     the reference and answers {"verified": bool, "is_adult": bool}. With no
     verifier configured the log stays PENDING and cannot back a minor's consent.
     """
-    import json
-
     from ..config import settings
     from ..netutil import post_json
 
@@ -414,11 +413,11 @@ class ConsentService(Service):
                 INSERT INTO consent_records
                     (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, timestamp,
                      jurisdiction, language_selected, consent_status_general, consent_mechanism,
-                     ip_address, user_agent, data_point_consents, is_active_consent,
+                     ip_address_enc, user_agent, data_point_consents, is_active_consent,
                      verification_log_id, session_id, session_source, client_metadata,
                      supersedes_record_id, created_at, last_updated_at)
                 VALUES (uuid_generate_v4(), {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s, %s, NOW(), %s, %s, %s, %s,
-                        %s, %s, %s, TRUE, %s, %s, %s, %s, %s, NOW(), NOW())
+                        {db.enc_expr()}, %s, %s, TRUE, %s, %s, %s, %s, %s, NOW(), NOW())
                 RETURNING id
                 """,
                 (
@@ -431,7 +430,7 @@ class ConsentService(Service):
                     payload.get("language_selected", "en"),
                     "CONSENT_GIVEN",
                     observed["mechanism"],
-                    observed["ip_address"],
+                    *db.bind_encrypt(observed["ip_address"]),
                     observed["user_agent"],
                     db.as_jsonb(data_consents),
                     verification_log_id,
@@ -558,9 +557,9 @@ class ConsentService(Service):
             INSERT INTO parental_verification_logs
                 (id, child_principal_id_enc, child_principal_id_hmac,
                  guardian_principal_id_enc, guardian_principal_id_hmac, verification_mechanism,
-                 provider_name, verification_ref_id, proof_metadata, fiduciary_id, verification_status)
+                 provider_name, verification_ref_id_enc, proof_metadata_enc, fiduciary_id, verification_status)
             VALUES (uuid_generate_v4(), {pii.ENC_SQL}, {pii.HMAC_SQL}, {pii.ENC_SQL}, {pii.HMAC_SQL},
-                    %s, %s, %s, %s, %s, %s)
+                    %s, %s, {db.enc_expr()}, {db.enc_expr()}, %s, %s)
             RETURNING id
             """,
             (
@@ -570,8 +569,11 @@ class ConsentService(Service):
                 *pii.hmac_params(guardian),
                 mechanism,
                 payload.get("provider_name") or ("DigiLocker" if mechanism == "DIGILOCKER" else None),
-                ref_id,
-                db.as_jsonb({**(payload.get("proof_metadata") or {}), "verification_detail": detail}),
+                # Guardian evidence is stored encrypted (db/35); the proof as its JSON text.
+                *db.bind_encrypt(None if ref_id is None else str(ref_id)),
+                *db.bind_encrypt(
+                    json.dumps({**(payload.get("proof_metadata") or {}), "verification_detail": detail}, default=str)
+                ),
                 fid,
                 status,
             ),
@@ -1213,15 +1215,15 @@ class ConsentService(Service):
                     (row["id"],),
                 )
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO consent_records
                         (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, timestamp,
                          jurisdiction, language_selected, consent_status_general, consent_mechanism,
-                         ip_address, user_agent, data_point_consents, is_active_consent,
+                         ip_address_enc, user_agent, data_point_consents, is_active_consent,
                          verification_log_id, session_id, session_source, client_metadata,
                          supersedes_record_id, created_at, last_updated_at)
                     VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                            {db.enc_expr()}, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                     RETURNING id
                     """,
                     (
@@ -1234,7 +1236,7 @@ class ConsentService(Service):
                         row["language_selected"],
                         row_status,
                         observed["mechanism"],
-                        observed["ip_address"],
+                        *db.bind_encrypt(observed["ip_address"]),
                         observed["user_agent"],
                         db.as_jsonb(updated),
                         is_active,

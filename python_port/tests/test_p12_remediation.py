@@ -80,9 +80,9 @@ def test_principal_with_a_naive_stored_expiry_can_still_withdraw(tx):
         cur.execute(
             "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, timestamp,"
             " jurisdiction, language_selected, data_point_consents, is_active_consent, consent_status_general,"
-            " consent_mechanism, ip_address, created_at, last_updated_at)"
+            " consent_mechanism, ip_address_enc, created_at, last_updated_at)"
             f" VALUES (uuid_generate_v4(), {_ASHA_ENC}, {_ASHA_HMAC}, %s, %s, 'v1', NOW(), 'IN', 'en', %s, TRUE, 'CONSENT_GIVEN',"
-            " 'WEB', '1.2.3.4', NOW(), NOW())",
+            " 'WEB', encode(pgp_sym_encrypt('1.2.3.4', current_setting('app.enc_key')), 'base64'), NOW(), NOW())",
             (
                 fid,
                 pol,
@@ -457,9 +457,9 @@ def test_history_purpose_filter_skips_an_empty_data_point_id(tx):
         cur.execute(
             "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, timestamp,"
             " jurisdiction, language_selected, data_point_consents, is_active_consent, consent_status_general,"
-            " consent_mechanism, ip_address, created_at, last_updated_at)"
+            " consent_mechanism, ip_address_enc, created_at, last_updated_at)"
             f" VALUES (uuid_generate_v4(), {_ASHA_ENC}, {_ASHA_HMAC}, %s, %s, 'v1', NOW(), 'IN', 'en', %s, TRUE, 'CONSENT_GIVEN',"
-            " 'WEB', '1.2.3.4', NOW(), NOW())",
+            " 'WEB', encode(pgp_sym_encrypt('1.2.3.4', current_setting('app.enc_key')), 'base64'), NOW(), NOW())",
             (fid, pol, real_db.as_jsonb([{"data_point_id": "", "purpose_id": "research", "consent_granted": True}])),
         )
     rows = ConsentService().list_consent_history(_ctx(fid, {"user_id": "asha", "purpose_id": "Research"}))

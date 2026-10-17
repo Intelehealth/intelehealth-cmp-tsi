@@ -229,10 +229,11 @@ def erase_cms_copy(
         # nothing, so the session IP / user agent and the delivery recipient
         # survived erasure.
         db.allow_consent_maintenance(cur)
+        # The session IP is stored encrypted (db/35): it becomes the encrypted 0.0.0.0.
         cur.execute(
-            "UPDATE consent_records SET ip_address = '0.0.0.0', user_agent = NULL"
+            f"UPDATE consent_records SET ip_address_enc = {db.enc_expr()}, user_agent = NULL"
             f" WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}",
-            (fiduciary_id, *who),
+            (*db.bind_encrypt("0.0.0.0"), fiduciary_id, *who),
         )
         counts["consent_records.metadata"] = cur.rowcount
         cur.execute(

@@ -984,7 +984,7 @@ def test_erasure_orders_grievance_statements_before_the_loop(monkeypatch, tmp_pa
     # SEC-15 survivors are scrubbed too.
     assert any("UPDATE evidence_certificates" in s for s in cursor.sql)
     assert any("SET guardian_id" in s for s in cursor.sql)
-    assert any("SET ip_address = '0.0.0.0'" in s for s in cursor.sql)
+    assert any("SET ip_address_enc = " in s for s in cursor.sql)
     assert any("UPDATE webhook_deliveries" in s for s in cursor.sql)
 
 
@@ -1519,7 +1519,7 @@ def test_p6_06_erasure_metadata_statements_run_before_the_loop(monkeypatch, tmp_
     monkeypatch.setattr(compliance.db, "connection", fake_connection)
     monkeypatch.setattr(compliance.db, "one", lambda sql, params=(): None)
     compliance.erase_cms_copy(FID, "asha")
-    ip_idx = next(i for i, s in enumerate(cursor.sql) if "SET ip_address = '0.0.0.0'" in s)
+    ip_idx = next(i for i, s in enumerate(cursor.sql) if "SET ip_address_enc = " in s)
     nd_idx = next(i for i, s in enumerate(cursor.sql) if "UPDATE notification_deliveries" in s)
     consent_idx = next(i for i, s in enumerate(cursor.sql) if "SET user_id" in s and "consent_records" in s)
     assert ip_idx < consent_idx, "metadata scrub must run before consent_records is re-keyed"

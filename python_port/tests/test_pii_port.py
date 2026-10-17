@@ -492,9 +492,10 @@ def test_consent_maintenance_rekeys_encrypted_user_id_only(tx):
         cur.execute(
             "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version,"
             " timestamp, jurisdiction, language_selected, data_point_consents, is_active_consent,"
-            " consent_status_general, consent_mechanism, ip_address, created_at, last_updated_at)"
+            " consent_status_general, consent_mechanism, ip_address_enc, created_at, last_updated_at)"
             " VALUES (uuid_generate_v4(), %s, %s, %s, %s, 'v1', NOW(), 'IN', 'en', '[]', TRUE,"
-            " 'CONSENT_GIVEN', 'WEB', '1.2.3.4', NOW(), NOW()) RETURNING id",
+            " 'CONSENT_GIVEN', 'WEB', encode(pgp_sym_encrypt('1.2.3.4', current_setting('app.enc_key')), 'base64'),"
+            " NOW(), NOW()) RETURNING id",
             (enc, h, fid, pol),
         )
         rid = cur.fetchone()["id"]
@@ -704,9 +705,9 @@ def test_erasure_writes_encrypted_placeholder_and_is_repeatable(tx):
     key = settings.db_encryption_key
     with tx.cursor() as cur:
         cur.execute(
-            f"SELECT {pii.dec_sql('user_id_enc')} AS u, user_id_hmac, ip_address, user_agent FROM consent_records"
-            " WHERE fiduciary_id = %s",
-            (key, fid),
+            f"SELECT {pii.dec_sql('user_id_enc')} AS u, user_id_hmac, {pii.dec_sql('ip_address_enc')} AS ip_address,"
+            " user_agent FROM consent_records WHERE fiduciary_id = %s",
+            (key, key, fid),
         )
         rows = {r["u"]: r for r in cur.fetchall()}
         erased = [u for u in rows if u.startswith("erased:")]
@@ -1138,3 +1139,191 @@ def test_erased_subject_certificate_still_fails_when_tampered(tx):
         )
     result = service.verify_certificate(_ctx(fid, {"id": cert_id}))
     assert result["valid"] is False and "no longer present" in result["reason"]
+
+
+# ---- Task 8: guardian evidence, consent IP and audit details --------------------------
+
+
+def _decrypt(cur, value):
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+
+    cur.execute(f"SELECT {pii.dec_sql('%s::text')} AS v", (value, settings.db_encryption_key))
+    return cur.fetchone()["v"]
+
+
+@needs_db
+def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
+    import dataclasses
+    import json
+
+    from dpdpcms_py.services.consent import ConsentService
+
+    ip, ref = "203.0.113.77", "DL-REF-998877"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        assert "ip_address" not in _columns(cur, "consent_records")
+        assert {"verification_ref_id", "proof_metadata"}.isdisjoint(_columns(cur, "parental_verification_logs"))
+    service = ConsentService()
+    consent_ctx = dataclasses.replace(
+        _api_ctx(
+            fid, {"user_id": "asha", "policy_id": pol, "data_point_consents": [{"id": "care", "consent_granted": True}]}
+        ),
+        source_ip=ip,
+    )
+    service.record_consent(consent_ctx)
+    guardian_ctx = _api_ctx(
+        fid,
+        {
+            "child_principal_id": "kid-1",
+            "guardian_principal_id": "asha",
+            "verification_mechanism": "AADHAAR_VC",
+            "verification_ref_id": ref,
+            "proof_metadata": {"vc_hash": "abc123"},
+        },
+    )
+    log_id = service.record_parent_consent(guardian_ctx)["verification_log_id"]
+
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT ip_address_enc, to_jsonb(c)::text AS j FROM consent_records c WHERE fiduciary_id = %s", (fid,)
+        )
+        row = cur.fetchone()
+        assert ip not in row["j"]
+        assert _decrypt(cur, row["ip_address_enc"]) == ip
+        cur.execute(
+            "SELECT verification_ref_id_enc, proof_metadata_enc, to_jsonb(p)::text AS j"
+            " FROM parental_verification_logs p WHERE id = %s",
+            (log_id,),
+        )
+        row = cur.fetchone()
+        assert ref not in row["j"] and "abc123" not in row["j"]
+        assert _decrypt(cur, row["verification_ref_id_enc"]) == ref
+        proof = json.loads(_decrypt(cur, row["proof_metadata_enc"]))
+        assert proof["vc_hash"] == "abc123" and "verification_detail" in proof
+
+
+@needs_db
+def test_audit_details_pseudonymise_principal_keys(tx):
+    import json
+
+    from dpdpcms_py import audit, pii
+    from dpdpcms_py.security import pseudonym
+
+    assert pii.PRINCIPAL_KEYS <= audit.PRINCIPAL_DETAIL_KEYS
+    details = {
+        "user_id": " asha@example.org ",
+        "policy_id": "pol-1",
+        "nested": {"guardian_id": "g-1", "items": [{"nominee_id": "n-1"}, {"recipient_id": "r-1", "note": "keep"}]},
+        "child_principal_id": "kid-1",
+        "subject_principal_id": "subj-1",
+        "principal_id": None,
+    }
+    audit.log_event("asha@example.org", None, "SYSTEM", None, "T8_DETAILS", details)
+    audit.log_event(None, None, "SYSTEM", None, "T8_STRING", "user_id=raw-string")
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT audit_action, context_details FROM audit_logs WHERE audit_action IN ('T8_DETAILS', 'T8_STRING')"
+        )
+        stored = {r["audit_action"]: r["context_details"] for r in cur.fetchall()}
+    assert stored["T8_STRING"] == "user_id=raw-string"
+    for raw in ("asha@example.org", "g-1", "n-1", "r-1", "kid-1", "subj-1"):
+        assert raw not in stored["T8_DETAILS"]
+    got = json.loads(stored["T8_DETAILS"])
+    assert got["user_id"] == pseudonym("asha@example.org")
+    assert got["policy_id"] == "pol-1" and got["principal_id"] is None
+    assert got["nested"]["guardian_id"] == pseudonym("g-1")
+    assert got["nested"]["items"] == [
+        {"nominee_id": pseudonym("n-1")},
+        {"recipient_id": pseudonym("r-1"), "note": "keep"},
+    ]
+    assert got["child_principal_id"] == pseudonym("kid-1")
+    assert got["subject_principal_id"] == pseudonym("subj-1")
+    # The caller's dict is not modified.
+    assert details["user_id"] == " asha@example.org "
+
+
+@needs_db
+def test_audit_user_pseudonym_ignores_surrounding_spaces(tx):
+    from dpdpcms_py import audit
+
+    audit.log_event(" a ", None, "SYSTEM", None, "T8_PAD", {})
+    audit.log_event("a", None, "SYSTEM", None, "T8_PAD", {})
+    audit.log_event("A", None, "SYSTEM", None, "T8_PAD", {})
+    with tx.cursor() as cur:
+        cur.execute("SELECT user_id FROM audit_logs WHERE audit_action = 'T8_PAD' ORDER BY timestamp")
+        padded, plain, upper = (r["user_id"] for r in cur.fetchall())
+    assert padded == plain != upper
+    assert len(audit.list_logs({"user_id": " a", "audit_action": "T8_PAD"})) == 2
+
+
+@needs_db
+def test_audit_source_ip_encrypted_and_chain_verifies(tx, monkeypatch):
+    from datetime import UTC, datetime
+
+    from dpdpcms_py import audit
+    from dpdpcms_py.config import settings
+
+    ip = "198.51.100.23"
+    with tx.cursor() as cur:
+        year = _live_partition_years(cur)[0]
+    for day in (1, 2):
+        monkeypatch.setattr(audit, "_now", lambda d=day: datetime(year, 3, d, tzinfo=UTC))
+        audit.log_event("asha", None, "SYSTEM", None, "T8_IP", {}, source_ip=ip)
+    with tx.cursor() as cur:
+        cur.execute("SELECT source_ip FROM audit_logs WHERE audit_action = 'T8_IP'")
+        stored = [r["source_ip"] for r in cur.fetchall()]
+        assert len(stored) == 2 and ip not in stored
+        assert {_decrypt(cur, s) for s in stored} == {ip}
+    assert audit.verify_chain()["intact"] is True
+    # The console reads show the readable IP; a pre-db/35 plaintext value reads back as stored.
+    logs = audit.list_logs({"audit_action": "T8_IP"})
+    assert [r["source_ip"] for r in logs] == [ip, ip]
+    assert audit.get_log(logs[0]["id"])["source_ip"] == ip
+    with tx.cursor() as cur:
+        cur.execute("SELECT tsi_audit_source_ip('10.0.0.9', %s) AS v", (settings.db_encryption_key,))
+        assert cur.fetchone()["v"] == "10.0.0.9"
+
+    # The archived year keeps the ciphertext and still verifies; source_ip is
+    # TEXT on the parent, every partition and every archive table.
+    _archive_everything(monkeypatch)
+    monkeypatch.setattr(audit, "_now", lambda: datetime(2200, 6, 1, tzinfo=UTC))
+    audit.log_event("asha", None, "SYSTEM", None, "T8_IP", {}, source_ip=ip)
+    chain = audit.verify_chain()
+    assert chain["intact"] is True and chain["rows_checked"] >= 3
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT table_name, data_type FROM information_schema.columns"
+            " WHERE table_schema = 'public' AND column_name = 'source_ip' AND table_name LIKE 'audit_logs%%'"
+            " AND table_name <> 'audit_logs_legacy_pre32'"
+        )
+        types = {r["table_name"]: r["data_type"] for r in cur.fetchall()}
+    assert f"audit_logs_y{year}_archive" in types and "audit_logs" in types
+    assert set(types.values()) == {"text"}, types
+
+
+@needs_db
+def test_erasure_scrubs_encrypted_ip(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+    from dpdpcms_py.services.compliance import erase_cms_copy
+    from tests.test_integration_db import _seed_consent
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _seed_consent(cur, fid, pol, "asha", ip="9.9.9.9", user_agent="curl/8")
+        _seed_consent(cur, fid, pol, "ramesh", ip="1.2.3.5")
+    counts = erase_cms_copy(fid, "asha")
+    assert counts["consent_records.metadata"] == 1
+    with tx.cursor() as cur:
+        cur.execute(
+            f"SELECT {pii.dec_sql('user_id_enc')} AS u, {pii.dec_sql('ip_address_enc')} AS ip, user_agent"
+            " FROM consent_records WHERE fiduciary_id = %s",
+            (settings.db_encryption_key, settings.db_encryption_key, fid),
+        )
+        rows = {r["u"]: r for r in cur.fetchall()}
+    erased = next(u for u in rows if u.startswith("erased:"))
+    assert rows[erased]["ip"] == "0.0.0.0" and rows[erased]["user_agent"] is None
+    assert rows["ramesh"]["ip"] == "1.2.3.5"
+    # A second erasure does not trip the append-only trigger.
+    assert erase_cms_copy(fid, "asha")["consent_records.metadata"] == 0

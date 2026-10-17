@@ -138,9 +138,9 @@ def _seed_consent(cur, fid, pol, user, purposes=("care",), ip="1.2.3.4", user_ag
     cur.execute(
         "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version, "
         " timestamp, jurisdiction, language_selected, data_point_consents, is_active_consent, "
-        " consent_status_general, consent_mechanism, ip_address, user_agent, created_at, last_updated_at) "
+        " consent_status_general, consent_mechanism, ip_address_enc, user_agent, created_at, last_updated_at) "
         "VALUES (uuid_generate_v4(), %s, %s, %s, %s, 'v1', NOW(), 'IN', %s, %s, TRUE, "
-        " 'CONSENT_GIVEN', 'WEB', %s, %s, NOW(), NOW())",
+        f" 'CONSENT_GIVEN', 'WEB', {real_db.enc_expr()}, %s, NOW(), NOW())",
         (
             *_pid(cur, user),
             fid,
@@ -149,7 +149,7 @@ def _seed_consent(cur, fid, pol, user, purposes=("care",), ip="1.2.3.4", user_ag
             real_db.as_jsonb(
                 [{"data_point_id": p, "purpose_agreed_to": p.title(), "consent_granted": granted} for p in purposes]
             ),
-            ip,
+            *real_db.bind_encrypt(ip),
             user_agent,
         ),
     )
@@ -227,7 +227,10 @@ def test_deidentification_and_erasure_never_cross_tenants(tx):
         erase_cms_copy(fid_a, "asha")
 
         b_rows = _consents(cur, fid_b)
-        cur.execute("SELECT ip_address FROM consent_records WHERE fiduciary_id = %s", (fid_b,))
+        cur.execute(
+            f"SELECT {real_db.decrypt_col('ip_address_enc')} AS ip_address FROM consent_records WHERE fiduciary_id = %s",
+            (*real_db.bind_key(), fid_b),
+        )
         b_ip = cur.fetchone()["ip_address"]
         a_users = set(_consents(cur, fid_a))
     assert list(b_rows) == ["asha"], "tenant B's principal was re-keyed by tenant A's erasure"
@@ -249,9 +252,9 @@ def test_erasure_metadata_scrub_runs_on_the_original_user_id(tx):
         erase_cms_copy(fid, "asha")
 
         cur.execute(
-            "SELECT ip_address, user_agent FROM consent_records WHERE fiduciary_id = %s"
-            f" AND {pii.dec_sql('user_id_enc')} LIKE 'erased:%%'",
-            (fid, *real_db.bind_key()),
+            f"SELECT {pii.dec_sql('ip_address_enc')} AS ip_address, user_agent FROM consent_records"
+            f" WHERE fiduciary_id = %s AND {pii.dec_sql('user_id_enc')} LIKE 'erased:%%'",
+            (*real_db.bind_key(), fid, *real_db.bind_key()),
         )
         row = cur.fetchone()
     assert row is not None
@@ -1496,8 +1499,9 @@ def test_closure_raises_purges_for_principals_who_already_withdrew(tx):
         cur.execute(
             "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version,"
             " timestamp, jurisdiction, language_selected, data_point_consents, is_active_consent,"
-            " consent_status_general, consent_mechanism, ip_address) VALUES (uuid_generate_v4(), %s, %s, %s, %s,"
-            " 'v1', NOW(), 'IN', 'en', %s, FALSE, 'CONSENT_GIVEN', 'WEB', '1.2.3.4')",
+            " consent_status_general, consent_mechanism, ip_address_enc) VALUES (uuid_generate_v4(), %s, %s, %s, %s,"
+            " 'v1', NOW(), 'IN', 'en', %s, FALSE, 'CONSENT_GIVEN', 'WEB',"
+            " encode(pgp_sym_encrypt('1.2.3.4', current_setting('app.enc_key')), 'base64'))",
             (*_pid(cur, "ramesh"), fid, pol, real_db.as_jsonb([{"data_point_id": "care", "consent_granted": True}])),
         )
         cur.execute("INSERT INTO purpose_lifecycle (fiduciary_id, purpose_id) VALUES (%s, 'care')", (fid,))
@@ -1815,7 +1819,8 @@ def test_maintenance_opt_in_cannot_forge_consent(tx):
         cur.execute(
             "UPDATE consent_records SET user_id_enc = encode(pgp_sym_encrypt('erased:x', current_setting('app.enc_key')), 'base64'),"
             " user_id_hmac = encode(hmac('erased:x', current_setting('app.enc_key'), 'sha256'), 'hex'),"
-            " ip_address = '0.0.0.0' WHERE fiduciary_id = %s",
+            " ip_address_enc = encode(pgp_sym_encrypt('0.0.0.0', current_setting('app.enc_key')), 'base64')"
+            " WHERE fiduciary_id = %s",
             (fid,),
         )
         assert cur.rowcount == 1

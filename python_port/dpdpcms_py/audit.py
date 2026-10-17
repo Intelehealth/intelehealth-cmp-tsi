@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 
-from . import db
+from . import db, pii
 from .context import ADMIN_FIDUCIARY_ID
 from .security import pseudonym
 
@@ -141,6 +141,42 @@ def row_hash(previous_hash: str | None, row: dict) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+# Detail keys whose value names a principal: log_event stores each as
+# principal_pseudonym(value), at any depth, so context_details carries no
+# principal id (the row's own user_id column is pseudonymised the same way).
+PRINCIPAL_DETAIL_KEYS = pii.PRINCIPAL_KEYS | {
+    "user_id",
+    "principal_id",
+    "child_principal_id",
+    "guardian_principal_id",
+    "guardian_id",
+    "recipient_id",
+    "nominee_id",
+}
+
+
+def principal_pseudonym(value: str) -> str:
+    """The audit pseudonym of a principal id: spaces trimmed (as pii.normalize), case kept."""
+    return pseudonym(pii.normalize(value))
+
+
+def _pseudonymise_details(value):
+    """Copy of a details value with every PRINCIPAL_DETAIL_KEYS entry pseudonymised (None stays None)."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key in PRINCIPAL_DETAIL_KEYS and item is not None:
+                out[key] = principal_pseudonym(
+                    item if isinstance(item, str) else json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+                )
+            else:
+                out[key] = _pseudonymise_details(item)
+        return out
+    if isinstance(value, list):
+        return [_pseudonymise_details(item) for item in value]
+    return value
+
+
 def log_event(
     user_id: str | None,
     fiduciary_id: str | None,
@@ -154,12 +190,13 @@ def log_event(
     initiator: str | None = None,
     source_ip: str | None = None,
 ) -> None:
-    context = details if isinstance(details, str) else json.dumps(details or {}, default=str)
+    # A string details value is stored as given; a dict has its principal ids pseudonymised.
+    context = details if isinstance(details, str) else json.dumps(_pseudonymise_details(details or {}), default=str)
     fid = fiduciary_id if fiduciary_id and fiduciary_id != ADMIN_FIDUCIARY_ID else None
     row = {
         "id": str(uuid.uuid4()),
         "fiduciary_id": fid,
-        "user_id": pseudonym(user_id) if user_id else "SYSTEM",
+        "user_id": principal_pseudonym(user_id) if user_id else "SYSTEM",
         "service_type": service_type,
         "service_id": service_id,
         "audit_action": action,
@@ -167,9 +204,13 @@ def log_event(
         "purpose_id": purpose_id,
         "consent_status": consent_status,
         "initiator": initiator,
-        "source_ip": source_ip,
     }
     with db.connection() as conn, conn.cursor() as cur:
+        # The client IP is stored encrypted; the row hash covers the ciphertext as stored.
+        row["source_ip"] = None
+        if source_ip:
+            cur.execute(f"SELECT {db.enc_expr()} AS c", db.bind_encrypt(source_ip))
+            row["source_ip"] = cur.fetchone()["c"]
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (AUDIT_CHAIN_LOCK,))
         # The predecessor is the newest LIVE row: archived years are always
         # older than every live one. Only when the live ledger is empty (every
@@ -469,17 +510,23 @@ def latest_chain_verification() -> dict | None:
 AUDIT_READ_MAX = 5000
 
 
+# The readable client IP of an audit row for the console reads (db/35
+# tsi_audit_source_ip: decrypted, or a pre-db/35 plaintext IP as stored); bind
+# *db.bind_key(). Exports keep the stored ciphertext so the chain re-verifies.
+SOURCE_IP_SQL = "tsi_audit_source_ip(source_ip, %s)"
+
+
 def list_logs(payload: dict) -> list[dict]:
     from .services.base import canonical_purpose_id
 
-    params: list = []
+    params: list = [*db.bind_key()]
     where = ["1=1"]
     if payload.get("fiduciary_id"):
         where.append("fiduciary_id = %s")
         params.append(payload["fiduciary_id"])
     if payload.get("user_id"):
         where.append("user_id = %s")
-        params.append(pseudonym(payload["user_id"]))
+        params.append(principal_pseudonym(payload["user_id"]))
     if payload.get("audit_action"):
         where.append("audit_action = %s")
         params.append(payload["audit_action"])
@@ -501,7 +548,7 @@ def list_logs(payload: dict) -> list[dict]:
             f"""
         SELECT id, fiduciary_id, timestamp, user_id, service_type, service_id,
                audit_action, context_details, prev_log_hash, current_log_hash,
-               purpose_id, consent_status, initiator, source_ip, system_metadata
+               purpose_id, consent_status, initiator, {SOURCE_IP_SQL} AS source_ip, system_metadata
         FROM {ledger_source()}
         WHERE {" AND ".join(where)}
         ORDER BY timestamp DESC
@@ -513,4 +560,9 @@ def list_logs(payload: dict) -> list[dict]:
 
 
 def get_log(log_id: str) -> dict | None:
-    return db.to_jsonable(db.one(f"SELECT * FROM {ledger_source()} WHERE id = %s", (log_id,)))
+    row = db.one(
+        f"SELECT *, {SOURCE_IP_SQL} AS source_ip_plain FROM {ledger_source()} WHERE id = %s", (*db.bind_key(), log_id)
+    )
+    if row:
+        row["source_ip"] = row.pop("source_ip_plain")
+    return db.to_jsonable(row)
