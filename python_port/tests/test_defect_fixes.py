@@ -309,6 +309,7 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
         "flag_security_anomalies",
         "prune_old_notification_deliveries",
         "flag_breach_board_deadlines",
+        "archive_audit_partitions",
     ):
         monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})
     monkeypatch.setattr(worker.throttle, "prune_expired", lambda: {"pruned": 0})

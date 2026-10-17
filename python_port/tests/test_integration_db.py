@@ -20,6 +20,7 @@ append-only ledger — survives into the shared database.
 """
 
 import contextlib
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -431,10 +432,19 @@ def test_chain_order_is_index_backed_and_full_walk_runs_in_the_worker(tx):
 
     with tx.cursor() as cur:
         cur.execute("SET LOCAL enable_seqscan = off")
+        # db/32: audit_logs is partitioned, so the plan is a Merge Append over
+        # each partition's copy of the index; ANALYZE (rolled back with the
+        # test) so the planner costs the real, not the default, row counts.
+        cur.execute("ANALYZE audit_logs")
         cur.execute("EXPLAIN SELECT id FROM audit_logs ORDER BY timestamp DESC, id DESC LIMIT 100")
         plan = " ".join(r["QUERY PLAN"] for r in cur.fetchall())
-        assert "idx_audit_logs_chain_order" in plan
-        assert "Sort" not in plan.split("Limit")[1] if "Limit" in plan else True
+        cur.execute(
+            "SELECT inhrelid::regclass::text AS name FROM pg_inherits"
+            " WHERE inhparent = 'public.idx_audit_logs_chain_order'::regclass"
+        )
+        chain_indexes = {"idx_audit_logs_chain_order", *(r["name"] for r in cur.fetchall())}
+        assert any(name in plan for name in chain_indexes)
+        assert not re.search(r"-> +Sort +\(", plan), plan
 
         cur.execute("DELETE FROM job_schedule_state WHERE job_name = 'audit_chain_verification'")
         first = audit.record_chain_verification(limit=1_000)
@@ -512,8 +522,12 @@ def test_floor_migration_is_idempotent_across_its_previous_version(tx):
         cur.execute(old_version)
         for name in ("23_notification_delivery_floor.sql", "24_p8_remediation.sql", "24_p8_remediation.sql"):
             # CONCURRENTLY cannot run inside the test's transaction; the index
-            # already exists, so the plain form is equivalent here.
+            # already exists, so the plain form is equivalent here. psql
+            # meta-commands (db/24's \gset / \if guard) are psql-only; drop them.
             sql = (REPO / "db" / name).read_text(encoding="utf-8")
+            sql = "\n".join(
+                line for line in sql.splitlines() if "\\gset" not in line and not line.lstrip().startswith("\\")
+            )
             cur.execute(sql.replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX"))
         cur.execute(
             "SELECT tgname FROM pg_trigger WHERE tgrelid = 'notification_deliveries'::regclass AND NOT tgisinternal"

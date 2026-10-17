@@ -44,9 +44,7 @@ def _environment() -> str:
     """
     value = (os.getenv("TSI_DPDP_CMS_ENV") or "local").strip().casefold()
     if value not in ENVIRONMENTS:
-        raise RuntimeError(
-            f"TSI_DPDP_CMS_ENV must be one of {', '.join(ENVIRONMENTS)}; got {value!r}."
-        )
+        raise RuntimeError(f"TSI_DPDP_CMS_ENV must be one of {', '.join(ENVIRONMENTS)}; got {value!r}.")
     return value
 
 
@@ -120,6 +118,10 @@ class Settings:
     # SA-13: the same floor-bounded retention for notification_deliveries
     # (recipient address / device + delivery outcome).
     notification_delivery_retention_days: int = 365
+    # Years of audit_logs kept in the live partitioned table (current year
+    # included); older yearly partitions are detached into archive tables by
+    # jobs.archive_audit_partitions, never deleted. Minimum 1.
+    audit_live_years: int = 3
     # SA-14: key that signs evidence certificates. Defaults to the DB encryption
     # key so nothing new needs provisioning; a deployment may set its own
     # CERTIFICATE_SIGNING_KEY (still a server secret, never a client one).
@@ -205,6 +207,7 @@ class Settings:
             certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
             notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),
+            audit_live_years=max(int(os.getenv("AUDIT_LIVE_YEARS", "3")), 1),
             trusted_proxy_ips=tuple(ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()),
             outbound_allowed_hosts=_outbound_allowed_hosts(environment),
             healthz_token=(os.getenv("HEALTHZ_TOKEN") or "").strip(),

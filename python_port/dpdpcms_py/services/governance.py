@@ -7,7 +7,15 @@ import json
 from datetime import UTC, datetime
 
 from .. import db
-from ..audit import certificate_signature, get_log, latest_chain_verification, list_logs, log_event, verify_chain
+from ..audit import (
+    certificate_signature,
+    get_log,
+    latest_chain_verification,
+    ledger_source,
+    list_logs,
+    log_event,
+    verify_chain,
+)
 from ..config import settings
 from ..context import RequestContext
 from ..errors import ApiError
@@ -953,9 +961,11 @@ class LegalService(Service):
             str(entry.get("hash") or "").strip() for entry in trail if isinstance(entry, dict) and entry.get("hash")
         ]
         if claimed:
+            # The trail may reach back into archived years (db/32, db/33).
+            ledger = ledger_source()
             placeholders = ", ".join(["%s"] * len(claimed))
             rows = db.all(
-                f"SELECT current_log_hash, timestamp FROM audit_logs "
+                f"SELECT current_log_hash, timestamp FROM {ledger} "
                 f"WHERE current_log_hash IN ({placeholders}) AND fiduciary_id = %s",
                 (*claimed, str(row["fiduciary_id"])),
             )
@@ -988,7 +998,7 @@ class LegalService(Service):
                 ledger_trail = [
                     str(r["current_log_hash"])
                     for r in db.all(
-                        "SELECT current_log_hash FROM audit_logs WHERE fiduciary_id = %s AND user_id = %s"
+                        f"SELECT current_log_hash FROM {ledger} WHERE fiduciary_id = %s AND user_id = %s"
                         " AND timestamp >= %s AND timestamp <= %s ORDER BY timestamp DESC, id DESC",
                         (
                             str(row["fiduciary_id"]),
@@ -1010,7 +1020,7 @@ class LegalService(Service):
                 # may hold a capped trail, so the check applies only when the
                 # signed payload explicitly says the trail is complete.
                 if data.get("trail_truncated") is False and db.one(
-                    "SELECT 1 FROM audit_logs WHERE fiduciary_id = %s AND user_id = %s AND timestamp < %s LIMIT 1",
+                    f"SELECT 1 FROM {ledger} WHERE fiduciary_id = %s AND user_id = %s AND timestamp < %s LIMIT 1",
                     (str(row["fiduciary_id"]), pseudonym(str(principal_id)), found[claimed[-1]]["timestamp"]),
                 ):
                     return {

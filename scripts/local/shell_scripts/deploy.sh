@@ -46,7 +46,7 @@ if [ "$existing" -eq 1 ] || [ "$force_migrate" -eq 1 ]; then
   compose restart python_app python_worker
   wait_healthy 120 || { fail 'API unhealthy after restart.'; exit 1; }
 else
-  triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'trg_audit_logs_%'")"
+  triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.audit_logs'::regclass AND tgname LIKE 'trg_audit_logs_%'")"
   [ "$triggers" = "2" ] || warn "audit_logs triggers: $triggers (expected 2). Run scripts/local/shell_scripts/migrate.sh 19_audit_ledger_integrity.sql"
 fi
 

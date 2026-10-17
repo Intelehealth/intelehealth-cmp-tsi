@@ -101,7 +101,7 @@ More detail: [python_port/README.md](python_port/README.md).
 
 ## Database upgrades
 
-Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `31_grievance_channel.sql`).
+Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `33_audit_archive_registry.sql`).
 
 | Script | Purpose |
 | --- | --- |
@@ -124,8 +124,10 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `29_p12_remediation.sql` | Board intimation asserted time and Rule 7 report fields (P12-04), tenant readers mapped in `tsi_reader_tenants` (P12-05), `consent_policies` keyed per tenant (P12-06), legacy template text taken back out of live types (P12-07), audit purpose index (LG-05) |
 | `30_p13_remediation.sql` | Tenant-reader RLS consults the security-barrier view `tsi_reader_my_tenants` (own mappings only); the role-taking helper `tsi_reader_may_see` is dropped (P13-03) |
 | `31_grievance_channel.sql` | `grievances.channel` (PORTAL, EMAIL, PHONE, LETTER, IN_PERSON, OTHER): how a grievance reached the fiduciary; a DPO logs offline ones with the real channel |
+| `32_partition_audit_logs.sql` | `audit_logs` range-partitioned by year with a DEFAULT partition; pre-production ledger reset (the old table is kept as `audit_logs_legacy_pre32`, its rows are not copied and the hash chain restarts from genesis) |
+| `33_audit_archive_registry.sql` | `audit_log_archive_registry`: yearly partitions older than `AUDIT_LIVE_YEARS` that the worker detached into `audit_logs_y<YYYY>_archive` tables (never deleted; still read by verification, search and certificates) |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`31` manually (each script is idempotent). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`33` manually (each script is idempotent). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \
@@ -136,7 +138,8 @@ for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction
          db/23_notification_delivery_floor.sql db/24_p8_remediation.sql          db/25_p9_remediation.sql \
          db/26_p10_remediation.sql db/27_p11_remediation.sql db/28_security_coverage.sql \
          db/29_p12_remediation.sql db/30_p13_remediation.sql \
-         db/31_grievance_channel.sql; do
+         db/31_grievance_channel.sql db/32_partition_audit_logs.sql \
+         db/33_audit_archive_registry.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```

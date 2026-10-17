@@ -41,7 +41,13 @@ BEGIN
         DROP INDEX idx_audit_logs_chain_order;
     END IF;
 END $$;
+-- db/32 makes audit_logs partitioned (with this index), and Postgres refuses
+-- CONCURRENTLY on a partitioned table even under IF NOT EXISTS; build only
+-- when the index is missing so this file stays re-runnable after db/32.
+SELECT to_regclass('public.idx_audit_logs_chain_order') IS NULL AS tsi_need_chain_order_idx \gset
+\if :tsi_need_chain_order_idx
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_logs_chain_order ON audit_logs (timestamp DESC, id DESC);
+\endif
 
 CREATE TABLE IF NOT EXISTS audit_chain_verifications (
     id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

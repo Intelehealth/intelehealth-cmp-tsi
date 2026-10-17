@@ -41,6 +41,8 @@ UPGRADE_MIGRATIONS=(
   29_p12_remediation.sql
   30_p13_remediation.sql
   31_grievance_channel.sql
+  32_partition_audit_logs.sql
+  33_audit_archive_registry.sql
 )
 REQUIRED_SECRETS=(JWT_SECRET DB_ENCRYPTION_KEY TSI_LOOKUP_SALT BOOTSTRAP_TOKEN)
 CONTAINER_NAMES=(tsi_dpdp_cms_py_db tsi_dpdp_cms_py_server tsi_dpdp_cms_py_worker)

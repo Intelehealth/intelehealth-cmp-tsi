@@ -26,7 +26,7 @@ api_post /api/v1/client/consent '{"_func":"Erasure_Request"}' >/dev/null
 [ "$API_STATUS" = "401" ] || [ "$API_STATUS" = "403" ]; check 'Mixed-case _func without credentials is refused' "$?" "(got $API_STATUS)"
 
 step 'Database'
-triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_audit_logs_no_update_delete','trg_audit_logs_no_truncate')")"
+triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.audit_logs'::regclass AND tgname IN ('trg_audit_logs_no_update_delete','trg_audit_logs_no_truncate')")"
 [ "$triggers" = "2" ]; check 'audit_logs append-only triggers installed' "$?" "(found $triggers)"
 # Inside a transaction that is rolled back either way, so nothing can be lost.
 psql_q 'BEGIN; TRUNCATE audit_logs; ROLLBACK;' >/dev/null 2>&1

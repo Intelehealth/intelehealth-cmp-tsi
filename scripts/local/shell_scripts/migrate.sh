@@ -16,7 +16,7 @@ for file in "${scripts[@]}"; do
 done
 ok 'Migrations applied.'
 
-triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_audit_logs_no_update_delete','trg_audit_logs_no_truncate')")"
+triggers="$(psql_q "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.audit_logs'::regclass AND tgname IN ('trg_audit_logs_no_update_delete','trg_audit_logs_no_truncate')")"
 if [ "$triggers" = "2" ]; then ok 'audit_logs append-only triggers installed.'
 else fail "Expected 2 audit_logs triggers, found $triggers."; exit 1; fi
 

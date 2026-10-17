@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -60,6 +61,54 @@ def _canonical_value(value, column: str = "") -> str:
     return str(value)
 
 
+# Every audit_logs column, in table order: the select list of each arm of the
+# ledger_source() UNION, so an archive table (detached partition) and the live
+# table line up column for column.
+_LEDGER_COLUMNS = (
+    "id, fiduciary_id, timestamp, user_id, service_type, service_id, audit_action, context_details,"
+    " prev_log_hash, current_log_hash, digital_signature, system_metadata,"
+    " purpose_id, consent_status, initiator, source_ip"
+)
+_ARCHIVE_TABLE = re.compile(r"audit_logs_y\d{4}_archive")
+
+
+def ledger_source() -> str:
+    """The SQL FROM fragment that reads the WHOLE ledger: live + archived years.
+
+    `audit_logs` alone when no year has been archived; otherwise a parenthesised
+    UNION ALL of `audit_logs` and every archive table in
+    audit_log_archive_registry, aliased `audit_logs`, so callers keep their
+    column references. Registry names are interpolated into SQL, so only names
+    of the exact archive shape are used; anything else is skipped and logged.
+    """
+    try:
+        rows = db.all(
+            "SELECT r.partition_name FROM audit_log_archive_registry r"
+            " JOIN pg_class c ON c.relname = r.partition_name AND c.relkind = 'r'"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'"
+            " ORDER BY r.period_start"
+        )
+    except psycopg.Error:
+        log.warning("audit_log_archive_registry unavailable; apply db/33_audit_archive_registry.sql", exc_info=True)
+        return "audit_logs"
+    tables = []
+    for row in rows:
+        name = row.get("partition_name") if isinstance(row, dict) else None
+        if isinstance(name, str) and _ARCHIVE_TABLE.fullmatch(name):
+            tables.append(name)
+        elif name is not None:
+            log.error("Ignoring unexpected audit archive registry entry %r", name)
+    if not tables:
+        return "audit_logs"
+    arms = [f"SELECT {_LEDGER_COLUMNS} FROM {table}" for table in ["audit_logs", *tables]]
+    return "(" + " UNION ALL ".join(arms) + ") AS audit_logs"
+
+
+def _now() -> datetime:
+    """The audit clock (a seam so tests can date a row in a chosen year)."""
+    return datetime.now(UTC)
+
+
 def row_hash(previous_hash: str | None, row: dict) -> str:
     """The v2 hash of one audit row, from its stored column values."""
     parts = [previous_hash or ""] + [_canonical_value(row.get(col), col) for col in _HASHED_COLUMNS]
@@ -97,13 +146,15 @@ def log_event(
     }
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (AUDIT_CHAIN_LOCK,))
+        # The predecessor is the newest LIVE row: archived years are always
+        # older than every live one.
         cur.execute("SELECT current_log_hash, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
         previous = cur.fetchone()
         previous_hash = previous["current_log_hash"] if previous else ""
         # audit_logs.timestamp is TIMESTAMP (no zone): store naive UTC so the value
         # hashed is the value stored, whatever the session TimeZone. Keep it
         # strictly increasing so timestamp order is chain order for the verifier.
-        timestamp = datetime.now(UTC).replace(tzinfo=None)
+        timestamp = _now().astimezone(UTC).replace(tzinfo=None)
         last = previous.get("timestamp") if previous else None
         if last is not None and last.tzinfo is not None:
             last = last.astimezone(UTC).replace(tzinfo=None)
@@ -193,7 +244,10 @@ def verify_chain(
     links to, or a row deleted just above the window would go unnoticed.
     """
     cols = ", ".join(_HASHED_COLUMNS)
-    select = f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM audit_logs "
+    # Archived years included, so a window reaching back past the live
+    # partitions still verifies (and its links across the boundary are checked).
+    source = ledger_source()
+    select = f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM {source} "
     bounds, bound_params = [], []
     if since is not None:
         bounds.append("timestamp >= %s::timestamp")
@@ -250,7 +304,7 @@ def verify_chain(
     if since is not None and rows and not truncated:
         oldest = rows[-1]
         predecessor = db.one(
-            "SELECT current_log_hash FROM audit_logs WHERE (timestamp, id) < (%s, %s)"
+            f"SELECT current_log_hash FROM {source} WHERE (timestamp, id) < (%s, %s)"
             " ORDER BY timestamp DESC, id DESC LIMIT 1",
             (oldest["timestamp"], oldest["id"]),
         )
@@ -259,7 +313,7 @@ def verify_chain(
     if until is not None and rows:
         newest = rows[0]
         successor = db.one(
-            "SELECT id, fiduciary_id, prev_log_hash FROM audit_logs WHERE (timestamp, id) > (%s, %s)"
+            f"SELECT id, fiduciary_id, prev_log_hash FROM {source} WHERE (timestamp, id) > (%s, %s)"
             " ORDER BY timestamp ASC, id ASC LIMIT 1",
             (newest["timestamp"], newest["id"]),
         )
@@ -268,7 +322,7 @@ def verify_chain(
 
     # An untruncated window holds every row in scope by construction; only a
     # truncated one needs the scope's real row count to say what was missed.
-    scope_total = _count_rows(fiduciary_id, since, until) if truncated else in_scope_total
+    scope_total = _count_rows(fiduciary_id, since, until, source) if truncated else in_scope_total
     # Zero in-scope rows is never a clean bill of health (P7-02).
     unexamined_tenant = fiduciary_id is not None and in_scope_total == 0
     if since is not None or until is not None:
@@ -304,7 +358,12 @@ def _naive_utc(value: datetime | str) -> datetime:
     return value
 
 
-def _count_rows(fiduciary_id: str | None, since: datetime | str | None, until: datetime | str | None = None) -> int:
+def _count_rows(
+    fiduciary_id: str | None,
+    since: datetime | str | None,
+    until: datetime | str | None = None,
+    source: str = "audit_logs",
+) -> int:
     where, params = [], []
     if fiduciary_id is not None:
         where.append("fiduciary_id = %s")
@@ -316,7 +375,7 @@ def _count_rows(fiduciary_id: str | None, since: datetime | str | None, until: d
         where.append("timestamp < %s::timestamp")
         params.append(_naive_utc(until))
     clause = f" WHERE {' AND '.join(where)}" if where else ""
-    row = db.one(f"SELECT count(*) AS n FROM audit_logs{clause}", params)
+    row = db.one(f"SELECT count(*) AS n FROM {source}{clause}", params)
     return int((row or {}).get("n") or 0)
 
 
@@ -417,7 +476,7 @@ def list_logs(payload: dict) -> list[dict]:
         SELECT id, fiduciary_id, timestamp, user_id, service_type, service_id,
                audit_action, context_details, prev_log_hash, current_log_hash,
                purpose_id, consent_status, initiator, source_ip, system_metadata
-        FROM audit_logs
+        FROM {ledger_source()}
         WHERE {" AND ".join(where)}
         ORDER BY timestamp DESC
         LIMIT %s
@@ -428,4 +487,4 @@ def list_logs(payload: dict) -> list[dict]:
 
 
 def get_log(log_id: str) -> dict | None:
-    return db.to_jsonable(db.one("SELECT * FROM audit_logs WHERE id = %s", (log_id,)))
+    return db.to_jsonable(db.one(f"SELECT * FROM {ledger_source()} WHERE id = %s", (log_id,)))

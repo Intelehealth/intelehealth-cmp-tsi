@@ -39,6 +39,7 @@ def run_cycle(dry_run: bool = False) -> dict[str, Any]:
         "webhook_deliveries": jobs.prune_old_webhook_deliveries,
         "notification_deliveries": jobs.prune_old_notification_deliveries,
         "audit_chain": audit.record_chain_verification,
+        "audit_partitions": jobs.archive_audit_partitions,
         "security_monitor": jobs.flag_security_anomalies,
         "breach_deadlines": jobs.flag_breach_board_deadlines,
     }
@@ -97,6 +98,7 @@ def list_sweeps() -> list[str]:
         "jobs.prune_old_webhook_deliveries          (SEC-13/P5-07 webhook retention)",
         "jobs.prune_old_notification_deliveries   (SA-13 notification delivery retention)",
         "audit.record_chain_verification         (P6-12 daily full-ledger verification)",
+        "jobs.archive_audit_partitions           (yearly audit partitions; archive beyond AUDIT_LIVE_YEARS)",
         "jobs.flag_security_anomalies            (Rule 6(1)(c) failed sign-in bursts)",
         "jobs.flag_breach_board_deadlines        (s.8(6) 72-hour Board intimation clock)",
     ]
