@@ -1741,3 +1741,275 @@ def _ctx_as_operator(fid, role, payload):
         auth_token={"email": "x@example.org", "role": role},
         operator_id=str(uuid.uuid4()),
     )
+
+
+# ---- Task 10: guardian verification details and the per-consent audit trail ----------
+
+GUARDIAN = "guardian.rao@example.com"
+GUARDIAN_REF = "REF-99887766"
+GUARDIAN_PROOF = "proof-secret-77"
+APP_77 = "77777777-7777-4777-8777-777777777777"
+
+TRAIL_POLICY = {
+    "en": {
+        "title": "P",
+        "data_processing_purposes": [
+            {"id": "care", "name": "Patient care", "data_categories_involved": ["contact", "health"]},
+            {"id": "research", "name": "Research", "data_categories_involved": ["health"]},
+        ],
+        "data_categories_details": [
+            {"id": "contact", "name": "Contact details"},
+            {"id": "health", "name": "Health records"},
+        ],
+    }
+}
+
+
+def _console(headers, func, payload, category="admin", method="post"):
+    from dpdpcms_py import main
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    body = {"_func": func, **payload}
+    if method == "get":
+        return client.get(f"/api/v1/{category}/consent", params=body, headers=headers)
+    return client.post(f"/api/v1/{category}/consent", json=body, headers=headers)
+
+
+def _seed_minor_consent(cur, fid, pol, child="kid-77"):
+    """A minor's consent backed by a VERIFIED guardian log carrying evidence."""
+    from dpdpcms_py.services.consent import ConsentService
+
+    enc, hmac = _pid(cur, GUARDIAN)
+    cur.execute(
+        "INSERT INTO data_principal (fiduciary_id, user_id_enc, user_id_hmac, age_category)"
+        " VALUES (%s, %s, %s, 'ADULT')",
+        (fid, enc, hmac),
+    )
+    service = ConsentService()
+    log = service.record_parent_consent(
+        _api_ctx(
+            fid,
+            {
+                "child_principal_id": child,
+                "guardian_principal_id": GUARDIAN,
+                "verification_mechanism": "EXISTING_ACCOUNT",
+                "provider_name": "Clinic desk",
+                "verification_ref_id": GUARDIAN_REF,
+                "proof_metadata": {"vc_hash": GUARDIAN_PROOF},
+            },
+        )
+    )
+    assert log["verification_status"] == "VERIFIED"
+    record = service.record_consent(
+        _api_ctx(
+            fid,
+            {
+                "user_id": child,
+                "policy_id": pol,
+                "age_category": "MINOR",
+                "verification_log_id": log["verification_log_id"],
+                "data_point_consents": [{"id": "care", "consent_granted": True}],
+            },
+        )
+    )
+    return log["verification_log_id"], record["data"]["consent_record_id"]
+
+
+@needs_db
+def test_parental_verification_is_masked_and_minor_only(tx):
+    from dpdpcms_py import pii
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        fid_b, pol_b = _seed_tenant(cur)
+        log_id, minor_record = _seed_minor_consent(cur, fid, pol)
+        _, other_tenant_record = _seed_minor_consent(cur, fid_b, pol_b)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    adult_record = _grant(fid, pol, "asha")["data"]["consent_record_id"]
+    headers = _bearer(email, "DPO")
+
+    for method in ("post", "get"):
+        response = _console(
+            headers,
+            "get_parental_verification",
+            {"consent_record_id": minor_record, "fiduciary_id": fid},
+            method=method,
+        )
+        assert response.status_code == 200, (method, response.text)
+        body = response.json()
+        assert body["verification_log_id"] == log_id
+        assert body["provider_name"] == "Clinic desk"
+        assert body["verification_status"] == "VERIFIED"
+        assert body["verified_at"]
+        assert body["guardian_id"] == pii.mask(GUARDIAN) != GUARDIAN
+        assert body["verification_ref_id"] == pii.mask(GUARDIAN_REF) != GUARDIAN_REF
+        assert body["has_proof_metadata"] is True
+        assert body["verification_detail"] is None
+        assert "proof_metadata" not in body
+        for secret in (GUARDIAN, GUARDIAN_REF, GUARDIAN_PROOF, "vc_hash", "kid-77"):
+            assert secret not in response.text
+
+    # An adult's record has no guardian verification; another tenant's record is not found.
+    for record in (adult_record, other_tenant_record, str(uuid.uuid4())):
+        response = _console(headers, "get_parental_verification", {"consent_record_id": record, "fiduciary_id": fid})
+        assert response.status_code == 404, response.text
+    response = _console(headers, "get_parental_verification", {"consent_record_id": "nope", "fiduciary_id": fid})
+    assert response.status_code == 400
+    response = _console(headers, "get_parental_verification", {"fiduciary_id": fid})
+    assert response.status_code == 400
+
+
+def _trail_policy(cur, fid, pol):
+    from dpdpcms_py import db
+
+    cur.execute(
+        "UPDATE consent_policies SET policy_content = %s WHERE id = %s AND fiduciary_id = %s",
+        (db.as_jsonb(TRAIL_POLICY), pol, fid),
+    )
+
+
+def _trail(headers, record, fid):
+    response = _console(headers, "get_consent_audit_trail", {"consent_record_id": record, "fiduciary_id": fid})
+    assert response.status_code == 200, response.text
+    assert "asha" not in response.text
+    return response.json()
+
+
+@needs_db
+def test_consent_audit_trail_groups_by_purpose_and_carries_service_id(tx, monkeypatch):
+    from dpdpcms_py import audit
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur, purposes=("care", "research"))
+        fid_b, _ = _seed_tenant(cur)
+        _trail_policy(cur, fid, pol)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    service = ConsentService()
+
+    def record(user, research):
+        return service.record_consent(
+            _api_ctx(
+                fid,
+                {
+                    "user_id": user,
+                    "policy_id": pol,
+                    "data_point_consents": [
+                        {"id": "care", "consent_granted": True},
+                        {"id": "research", "consent_granted": research},
+                    ],
+                },
+            )
+        )["data"]["consent_record_id"]
+
+    # R1 grants care only (spaces around the id: the same principal as "asha").
+    r1 = record(" asha ", False)
+    # R2 supersedes R1 and grants two purposes: its audit row has no single purpose.
+    r2 = record("asha", True)
+    # R3 supersedes R2: research withdrawn.
+    r3 = service.withdraw_consent(_api_ctx(fid, {"user_id": "asha", "purpose_ids": ["research"]}))["consent_record_id"]
+    # A processor event naming R3 under consent_record_id, with a service id.
+    audit.log_event(
+        "asha", fid, "PROCESSOR", APP_77, "PROCESSOR_ACKNOWLEDGED", {"consent_record_id": r3}, purpose_id="care"
+    )
+    # Noise that must not appear: another record, another principal, another
+    # tenant, and a plain-text context that is not JSON.
+    audit.log_event("asha", fid, "APP", None, "CONSENT_GIVEN", {"record_id": str(uuid.uuid4())})
+    audit.log_event("ravi", fid, "APP", None, "CONSENT_GIVEN", {"record_id": r3})
+    audit.log_event("asha", fid_b, "APP", None, "CONSENT_GIVEN", {"record_id": r3})
+    audit.log_event("asha", fid, "APP", None, "PLAIN_TEXT", f"Operator Access Granted {r3}")
+    with tx.cursor() as cur:
+        cur.execute("SELECT supersedes_record_id::text AS s FROM consent_records WHERE id = %s", (r3,))
+        assert cur.fetchone()["s"] == r2
+
+    headers = _bearer(email, "DPO")
+    trail = _trail(headers, r3, fid)
+    assert trail["consent_record_id"] == r3
+    groups = {g["purpose_id"]: g for g in trail["purposes"]}
+    assert [g["purpose_id"] for g in trail["purposes"]] == ["care", "ALL", "research"]
+    assert groups["care"]["purpose_name"] == "Patient care"
+    assert groups["care"]["fields"] == ["Contact details", "Health records"]
+    assert groups["research"]["purpose_name"] == "Research"
+    assert groups["research"]["fields"] == ["Health records"]
+    assert groups["ALL"]["fields"] == ["Contact details", "Health records"]
+    assert [e["audit_action"] for e in groups["care"]["events"]] == ["CONSENT_GIVEN", "PROCESSOR_ACKNOWLEDGED"]
+    assert [e["audit_action"] for e in groups["ALL"]["events"]] == ["CONSENT_GIVEN"]
+    assert [e["audit_action"] for e in groups["research"]["events"]] == ["CONSENT_WITHDRAWN"]
+    processor = groups["care"]["events"][1]
+    assert processor["service_type"] == "PROCESSOR" and processor["service_id"] == APP_77
+    assert processor["context"] == {"consent_record_id": r3}
+    given = groups["care"]["events"][0]
+    assert given["service_type"] == "APP" and given["service_id"] is None
+    assert given["context"]["record_id"] == r1
+    assert groups["ALL"]["events"][0]["context"]["supersedes_record_id"] == r1
+    for group in trail["purposes"]:
+        for event in group["events"]:
+            assert set(event) == {
+                "timestamp",
+                "audit_action",
+                "service_type",
+                "service_id",
+                "current_log_hash",
+                "prev_log_hash",
+                "context",
+            }
+            assert event["timestamp"] and event["current_log_hash"] and event["prev_log_hash"] is not None
+    # The chain runs backwards only: the trail of R1 holds its own event.
+    first = _trail(headers, r1, fid)
+    assert [(g["purpose_id"], [e["audit_action"] for e in g["events"]]) for g in first["purposes"]] == [
+        ("care", ["CONSENT_GIVEN"])
+    ]
+
+    # Archived years are read too.
+    _archive_everything(monkeypatch)
+    with tx.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM audit_logs WHERE fiduciary_id = %s", (fid,))
+        assert cur.fetchone()["n"] == 0
+    archived = _trail(headers, r3, fid)
+    assert archived["purposes"] == trail["purposes"]
+
+    # Another tenant's DPO does not see this record.
+    with tx.cursor() as cur:
+        _, other_email = _reveal_operator(cur, fid_b, "DPO", "dan")
+    response = _console(
+        _bearer(other_email, "DPO"), "get_consent_audit_trail", {"consent_record_id": r3, "fiduciary_id": fid}
+    )
+    assert response.status_code == 404
+
+
+@needs_db
+def test_audit_trail_rejects_api_key_and_principal(tx):
+    import dataclasses
+
+    from dpdpcms_py import security
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _, minor_record = _seed_minor_consent(cur, fid, pol)
+        _, op_email = _reveal_operator(cur, fid, "OPERATOR", "opi")
+    principal = {"Authorization": f"Bearer {security.principal_token(fid, 'kid-77')}"}
+    api_key = {"X-API-Key": "k", "X-API-Secret": "s"}
+    payload = {"consent_record_id": minor_record, "fiduciary_id": fid}
+    for func in ("get_consent_audit_trail", "get_parental_verification"):
+        for headers in (principal, api_key):
+            for method in ("post", "get"):
+                response = _console(headers, func, payload, category="client", method=method)
+                assert response.status_code == 403, (func, method, response.text)
+            assert _console(headers, func, payload).status_code == 401
+        # Called directly, the service refuses a caller that is not a console operator.
+        for ctx in (
+            _api_ctx(fid, {"_func": func, **payload}),
+            dataclasses.replace(
+                _api_ctx(fid, {"_func": func, **payload}), auth_via_principal_jwt=True, principal_user_id="kid-77"
+            ),
+            dataclasses.replace(_ctx_as_operator(fid, "DPO", {"_func": func, **payload}), auth_via_principal_jwt=True),
+        ):
+            with pytest.raises(ApiError) as exc:
+                getattr(ConsentService(), func)(ctx)
+            assert exc.value.status == 403
+    # The trail is an audit-ledger read: an OPERATOR (no audit:read) is refused it.
+    response = _console(_bearer(op_email, "OPERATOR"), "get_consent_audit_trail", payload)
+    assert response.status_code == 403, response.text

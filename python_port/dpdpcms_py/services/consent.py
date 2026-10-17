@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -331,6 +332,109 @@ def _raise_consent_alert(fiduciary_id: str, alert_type: str, record_id: str | No
         pass
 
 
+def _require_console_operator(ctx: RequestContext) -> None:
+    """Console-only reads: an API key or principal token never reaches them.
+
+    Over HTTP the client category already refuses these functions (they are not
+    in CLIENT_ALLOWED_FUNCS) and the admin category refuses a principal token;
+    this is the same refusal for a direct call, as PiiService makes."""
+    if not ctx.operator_id or ctx.auth_via_principal_jwt:
+        raise ApiError(403, "Forbidden", "Only a console operator may read this.")
+
+
+def _console_record(ctx: RequestContext, columns: str, keys: tuple = ()) -> dict:
+    """The consent record a console read names (consent_record_id), in the caller's tenant, or 400/404.
+
+    `keys` are the bound parameters of `columns` (db.bind_key() per decrypted column)."""
+    fid = _fid(ctx)
+    record_id = str(require(ctx.payload.get("consent_record_id"), "consent_record_id"))
+    for value, name in ((record_id, "consent_record_id"), (fid, "fiduciary_id")):
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            raise ApiError(400, "Bad Request", f"Invalid '{name}'.") from None
+    row = db.one(f"SELECT {columns} FROM consent_records WHERE id = %s AND fiduciary_id = %s", (*keys, record_id, fid))
+    if not row:
+        raise ApiError(404, "Not Found", "Consent record not found.")
+    return row
+
+
+def _has_proof_metadata(proof: str | None) -> bool:
+    """Whether the guardian log holds caller-supplied proof, beyond the server's own verification_detail."""
+    if not proof:
+        return False
+    try:
+        value = json.loads(proof)
+    except ValueError:
+        return True
+    if isinstance(value, dict):
+        return any(v not in (None, "", {}, []) for k, v in value.items() if k != "verification_detail")
+    return value not in (None, "", {}, [])
+
+
+def _verification_detail(proof: str | None) -> str | None:
+    """The server-written verification_detail record_parent_consent stores beside the proof."""
+    try:
+        value = json.loads(proof) if proof else None
+    except ValueError:
+        return None
+    return value.get("verification_detail") if isinstance(value, dict) else None
+
+
+TRAIL_ALL = "ALL"
+
+
+def _policy_block(policy_content: Any, language: str) -> dict:
+    """The policy's block for `language`, else English, else its first block."""
+    if not isinstance(policy_content, dict) or not policy_content:
+        return {}
+    block = policy_content.get(language) or policy_content.get("en") or next(iter(policy_content.values()))
+    return block if isinstance(block, dict) else {}
+
+
+def _purpose_fields(block: dict) -> dict[str, list[str]]:
+    """purpose id -> the names of the data categories it covers, from the policy block.
+
+    Names come from data_categories_details (falling back to the category id);
+    they are category labels, never personal data. 'ALL' covers every category
+    any purpose names, in declaration order."""
+    names = {
+        str(c["id"]): str(c.get("name") or c["id"])
+        for c in block.get("data_categories_details") or []
+        if isinstance(c, dict) and c.get("id")
+    }
+    out: dict[str, list[str]] = {}
+    every: list[str] = []
+    for purpose in block.get("data_processing_purposes") or []:
+        if not isinstance(purpose, dict) or not purpose.get("id"):
+            continue
+        fields: list[str] = []
+        for category in purpose.get("data_categories_involved") or []:
+            name = names.get(str(category), str(category))
+            if name not in fields:
+                fields.append(name)
+            if name not in every:
+                every.append(name)
+        out[canonical_purpose_id(purpose["id"])] = fields
+    out[TRAIL_ALL] = every
+    return out
+
+
+# Context keys by which an audit row names the consent record it is about:
+# record_id (CONSENT_GIVEN / CONSENT_WITHDRAWN / ERASURE_REQUESTED) and
+# consent_record_id (processor and integrator events).
+TRAIL_RECORD_KEYS = ("record_id", "consent_record_id")
+
+
+def _trail_context(raw: Any) -> Any:
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
 def _notify_principal(user_id: str, fiduciary_id: str, notification_type: str) -> None:
     db.execute(
         "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id, notification_type)"
@@ -630,6 +734,136 @@ class ConsentService(Service):
             "verification_status": status,
             "detail": detail,
         }
+
+    def get_parental_verification(self, ctx: RequestContext) -> dict:
+        """The guardian verification a minor's consent record rests on, masked.
+
+        Ported from Consent-Manager. guardian_id and verification_ref_id are
+        masked; the proof itself never leaves (only whether there is one). The
+        values in the clear are reveal_user_id's, under audit."""
+        _require_console_operator(ctx)
+        record = _console_record(ctx, "verification_log_id, fiduciary_id")
+        if not record.get("verification_log_id"):
+            raise ApiError(404, "Not Found", "This consent record is not a minor's: it has no guardian verification.")
+        row = db.one(
+            f"""
+            SELECT id, verification_mechanism, provider_name, verification_status, verified_at,
+                   {pii.dec_sql("guardian_principal_id_enc")} AS guardian_id,
+                   {pii.dec_sql("verification_ref_id_enc")} AS verification_ref_id,
+                   {pii.dec_sql("proof_metadata_enc")} AS proof_metadata
+            FROM parental_verification_logs WHERE id = %s AND fiduciary_id = %s
+            """,
+            (*db.bind_key(), *db.bind_key(), *db.bind_key(), record["verification_log_id"], record["fiduciary_id"]),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "No guardian verification found for this consent record.")
+        return {
+            "verification_log_id": str(row["id"]),
+            "verification_mechanism": row["verification_mechanism"],
+            "provider_name": row["provider_name"],
+            "verification_status": row["verification_status"],
+            "verified_at": row["verified_at"].isoformat() if row.get("verified_at") else None,
+            "guardian_id": pii.mask(row["guardian_id"]),
+            "verification_ref_id": pii.mask(row["verification_ref_id"]),
+            "has_proof_metadata": _has_proof_metadata(row["proof_metadata"]),
+            "verification_detail": _verification_detail(row["proof_metadata"]),
+        }
+
+    def get_consent_audit_trail(self, ctx: RequestContext) -> dict:
+        """Every ledger event about one consent record, grouped by purpose.
+
+        Ported from Consent-Manager (with its f0d65af grouping done here). An
+        event belongs to the trail when it is about the record's principal
+        (audit user_id = the same pseudonym log_event writes), in the record's
+        fiduciary, and names in its context (record_id or consent_record_id)
+        this record or one it supersedes, followed back through
+        supersedes_record_id. Live and archived years are read. Events group by
+        their purpose_id ('ALL' when the row names none); each group lists the
+        purpose's name and the data categories it covers in the record's
+        policy. The principal id is used only to derive the pseudonym.
+        """
+        from ..audit import ledger_source, principal_pseudonym
+        from .governance import _audited_read
+        from .roles import require_audit_access
+
+        _require_console_operator(ctx)
+        # The trail is a read of the audit ledger: gated and audited like one (LG-06, R6-c).
+        require_audit_access(ctx)
+        record = _console_record(
+            ctx,
+            f"id, fiduciary_id, policy_id, policy_version, language_selected, {pii.dec_sql('user_id_enc')} AS user_id",
+            db.bind_key(),
+        )
+        fid = str(record["fiduciary_id"])
+        chain = [
+            str(r["id"])
+            for r in db.all(
+                """
+                WITH RECURSIVE chain(id, supersedes_record_id) AS (
+                    SELECT id, supersedes_record_id FROM consent_records WHERE id = %s AND fiduciary_id = %s
+                    UNION
+                    SELECT c.id, c.supersedes_record_id FROM consent_records c
+                    JOIN chain ON c.id = chain.supersedes_record_id AND c.fiduciary_id = %s
+                )
+                SELECT id FROM chain
+                """,
+                (str(record["id"]), fid, fid),
+            )
+        ]
+        policy = db.one(
+            "SELECT policy_content FROM consent_policies WHERE id = %s AND fiduciary_id = %s"
+            " ORDER BY (version = %s) DESC, effective_date DESC LIMIT 1",
+            (record["policy_id"], fid, record["policy_version"] or ""),
+        )
+        content = (policy or {}).get("policy_content")
+        language = str(record.get("language_selected") or "en")
+        names = _purpose_names(content, language)
+        fields = _purpose_fields(_policy_block(content, language))
+        # Narrowed in SQL by a LIKE on each record id (context_details is not
+        # always JSON, so it is never cast there); the exact key match is below.
+        rows = db.all(
+            f"""
+            SELECT id, timestamp, audit_action, service_type, service_id, current_log_hash, prev_log_hash,
+                   context_details, purpose_id
+            FROM {ledger_source()}
+            WHERE user_id = %s AND fiduciary_id = %s AND context_details LIKE ANY(%s)
+            ORDER BY timestamp, id
+            """,
+            (principal_pseudonym(record["user_id"] or ""), fid, [f"%{rid}%" for rid in chain]),
+        )
+        linked = set(chain)
+        groups: dict[str, dict] = {}
+        for row in rows:
+            context = _trail_context(row["context_details"])
+            if not isinstance(context, dict) or not any(
+                str(context.get(key)) in linked for key in TRAIL_RECORD_KEYS if context.get(key)
+            ):
+                continue
+            purpose = canonical_purpose_id(row["purpose_id"]) if row.get("purpose_id") else TRAIL_ALL
+            group = groups.setdefault(
+                purpose,
+                {
+                    "purpose_id": purpose,
+                    "purpose_name": "All purposes" if purpose == TRAIL_ALL else names.get(purpose, purpose),
+                    "fields": fields.get(purpose, []),
+                    "events": [],
+                },
+            )
+            group["events"].append(
+                {
+                    "timestamp": row["timestamp"].isoformat() if row.get("timestamp") else None,
+                    "audit_action": row["audit_action"],
+                    "service_type": row["service_type"],
+                    "service_id": None if row["service_id"] is None else str(row["service_id"]),
+                    "current_log_hash": row["current_log_hash"],
+                    "prev_log_hash": row["prev_log_hash"],
+                    # Principal keys hold pseudonyms; rows written before they did are masked.
+                    "context": pii.payload_view(ctx, context),
+                }
+            )
+        events = [e for g in groups.values() for e in g["events"]]
+        _audited_read(ctx, events, "get_consent_audit_trail")
+        return db.to_jsonable({"consent_record_id": str(record["id"]), "purposes": list(groups.values())})
 
     def get_active_consent(self, ctx: RequestContext) -> dict:
         bind_principal_field(ctx, "user_id")
