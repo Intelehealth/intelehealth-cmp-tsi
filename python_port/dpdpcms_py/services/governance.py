@@ -861,7 +861,9 @@ class LegalService(Service):
             for row in logs
         ]
         data = {
-            "principal_id": principal,
+            # The signed payload binds the principal by HMAC, never in plaintext;
+            # the readable id lives encrypted in subject_principal_id_enc.
+            "principal_id_hmac": pii.hmac_hex(principal),
             "case_ref_id": case_ref,
             "fiduciary_name": (fiduciary or {}).get("name") or "",
             "timestamp": generated_at.isoformat(),
@@ -935,8 +937,8 @@ class LegalService(Service):
         except (ValueError, TypeError):
             data = {}
         if isinstance(data, dict) and "principal_id" in data:
-            # The signed payload names the principal; the stored copy stays
-            # intact (verify_certificate re-signs it), the console view is masked.
+            # Certificates signed before principal_id_hmac name the principal in
+            # plaintext; the stored copy stays intact, the console view is masked.
             data = {**data, "principal_id": pii.principal_view(ctx, data["principal_id"])}
         out["data"] = data
         out["attestation"] = out.get("attestation_text")
@@ -953,8 +955,9 @@ class LegalService(Service):
         """
         scope, scope_params = tenant_filter(ctx)
         row = db.one(
-            f"SELECT certificate_data, fiduciary_id FROM evidence_certificates WHERE id = %s{scope}",
-            (require(ctx.payload.get("id"), "id"), *scope_params),
+            f"SELECT certificate_data, fiduciary_id, {pii.dec_sql('subject_principal_id_enc')} AS subject"
+            f" FROM evidence_certificates WHERE id = %s{scope}",
+            (*db.bind_key(), require(ctx.payload.get("id"), "id"), *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "Certificate not found.")
@@ -978,6 +981,17 @@ class LegalService(Service):
             same = False
         if not same:
             return {"valid": False, "reason": "Signature mismatch — the certificate has been altered."}
+        # The signed payload binds the principal by HMAC (legacy certificates
+        # carry principal_id); the subject column must still be that principal.
+        principal_id = data.get("principal_id")
+        if not principal_id and data.get("principal_id_hmac"):
+            subject = row.get("subject")
+            if not subject or pii.hmac_hex(str(subject)) != data["principal_id_hmac"]:
+                return {
+                    "valid": False,
+                    "reason": "The certificate's subject no longer matches its signed principal (erased or altered).",
+                }
+            principal_id = str(subject)
 
         # SEC-10: re-derive the embedded trail against the live ledger — ordering
         # AND completeness, not just "each hash exists". The certificate's trail
@@ -1022,7 +1036,6 @@ class LegalService(Service):
             # in the certificate's time range, not against the certificate's own
             # hashes. An event of this principal inside the signed range that is
             # missing from the trail means the trail is incomplete.
-            principal_id = data.get("principal_id")
             if principal_id:
                 ledger_trail = [
                     str(r["current_log_hash"])

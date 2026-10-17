@@ -142,8 +142,16 @@ def record_alert(
                 db.as_jsonb(payload or {}),
             ),
         )
-    except Exception:
-        log.exception("Could not record %s alert for fiduciary %s", alert_type, fiduciary_id)
+    except Exception as exc:
+        # Type and SQLSTATE only: a driver message can quote the failing row,
+        # principal id included.
+        log.error(
+            "Could not record %s alert for fiduciary %s: %s (sqlstate %s)",
+            alert_type,
+            fiduciary_id,
+            type(exc).__name__,
+            getattr(exc, "sqlstate", None),
+        )
         return None
     alert_id = str(row["id"]) if row else None
     # NT-10: every alert is recorded in the audit log, not only the ones raised

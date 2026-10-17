@@ -156,4 +156,9 @@ class AlertService(Service):
             f" FROM alerts WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s",
             [*db.bind_key(), *db.bind_key(), *params],
         )
-        return [pii.recipient_row(ctx, row, "recipient_id", "acknowledged_by") for row in rows]
+        out = [pii.recipient_row(ctx, row, "recipient_id", "acknowledged_by") for row in rows]
+        for alert in out:
+            # Alert payloads keep the raw id for API keys and processors; a
+            # console operator sees it masked (consent alerts carry user_id).
+            alert["payload"] = pii.payload_view(ctx, alert.get("payload"))
+        return out

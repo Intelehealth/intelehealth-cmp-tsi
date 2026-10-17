@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac as _hmac
+import json
 
 from . import db
 from .config import settings
@@ -113,19 +114,46 @@ PRINCIPAL_KEYS = frozenset(
 )
 
 
-def hmac_principal_keys(value):
-    """Copy of a JSON value with every PRINCIPAL_KEYS entry replaced by `<key>_hmac`: hmac_hex(id)."""
+def _map_principal_keys(value, replace):
+    """Copy of a JSON value with replace(key, item) -> (key, item) applied to every PRINCIPAL_KEYS entry."""
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
-            if key in PRINCIPAL_KEYS and isinstance(item, (str, int)) and not isinstance(item, bool):
-                out[f"{key}_hmac"] = hmac_hex(str(item))
+            if key in PRINCIPAL_KEYS:
+                new_key, new_item = replace(key, item)
+                out[new_key] = new_item
             else:
-                out[key] = hmac_principal_keys(item)
+                out[key] = _map_principal_keys(item, replace)
         return out
     if isinstance(value, list):
-        return [hmac_principal_keys(item) for item in value]
+        return [_map_principal_keys(item, replace) for item in value]
     return value
+
+
+def _canonical(item) -> str:
+    return item if isinstance(item, str) else json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+
+def hmac_principal_keys(value):
+    """Copy of a JSON value with every PRINCIPAL_KEYS entry replaced by `<key>_hmac`: hmac_hex(id).
+
+    A non-string value (an object, a list, a number) is hashed whole, as its
+    canonical JSON, so nothing under a principal key survives in the clear."""
+    return _map_principal_keys(
+        value, lambda key, item: (f"{key}_hmac", None if item is None else hmac_hex(_canonical(item)))
+    )
+
+
+def mask_principal_keys(value):
+    """Copy of a JSON value with every PRINCIPAL_KEYS entry masked; a non-string value becomes `***`."""
+    return _map_principal_keys(
+        value, lambda key, item: (key, mask(item) if isinstance(item, str) or item is None else "***")
+    )
+
+
+def payload_view(ctx: RequestContext, value):
+    """A stored JSON payload as the caller may see it: as stored, or principal keys masked for operators."""
+    return value if ctx.operator_id is None else mask_principal_keys(value)
 
 
 # Query fragments for the <col>_enc / <col>_hmac pairs db/34 stores.

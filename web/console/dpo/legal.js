@@ -87,7 +87,7 @@
             const data = typeof cert.data === 'string' ? JSON.parse(cert.data) : cert.data;
 
             document.getElementById('view-cert-id').textContent = cert.id.toUpperCase();
-            document.getElementById('view-principal').textContent = data.principal_id;
+            document.getElementById('view-principal').textContent = cert.subject_principal_id ?? data.principal_id;
             
             // Display Inquiry Reference defaulting to requested value
             document.getElementById('view-case').textContent = data.case_ref_id;

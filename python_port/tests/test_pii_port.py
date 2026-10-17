@@ -993,3 +993,107 @@ def test_alerts_store_encrypted_recipient_and_acknowledger(tx):
         _no_plaintext(cur, fid, pid, ("alerts",))
         cur.execute("SELECT recipient_id_hmac, acknowledged_by_hmac FROM alerts WHERE id = %s", (alert_id,))
         assert set(cur.fetchone().values()) == {pii.hmac_hex(pid)}
+
+
+# ---- Task 7 fix round 1 -------------------------------------------------------------
+
+
+def test_hmac_principal_keys_fails_closed_on_nested_values():
+    import json
+
+    from dpdpcms_py import pii
+
+    pid = "asha@example.org"
+    nested = {"email": pid, "phone": "+919876543210"}
+    out = pii.hmac_principal_keys({"user_id": nested, "recipient_id": [pid], "guardian_id": True, "k": {"a": 1}})
+    assert pid not in json.dumps(out)
+    assert out["user_id_hmac"] == pii.hmac_hex(json.dumps(nested, sort_keys=True, ensure_ascii=False))
+    assert out["recipient_id_hmac"] == pii.hmac_hex(json.dumps([pid], sort_keys=True, ensure_ascii=False))
+    assert out["guardian_id_hmac"] == pii.hmac_hex("true") and out["k"] == {"a": 1}
+
+
+def test_mask_principal_keys_masks_scalars_and_nested_values():
+    import json
+
+    from dpdpcms_py import pii
+
+    pid = "asha@example.org"
+    value = {"user_id": pid, "purpose_ids": ["care"], "items": [{"principal_id": pid}], "nominee_id": {"e": pid}}
+    out = pii.mask_principal_keys(value)
+    assert pid not in json.dumps(out)
+    assert out["user_id"] == pii.mask(pid) and out["items"][0]["principal_id"] == pii.mask(pid)
+    assert out["purpose_ids"] == ["care"] and out["nominee_id"] == "***"
+    assert value["user_id"] == pid, "the input is not mutated"
+
+
+def test_record_alert_failure_logs_no_row_detail(monkeypatch, caplog):
+    import logging
+
+    import psycopg
+    from dpdpcms_py.services import lifecycle
+
+    pid = "asha@example.org"
+
+    def failing_insert(sql, params=()):
+        raise psycopg.errors.NotNullViolation(f"null value in column; Failing row contains ({pid}, x)")
+
+    monkeypatch.setattr(lifecycle.db, "insert_returning", failing_insert)
+    with caplog.at_level(logging.DEBUG, logger="dpdpcms.lifecycle"):
+        assert lifecycle.record_alert(FID, "CONSENT_WITHDRAWN", None, {"user_id": pid}) is None
+    assert caplog.records, "the failure is still logged"
+    assert pid not in caplog.text
+    assert "NotNullViolation" in caplog.text and "23502" in caplog.text
+
+
+@needs_db
+def test_operator_alert_payloads_mask_principal_ids(tx):
+    import json
+
+    from dpdpcms_py.services.alerts import AlertService
+    from dpdpcms_py.services.consent import ConsentService
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    _grant(fid, pol, pid)
+    ConsentService().withdraw_consent(_api_ctx(fid, {"user_id": pid, "purpose_ids": ["care"]}))
+    service = AlertService()
+    as_operator = service.list_alerts(_ctx(fid, {}, operator_id="op-1"))
+    assert {a["alert_type"] for a in as_operator} >= {"CONSENT_GIVEN", "CONSENT_WITHDRAWN"}
+    assert pid not in json.dumps(as_operator, default=str)
+    as_key = service.list_alerts(_api_ctx(fid, {}))
+    assert {a["payload"]["user_id"] for a in as_key} == {pid}
+
+
+@needs_db
+def test_certificate_signs_the_principal_hmac_and_survives_erasure(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.services import governance
+    from dpdpcms_py.services.compliance import erase_cms_copy
+    from tests.test_integration_db import _log
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        for i in range(2):
+            _log(fid, pid, f"E{i}")
+    service = governance.LegalService()
+    cert_id = service.generate_certificate(
+        _ctx(fid, {"fiduciary_id": fid, "subject_principal_id": pid, "case_ref_id": "c1"})
+    )["certificate_id"]
+    with tx.cursor() as cur:
+        cur.execute("SELECT certificate_data FROM evidence_certificates WHERE id = %s", (cert_id,))
+        data = cur.fetchone()["certificate_data"]
+    assert "principal_id" not in data and data["principal_id_hmac"] == pii.hmac_hex(pid)
+    assert service.verify_certificate(_ctx(fid, {"id": cert_id}))["valid"] is True
+    shown = service.get_certificate(_ctx(fid, {"id": cert_id}, operator_id="op-1"))
+    assert shown["subject_principal_id"] == pii.mask(pid) and "principal_id" not in shown["data"]
+    assert service.get_certificate(_api_ctx(fid, {"id": cert_id}))["subject_principal_id"] == pid
+
+    erase_cms_copy(fid, pid)
+    with tx.cursor() as cur:
+        cur.execute("SELECT to_jsonb(c)::text AS j FROM evidence_certificates c WHERE id = %s", (cert_id,))
+        row = cur.fetchone()["j"]
+    assert pid not in row
+    # The erased subject no longer matches the signed principal: refused, not "valid".
+    assert service.verify_certificate(_ctx(fid, {"id": cert_id}))["valid"] is False
