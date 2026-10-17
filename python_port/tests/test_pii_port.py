@@ -78,10 +78,11 @@ def test_grievance_channel_column_defaults_portal(tx):
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
+        enc, h = _enc_hmac(cur, "asha")
         cur.execute(
-            "INSERT INTO grievances (id, user_id, fiduciary_id, type, subject, description, status)"
-            " VALUES (uuid_generate_v4(), 'asha', %s, 'GENERAL_COMPLAINT', 's', 'd', 'NEW') RETURNING channel",
-            (fid,),
+            "INSERT INTO grievances (id, user_id_enc, user_id_hmac, fiduciary_id, type, subject, description, status)"
+            " VALUES (uuid_generate_v4(), %s, %s, %s, 'GENERAL_COMPLAINT', 's', 'd', 'NEW') RETURNING channel",
+            (enc, h, fid),
         )
         assert cur.fetchone()["channel"] == "PORTAL"
         with pytest.raises(psycopg.errors.CheckViolation), tx.transaction():
@@ -378,3 +379,166 @@ def test_python_and_sql_hmac_agree(tx):
         with tx.cursor() as cur:
             cur.execute(f"SELECT {pii.HMAC_SQL} AS h", (value, settings.db_encryption_key))
             assert cur.fetchone()["h"] == pii.hmac_hex(value)
+
+
+# ---- Task 4: principal identifiers stored encrypted with HMAC lookup keys -----------
+
+# Every plaintext principal-identifier column db/34 replaces, with whether the
+# source column was nullable (the _enc/_hmac pair mirrors it).
+ENCRYPTED_PRINCIPAL_COLUMNS = {
+    ("consent_records", "user_id"): False,
+    ("data_principal", "user_id"): False,
+    ("data_principal", "guardian_id"): True,
+    ("grievances", "user_id"): False,
+    ("purge_requests", "user_id"): False,
+    ("consent_validations", "user_id"): False,
+    ("breach_affected_principals", "user_id"): False,
+    ("parental_verification_logs", "child_principal_id"): False,
+    ("parental_verification_logs", "guardian_principal_id"): False,
+    ("notifications", "recipient_id"): False,
+    ("data_correction_requests", "user_id"): False,
+    ("reconsent_requests", "user_id"): False,
+    ("notification_deliveries", "recipient"): True,
+    ("nominations", "nominating_principal_id"): False,
+    ("nominations", "nominated_principal_id"): False,
+    ("alerts", "recipient_id"): True,
+    ("evidence_certificates", "subject_principal_id"): False,
+}
+
+
+def _columns(cur, table):
+    cur.execute(
+        "SELECT column_name, is_nullable FROM information_schema.columns"
+        " WHERE table_schema = 'public' AND table_name = %s",
+        (table,),
+    )
+    return {r["column_name"]: r["is_nullable"] == "YES" for r in cur.fetchall()}
+
+
+@needs_db
+def test_no_plaintext_principal_columns_remain(tx):
+    with tx.cursor() as cur:
+        for (table, col), nullable in ENCRYPTED_PRINCIPAL_COLUMNS.items():
+            cols = _columns(cur, table)
+            assert col not in cols, f"{table}.{col} is still plaintext"
+            assert cols.get(f"{col}_enc") is nullable, f"{table}.{col}_enc missing or wrong nullability"
+            assert cols.get(f"{col}_hmac") is nullable, f"{table}.{col}_hmac missing or wrong nullability"
+
+
+def _key_columns(cur, index_or_constraint_sql, params):
+    cur.execute(index_or_constraint_sql, params)
+    row = cur.fetchone()
+    assert row, f"no key found for {params}"
+    return row
+
+
+@needs_db
+def test_hmac_keys_replace_plaintext_keys(tx):
+    with tx.cursor() as cur:
+        pk = (
+            "SELECT array_agg(a.attname::text ORDER BY k.ord) AS cols FROM pg_constraint c"
+            " CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)"
+            " JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum"
+            " WHERE c.conrelid = %s::regclass AND c.contype = %s"
+            " GROUP BY c.oid"
+        )
+        assert _key_columns(cur, pk, ("public.data_principal", "p"))["cols"] == ["user_id_hmac", "fiduciary_id"]
+        assert _key_columns(cur, pk, ("public.breach_affected_principals", "p"))["cols"] == [
+            "breach_id",
+            "user_id_hmac",
+        ]
+        assert _key_columns(cur, pk, ("public.reconsent_requests", "u"))["cols"] == [
+            "fiduciary_id",
+            "policy_id",
+            "policy_version",
+            "user_id_hmac",
+        ]
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'consent_records'"
+            " AND indexdef LIKE 'CREATE UNIQUE INDEX%%' AND indexdef LIKE '%%is_active_consent%%'"
+        )
+        defs = [r["indexdef"] for r in cur.fetchall()]
+        assert defs and all("(user_id_hmac, fiduciary_id, policy_id)" in d for d in defs), defs
+        # No index anywhere still keys on a dropped plaintext column.
+        for (table, col), _ in ENCRYPTED_PRINCIPAL_COLUMNS.items():
+            cur.execute(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = %s AND indexdef ~ %s",
+                (table, rf"[(, ]{col}[,) ]"),
+            )
+            assert cur.fetchall() == [], f"index on {table}.{col} survived"
+
+
+def _enc_hmac(cur, value):
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+
+    key = settings.db_encryption_key
+    cur.execute(f"SELECT {pii.ENC_SQL} AS e, {pii.HMAC_SQL} AS h", (value, key, value, key))
+    row = cur.fetchone()
+    return row["e"], row["h"]
+
+
+@needs_db
+def test_consent_maintenance_rekeys_encrypted_user_id_only(tx):
+    """The append-only trigger's maintenance branch (erasure) now ignores the
+    encrypted pair instead of the dropped plaintext user_id."""
+    import psycopg
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        enc, h = _enc_hmac(cur, "asha")
+        cur.execute(
+            "INSERT INTO consent_records (id, user_id_enc, user_id_hmac, fiduciary_id, policy_id, policy_version,"
+            " timestamp, jurisdiction, language_selected, data_point_consents, is_active_consent,"
+            " consent_status_general, consent_mechanism, ip_address, created_at, last_updated_at)"
+            " VALUES (uuid_generate_v4(), %s, %s, %s, %s, 'v1', NOW(), 'IN', 'en', '[]', TRUE,"
+            " 'CONSENT_GIVEN', 'WEB', '1.2.3.4', NOW(), NOW()) RETURNING id",
+            (enc, h, fid, pol),
+        )
+        rid = cur.fetchone()["id"]
+        new_enc, new_h = _enc_hmac(cur, "erased:tok")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege), tx.transaction():
+            cur.execute("UPDATE consent_records SET user_id_hmac = %s WHERE id = %s", (new_h, rid))
+        cur.execute("SELECT set_config('tsi.consent_maintenance', 'on', true)")
+        cur.execute(
+            "UPDATE consent_records SET user_id_enc = %s, user_id_hmac = %s WHERE id = %s", (new_enc, new_h, rid)
+        )
+        cur.execute("SELECT user_id_hmac FROM consent_records WHERE id = %s", (rid,))
+        assert cur.fetchone()["user_id_hmac"] == new_h
+
+
+@needs_db
+def test_delivery_floor_allows_only_encrypted_erasure_of_recipient(tx):
+    import psycopg
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        enc, h = _enc_hmac(cur, "asha")
+        cur.execute(
+            "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            " notification_type) VALUES ('PRINCIPAL', %s, %s, %s, 'CONSENT_RECORDED') RETURNING id",
+            (enc, h, fid),
+        )
+        nid = cur.fetchone()["id"]
+        r_enc, r_h = _enc_hmac(cur, "+911234")
+        cur.execute(
+            "INSERT INTO notification_deliveries (notification_id, channel, recipient_enc, recipient_hmac)"
+            " VALUES (%s, 'SMS', %s, %s) RETURNING id",
+            (nid, r_enc, r_h),
+        )
+        did = cur.fetchone()["id"]
+        other_enc, other_h = _enc_hmac(cur, "+919999")
+        with pytest.raises(psycopg.errors.RaiseException, match="recipient"), tx.transaction():
+            cur.execute(
+                "UPDATE notification_deliveries SET recipient_enc = %s, recipient_hmac = %s WHERE id = %s",
+                (other_enc, other_h, did),
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="recipient"), tx.transaction():
+            cur.execute("UPDATE notification_deliveries SET recipient_enc = NULL WHERE id = %s", (did,))
+        e_enc, e_h = _enc_hmac(cur, "erased:abc")
+        cur.execute(
+            "UPDATE notification_deliveries SET recipient_enc = %s, recipient_hmac = %s, status = 'SENT' WHERE id = %s",
+            (e_enc, e_h, did),
+        )
+        cur.execute("SELECT recipient_hmac, status FROM notification_deliveries WHERE id = %s", (did,))
+        assert cur.fetchone() == {"recipient_hmac": e_h, "status": "SENT"}

@@ -101,7 +101,7 @@ More detail: [python_port/README.md](python_port/README.md).
 
 ## Database upgrades
 
-Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `33_audit_archive_registry.sql`).
+Postgres init scripts in `db/` run **once** when the data volume is first created (`docker-entrypoint-initdb.d`). File order is lexical (`01_init.sql` … `34_principal_pii_encryption.sql`).
 
 | Script | Purpose |
 | --- | --- |
@@ -126,8 +126,9 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `31_grievance_channel.sql` | `grievances.channel` (PORTAL, EMAIL, PHONE, LETTER, IN_PERSON, OTHER): how a grievance reached the fiduciary; a DPO logs offline ones with the real channel |
 | `32_partition_audit_logs.sql` | `audit_logs` range-partitioned by year with a DEFAULT partition; pre-production ledger reset (the old table is kept as `audit_logs_legacy_pre32`, its rows are not copied and the hash chain restarts from genesis) |
 | `33_audit_archive_registry.sql` | `audit_log_archive_registry`: yearly partitions older than `AUDIT_LIVE_YEARS` that the worker detached into `audit_logs_y<YYYY>_archive` tables (never deleted; still read by verification, search and certificates) |
+| `34_principal_pii_encryption.sql` | Every Data Principal identifier column (consent, principal, grievance, purge, validation, breach, parental, notification, delivery, correction, re-consent, nomination, alert, certificate tables) replaced by `<col>_enc` (pgcrypto) + `<col>_hmac` (lookup key); keys and indexes move to `_hmac`. Needs `app.enc_key` set when any of those tables has rows (fails before changing anything otherwise) |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`33` manually (each script is idempotent). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`34` manually (each script is idempotent). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \
@@ -139,7 +140,7 @@ for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction
          db/26_p10_remediation.sql db/27_p11_remediation.sql db/28_security_coverage.sql \
          db/29_p12_remediation.sql db/30_p13_remediation.sql \
          db/31_grievance_channel.sql db/32_partition_audit_logs.sql \
-         db/33_audit_archive_registry.sql; do
+         db/33_audit_archive_registry.sql db/34_principal_pii_encryption.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```

@@ -56,8 +56,16 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_pending
     ON alerts (status, created_at) WHERE status = 'PENDING';
-CREATE INDEX IF NOT EXISTS idx_alerts_recipient
-    ON alerts (fiduciary_id, recipient_id, created_at DESC);
+-- db/34 replaces alerts.recipient_id with recipient_id_hmac and rebuilds this index under
+-- the same name; skip once the plaintext column is gone so this file stays re-runnable.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'alerts' AND column_name = 'recipient_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_alerts_recipient
+            ON alerts (fiduciary_id, recipient_id, created_at DESC);
+    END IF;
+END $$;
 
 -- ============================================================
 -- Re-consent requests — a material policy change requires fresh affirmative

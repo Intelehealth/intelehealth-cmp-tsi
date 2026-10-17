@@ -13,8 +13,16 @@ CREATE TABLE IF NOT EXISTS nominations (
     last_updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_nominations_fiduciary_nominator
-    ON nominations (fiduciary_id, nominating_principal_id);
+-- db/34 replaces nominations.nominating_principal_id with nominating_principal_id_hmac and rebuilds this index under
+-- the same name; skip once the plaintext column is gone so this file stays re-runnable.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'nominations' AND column_name = 'nominating_principal_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_nominations_fiduciary_nominator
+            ON nominations (fiduciary_id, nominating_principal_id);
+    END IF;
+END $$;
 
 -- Data correction requests: the DPDP right for a Data Principal to request that
 -- their personal data be corrected or completed.
@@ -33,5 +41,13 @@ CREATE TABLE IF NOT EXISTS data_correction_requests (
     last_updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_data_correction_fiduciary_user
-    ON data_correction_requests (fiduciary_id, user_id, created_at DESC);
+-- db/34 replaces data_correction_requests.user_id with user_id_hmac and rebuilds this index under
+-- the same name; skip once the plaintext column is gone so this file stays re-runnable.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'data_correction_requests' AND column_name = 'user_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_data_correction_fiduciary_user
+            ON data_correction_requests (fiduciary_id, user_id, created_at DESC);
+    END IF;
+END $$;

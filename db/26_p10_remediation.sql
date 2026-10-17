@@ -109,8 +109,16 @@ CREATE TRIGGER trg_retention_policies_canonical
 
 -- ---- P10-11: one active record per principal per POLICY ------------------------
 DROP INDEX IF EXISTS idx_unique_active_consent;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_consent_policy
-    ON consent_records (user_id, fiduciary_id, policy_id) WHERE is_active_consent IS TRUE;
+-- db/34 replaces consent_records.user_id with user_id_hmac and rebuilds this index under
+-- the same name; skip once the plaintext column is gone so this file stays re-runnable.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'consent_records' AND column_name = 'user_id') THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_active_consent_policy
+            ON consent_records (user_id, fiduciary_id, policy_id) WHERE is_active_consent IS TRUE;
+    END IF;
+END $$;
 
 -- ---- CW-08: per-processor webhook endpoints ----------------------------------
 CREATE TABLE IF NOT EXISTS processor_webhook_configs (
