@@ -317,3 +317,64 @@ def test_archive_tables_keep_tenant_isolation(tx, monkeypatch):
         seen = [r["fid"] for r in cur.fetchall()]
         cur.execute("RESET ROLE")
     assert seen == [fid_b]
+
+
+# ---- Task 3: principal-ID crypto and masking primitives ------------------------------
+
+
+def test_pid_hmac_trims_but_keeps_case():
+    from dpdpcms_py import pii
+
+    assert pii.hmac_hex(" ABC ") == pii.hmac_hex("ABC") != pii.hmac_hex("abc")
+
+
+def test_normalize_strips_spaces_only_like_sql_trim():
+    from dpdpcms_py import pii
+
+    assert pii.normalize("  a b  ") == "a b"
+    assert pii.normalize("\tx\n") == "\tx\n"
+    assert pii.normalize(None) is None
+
+
+def test_mask_email_phone_other():
+    from dpdpcms_py.pii import mask
+
+    assert mask("satish@test.com") == "s***@t***.com"
+    assert mask("+919876543210") == "+91********10"
+    assert mask("AB1234") == "AB***"
+    assert mask("erased:9f") == "erased"
+    assert mask(None) is None
+    assert mask("") == ""
+
+
+def test_principal_view_masks_only_for_operators():
+    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.pii import principal_view
+
+    def ctx(**kw):
+        return RequestContext(path="/p", category="admin", service="s", payload={}, headers={}, **kw)
+
+    assert principal_view(ctx(operator_id="op1"), "satish@test.com") == "s***@t***.com"
+    assert principal_view(ctx(), "satish@test.com") == "satish@test.com"
+    assert principal_view(ctx(operator_id="op1"), None) is None
+
+
+def test_params_normalise_and_append_key():
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+
+    assert pii.hmac_params(" a ") == ("a", settings.db_encryption_key)
+    assert pii.enc_params(None) == (None, settings.db_encryption_key)
+    assert pii.dec_sql("c") == "pgp_sym_decrypt(decode(c, 'base64'), %s)"
+
+
+@needs_db
+def test_python_and_sql_hmac_agree(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.config import settings
+
+    # Postgres trim() strips spaces only; the tab/newline value proves Python agrees.
+    for value in (" x@y.z ", "\t x@y.z\n ", "ABC"):
+        with tx.cursor() as cur:
+            cur.execute(f"SELECT {pii.HMAC_SQL} AS h", (value, settings.db_encryption_key))
+            assert cur.fetchone()["h"] == pii.hmac_hex(value)
