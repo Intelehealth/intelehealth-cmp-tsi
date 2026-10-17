@@ -2086,22 +2086,35 @@ def _dpo_page(name):
 def test_dpo_pages_have_no_inline_handlers_and_call_new_funcs():
     import re
 
-    for page in ("principals.html", "compliance.html", "grievances.html"):
-        html = _dpo_page(page)
-        assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", html, re.I), f"inline <script> in {page}"
+    for page in ("principals", "compliance", "grievances"):
+        html = _dpo_page(f"{page}.html")
+        assert not re.search(r"<script(?![^>]*\bsrc\s*=\s*[\"'])[^>]*>", html, re.I), f"inline <script> in {page}"
         assert not re.search(r" on[a-z]+=", html, re.I), f"inline event handler in {page}"
+        # The shared reveal control loads before the page script that uses it.
+        shared = html.index('<script src="reveal.js"></script>')
+        assert shared < html.index(f'<script src="{page}.js"></script>'), f"{page}.html does not load reveal.js first"
+        assert "DpoReveal." in _dpo_page(f"{page}.js"), f"{page}.js does not use the shared reveal control"
     principals = _dpo_page("principals.js")
-    for func in ("get_consent_audit_trail", "get_parental_verification", "reveal_user_id", "withdraw_consent"):
+    for func in ("get_consent_audit_trail", "get_parental_verification", "withdraw_consent"):
         assert func in principals, f"principals.js does not call {func}"
-    for page in ("compliance.js", "grievances.js"):
-        assert "reveal_user_id" in _dpo_page(page), f"{page} does not call reveal_user_id"
-    for page in ("principals.js", "compliance.js", "grievances.js"):
+    reveal = _dpo_page("reveal.js")
+    assert '"_func": "reveal_user_id"' in reveal and "/api/v1/admin/pii" in reveal
+    assert "Reveal — this action is logged" in reveal
+    for page in ("reveal.js", "principals.js", "compliance.js", "grievances.js"):
         script = _dpo_page(page)
-        assert "Reveal — this action is logged" in script
-        assert "/api/v1/admin/pii" in script
+        # One reveal implementation: no page carries its own reveal_user_id call.
+        assert page == "reveal.js" or '"reveal_user_id"' not in script, f"{page} calls reveal_user_id itself"
         # A revealed value is never persisted in the browser.
         assert not re.search(r"localStorage\.setItem", script), f"{page} writes localStorage"
         assert not re.search(r"https?://", script), f"{page} loads a remote URL"
+        assert not re.search(r"\.innerHTML\s*=[^;]*\bfields\b", script), f"{page} writes revealed values as markup"
+
+
+def test_compliance_console_sends_no_filter_the_service_ignores():
+    script = _dpo_page("compliance.js")
+    start = script.index('"_func": "list_purge_requests"')
+    payload = script[script.rindex("{", 0, start) : script.index("}", start)]
+    assert '"search"' not in payload
 
 
 def test_grievance_console_sends_the_filter_keys_list_grievances_reads():
@@ -2130,3 +2143,58 @@ def test_list_principals_gives_the_console_a_user_ref_it_can_reveal(tx):
     revealed = _reveal(headers, {"source": "data_principal", "fiduciary_id": fid, "user_ref": row["user_ref"]})
     assert revealed.status_code == 200, revealed.text
     assert revealed.json()["fields"] == {"user_id": "asha@example.org"}
+
+
+@needs_db
+def test_operator_reads_consent_history_by_user_ref_with_masked_ids(tx):
+    from dpdpcms_py import pii
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _, email = _reveal_operator(cur, fid, "OPERATOR", "oli")
+    _grant(fid, pol, "asha@example.org")
+    headers = _bearer(email, "OPERATOR")
+    ref = pii.hmac_hex("asha@example.org")
+    by_ref = _console(headers, "list_consent_history", {"fiduciary_id": fid, "user_ref": ref})
+    by_id = _console(headers, "list_consent_history", {"fiduciary_id": fid, "user_id": "asha@example.org"})
+    assert by_ref.status_code == 200, by_ref.text
+    assert by_ref.json() == by_id.json() and len(by_ref.json()) == 1
+    assert by_ref.json()[0]["user_id"] == pii.mask("asha@example.org")
+    assert "asha@example.org" not in by_ref.text
+    # A lookup by reference discloses nothing, so it is not a reveal.
+    with tx.cursor() as cur:
+        assert _reveal_rows(cur) == []
+    bad = _console(headers, "list_consent_history", {"fiduciary_id": fid, "user_ref": "not-a-hash"})
+    assert bad.status_code == 400, bad.text
+
+
+@needs_db
+def test_user_ref_history_lookup_stays_in_the_callers_tenant(tx):
+    from dpdpcms_py import pii
+
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+        other, other_pol = _seed_tenant(cur)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    _grant(other, other_pol, "ravi@example.org")
+    ref = pii.hmac_hex("ravi@example.org")
+    headers = _bearer(email, "DPO")
+    own = _console(headers, "list_consent_history", {"fiduciary_id": fid, "user_ref": ref})
+    assert own.status_code == 200 and own.json() == []
+    cross = _console(headers, "list_consent_history", {"fiduciary_id": other, "user_ref": ref})
+    assert cross.status_code in (200, 403), cross.text
+    assert "ravi" not in cross.text and (cross.status_code == 403 or cross.json() == [])
+
+
+@needs_db
+def test_api_key_caller_cannot_look_up_history_by_user_ref(tx):
+    from dpdpcms_py import pii
+    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.services.consent import ConsentService
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+    _grant(fid, pol, "asha@example.org")
+    with pytest.raises(ApiError) as err:
+        ConsentService().list_consent_history(_api_ctx(fid, {"user_ref": pii.hmac_hex("asha@example.org")}))
+    assert err.value.status == 403

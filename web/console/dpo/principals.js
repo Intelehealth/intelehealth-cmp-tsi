@@ -54,72 +54,9 @@
         return { response, body };
     }
 
-    // --- Logged reveal (reveal_user_id) ---
-    // Console reads carry masked principal identifiers and no IP. A DPO or administrator
-    // sees a value in the clear only through reveal_user_id, which writes an audit row
-    // before answering and allows 20 reveals a minute. A revealed value lives only in the
-    // page (re-masked after REMASK_MS) and is never written to localStorage.
-    const API_URL_PII = '/api/v1/admin/pii';
-    const REVEAL_LABEL = 'Reveal — this action is logged';
-    const REMASK_MS = 30000;
-    const CAN_REVEAL = ['DPO', 'ADMIN'].includes(String(localStorage.getItem('role') || '').toUpperCase());
-    let revealConfirmed = false;
-
-    function revealButton(action, data) {
-        if (!CAN_REVEAL) return null;
-        const btn = el('button', 'reveal-btn ml-1 text-xs text-amber-700 hover:text-amber-900 underline', REVEAL_LABEL);
-        btn.type = 'button';
-        btn.setAttribute('data-action', action);
-        Object.entries(data || {}).forEach(([k, v]) => btn.setAttribute(`data-${k}`, v));
-        return btn;
-    }
-
-    // The revealed fields, or null (declined, refused or failed: the reason is shown).
-    async function revealFields(source, key) {
-        if (!CAN_REVEAL) return null;
-        if (!revealConfirmed) {
-            if (!confirm("This reveal will be recorded in the audit log against your account. Continue?")) return null;
-            revealConfirmed = true;
-        }
-        const payload = { "_func": "reveal_user_id", "source": source, "fiduciary_id": FIDUCIARY_ID };
-        if (source === 'data_principal') payload.user_ref = key; else payload.id = key;
-        let result;
-        try {
-            result = await postJson(API_URL_PII, payload);
-        } catch (e) {
-            alert("Reveal failed: the server could not be reached.");
-            return null;
-        }
-        const { response, body } = result;
-        if (response.status === 429) {
-            alert("Too many reveals: you may reveal at most 20 values a minute. Wait a minute, then try again.");
-            return null;
-        }
-        if (response.status === 403) {
-            alert("You do not have permission to reveal this value. Only a DPO or an administrator may.");
-            return null;
-        }
-        if (!response.ok) {
-            alert("Reveal failed: " + (body.message || `status ${response.status}`));
-            return null;
-        }
-        return body.fields || {};
-    }
-
-    // Puts each revealed value in place of its masked text, then masks it again (unless
-    // the element has since been re-rendered with other content).
-    function showRevealed(pairs, buttons) {
-        const originals = pairs.map(([node]) => node.textContent);
-        const shown = pairs.map(([node, value]) => {
-            node.textContent = value == null || value === '' ? 'N/A' : String(value);
-            return node.textContent;
-        });
-        buttons.forEach(b => { b.disabled = true; });
-        setTimeout(() => {
-            pairs.forEach(([node], i) => { if (node.textContent === shown[i]) node.textContent = originals[i]; });
-            buttons.forEach(b => { b.disabled = false; });
-        }, REMASK_MS);
-    }
+    // Reveals go through the shared logged-reveal control (reveal.js).
+    const CAN_REVEAL = DpoReveal.canReveal;
+    const revealButton = (action, data) => DpoReveal.button(action, data);
 
     async function withButton(btn, fn) {
         btn.disabled = true;
@@ -136,13 +73,16 @@
     let recentPrincipalsCard, recentPrincipalsBody;
     let guardianSection, guardianDetails, auditTrailDetails, modalRevealBtn;
 
-    // The principal this page has loaded, in the clear: typed by the DPO, or obtained
-    // through a logged reveal. Held in memory only; erasure and revoke need it.
-    let currentUserId = null;
-    // Whether the DPO typed it (and may therefore see it on screen) or it came from a reveal.
-    let currentUserTyped = false;
-    // The record the detail modal shows.
+    // The principal this page has loaded: the identifier the DPO typed, or only the
+    // reference (user_ref) of a masked Recent Principals row. A lookup by reference is no
+    // reveal; erasure and revoke need the identifier, and reveal it (logged) only when
+    // clicked. Held in memory only.
+    let currentLookup = null; // { userId } or { userRef }
+    let currentUserId = null; // typed, or revealed for an action
+    let currentFiduciaryId = null; // the loaded principal's tenant, for reveals
+    // The record the detail modal shows, and its tenant.
     let currentRecordId = null;
+    let currentRecordFiduciaryId = null;
 
     // --- Helper Functions ---
 
@@ -216,35 +156,32 @@
         `;
         const idCell = row.querySelector('.principal-id');
         idCell.textContent = principal.user_id || 'N/A';
-        row.querySelector('[data-action="viewRecentPrincipal"]').setAttribute('data-ref', principal.user_ref || '');
-        const reveal = principal.user_ref ? revealButton('revealPrincipal', { ref: principal.user_ref }) : null;
+        const view = row.querySelector('[data-action="viewRecentPrincipal"]');
+        view.setAttribute('data-ref', principal.user_ref || '');
+        view.setAttribute('data-fid', principal.fiduciary_id || '');
+        const reveal = principal.user_ref ? revealButton('revealPrincipal', { ref: principal.user_ref, fid: principal.fiduciary_id }) : null;
         if (reveal) idCell.after(reveal);
         return row;
     }
 
     function revealPrincipal(btn) {
         return withButton(btn, async () => {
-            const fields = await revealFields('data_principal', btn.getAttribute('data-ref'));
+            const fields = await DpoReveal.fields('data_principal', btn.getAttribute('data-ref'), btn.getAttribute('data-fid'));
             if (!fields) return false;
-            showRevealed([[btn.previousElementSibling, fields.user_id]], [btn]);
+            DpoReveal.show([[btn.previousElementSibling, fields.user_id]], [btn]);
             return true;
         });
     }
 
-    // The history lookup needs the identifier in the clear; for a masked row that is a
-    // logged reveal, so only a DPO or administrator can drill down from this list.
-    async function viewRecentPrincipal(btn) {
+    // A masked row is looked up by its reference: no reveal, open to every console role.
+    function viewRecentPrincipal(btn) {
         const ref = btn.getAttribute('data-ref');
-        if (!CAN_REVEAL || !ref) {
+        if (!ref) {
             alert("This identifier is masked. Enter the full Data Principal ID in the search box to load its history.");
             return;
         }
-        btn.disabled = true;
-        const fields = await revealFields('data_principal', ref);
-        btn.disabled = false;
-        if (!fields || !fields.user_id) return;
         principalIdInput.value = '';
-        loadConsentHistory(fields.user_id, false);
+        loadConsentHistory({ userRef: ref }, btn.getAttribute('data-fid'));
     }
 
     async function loadRecentPrincipals() {
@@ -262,21 +199,20 @@
         }
     }
 
-    async function loadConsentHistory(principalIdentifier, typed) {
+    async function loadConsentHistory(lookup, fiduciaryId) {
         recentPrincipalsCard.classList.add('hidden');
         consentHistoryCard.classList.add('hidden');
         principalStatusCard.classList.add('hidden');
         consentTableBody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-gray-500">Searching...</td></tr>`;
         searchMessage.classList.add('hidden');
-        currentUserId = principalIdentifier;
-        currentUserTyped = typed;
+        const samePrincipal = currentLookup && currentLookup.userId === lookup.userId && currentLookup.userRef === lookup.userRef;
+        if (!samePrincipal) currentUserId = lookup.userId || null;
+        currentLookup = lookup;
+        currentFiduciaryId = fiduciaryId || null;
 
         try {
-            const payload = {
-                "_func": "list_consent_history",
-                "user_id": principalIdentifier,
-                "fiduciary_id": FIDUCIARY_ID
-            };
+            const payload = { "_func": "list_consent_history", "fiduciary_id": FIDUCIARY_ID };
+            if (lookup.userId) payload.user_id = lookup.userId; else payload.user_ref = lookup.userRef;
 
             const { body: responseData } = await postJson(API_URL_CONSENT, payload);
 
@@ -290,6 +226,7 @@
             if (Array.isArray(records) && records.length > 0) {
                 consentTableBody.innerHTML = '';
                 const latest = records[0];
+                currentFiduciaryId = currentFiduciaryId || latest.fiduciary_id || null;
                 overallStatusBadge.innerHTML = createStatusBadge(latest.consent_status_general, latest.is_active_consent);
 
                 if (latest.consent_mechanism !== 'ERASURE_REQUEST' && latest.consent_status_general !== 'ERASURE_REQUESTED') {
@@ -303,8 +240,8 @@
                 records.forEach(record => {
                     consentTableBody.appendChild(createHistoryRow(record));
                 });
-                // The DPO's own input is shown as typed; a revealed identifier stays masked here.
-                principalDisplayId.textContent = typed ? principalIdentifier : (latest.user_id || '');
+                // The DPO's own input is shown as typed; a principal loaded by reference stays masked.
+                principalDisplayId.textContent = lookup.userId || latest.user_id || '';
                 consentHistoryCard.classList.remove('hidden');
             } else {
                 consentTableBody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-gray-500">No records found.</td></tr>`;
@@ -324,6 +261,19 @@
         return '';
     }
 
+    // Whether a decision still grants, as the server reads it (_point_granted): consent_granted,
+    // or the older 'status' alias, and not past its consent_expiry.
+    function pointGranted(point) {
+        let granted = point.consent_granted;
+        if (granted == null) granted = ['granted', 'true', 'consent_given'].includes(String(point.status || '').toLowerCase());
+        if (!granted) return false;
+        if (point.consent_expiry) {
+            const when = new Date(String(point.consent_expiry));
+            if (!isNaN(when.getTime()) && when.getTime() <= Date.now()) return false;
+        }
+        return true;
+    }
+
     function grantBadge(anyGranted, anyDenied) {
         if (anyGranted && anyDenied) return el('span', 'text-amber-600 font-bold', 'PARTIALLY GRANTED');
         if (anyGranted) return el('span', 'text-green-600 font-bold', 'GRANTED');
@@ -333,7 +283,8 @@
     function renderGranularConsents(record) {
         granularConsentDetails.replaceChildren();
         const byPurpose = new Map();
-        (record.data_point_consents || []).forEach(point => {
+        const points = record.data_point_consents;
+        (Array.isArray(points) ? points : Object.values(points || {})).forEach(point => {
             if (!point || typeof point !== 'object') return;
             const pid = pointPurposeId(point);
             if (!pid) return;
@@ -341,7 +292,7 @@
                 byPurpose.set(pid, { label: point.purpose_agreed_to || point.name || pid, anyGranted: false, anyDenied: false });
             }
             const group = byPurpose.get(pid);
-            if (point.consent_granted === true) group.anyGranted = true; else group.anyDenied = true;
+            if (pointGranted(point)) group.anyGranted = true; else group.anyDenied = true;
         });
         if (byPurpose.size === 0) {
             granularConsentDetails.appendChild(el('p', 'text-gray-500', 'No granular purposes recorded.'));
@@ -383,13 +334,15 @@
         const ipSpan = el('span', null, record.ip_address || 'N/A');
         ipSpan.id = 'modal-ip-address';
         const ipLine = line('IP', ipSpan);
-        const ipReveal = revealButton('revealConsentRecord');
+        const ipReveal = revealButton('revealConsentRecord', { fid: record.fiduciary_id });
         if (ipReveal) ipLine.appendChild(ipReveal);
         line('User Agent', record.user_agent || 'N/A');
     }
 
     async function viewConsentRecord(recordId) {
         currentRecordId = recordId;
+        currentRecordFiduciaryId = null;
+        auditTrailDetails.replaceChildren();
         showModal();
         granularConsentDetails.replaceChildren(el('p', 'text-gray-500', `Fetching record ${recordId}...`));
         provenanceDetails.replaceChildren();
@@ -406,8 +359,10 @@
                 "fiduciary_id": FIDUCIARY_ID
             });
 
+            if (recordId !== currentRecordId) return;
             if (response.ok && record) {
-                modalRecordId.textContent = currentUserTyped ? currentUserId : (record.user_id || 'N/A');
+                currentRecordFiduciaryId = record.fiduciary_id || null;
+                modalRecordId.textContent = (currentLookup && currentLookup.userId) || record.user_id || 'N/A';
                 modalRecordStatus.innerHTML = createStatusBadge(record.consent_status_general, record.is_active_consent);
                 renderProvenance(record);
                 renderGranularConsents(record);
@@ -416,26 +371,26 @@
                     guardianSection.classList.remove('hidden');
                     loadGuardianVerification(recordId);
                 }
+                // The trail is an audited ledger read: only for a record actually shown.
+                loadConsentAuditTrail(recordId);
             } else {
                 granularConsentDetails.replaceChildren(el('p', 'text-red-600', record.message || 'Error fetching details.'));
             }
         } catch (error) {
             granularConsentDetails.replaceChildren(el('p', 'text-red-600', 'Error fetching details.'));
         }
-
-        loadConsentAuditTrail(recordId);
     }
 
     // One reveal of a consent record returns its principal and its IP together.
     function revealConsentRecord(btn) {
         const recordId = currentRecordId;
         return withButton(btn, async () => {
-            const fields = await revealFields('consent_record', recordId);
+            const fields = await DpoReveal.fields('consent_record', recordId, currentRecordFiduciaryId);
             if (!fields || recordId !== currentRecordId) return false;
             const pairs = [[modalRecordId, fields.user_id]];
             const ipSpan = document.getElementById('modal-ip-address');
             if (ipSpan) pairs.push([ipSpan, fields.ip_address]);
-            showRevealed(pairs, Array.from(document.querySelectorAll('[data-action="revealConsentRecord"]')));
+            DpoReveal.show(pairs, Array.from(document.querySelectorAll('[data-action="revealConsentRecord"]')));
             return true;
         });
     }
@@ -480,7 +435,7 @@
             line('Proof', proof);
             // One reveal returns the guardian id, the evidence reference and the proof together.
             [guardianLine, refLine].forEach(p => {
-                const btn = revealButton('revealGuardian', { id: v.verification_log_id });
+                const btn = revealButton('revealGuardian', { id: v.verification_log_id, fid: currentRecordFiduciaryId });
                 if (btn) p.appendChild(btn);
             });
         } catch (e) {
@@ -489,9 +444,11 @@
     }
 
     function revealGuardian(btn) {
+        const recordId = currentRecordId;
         return withButton(btn, async () => {
-            const fields = await revealFields('parental_verification', btn.getAttribute('data-id'));
-            if (!fields) return false;
+            const fields = await DpoReveal.fields('parental_verification', btn.getAttribute('data-id'), btn.getAttribute('data-fid'));
+            // The modal may have moved to another record while the reveal was in flight.
+            if (!fields || recordId !== currentRecordId) return false;
             const proof = fields.proof_metadata;
             const pairs = [
                 [document.getElementById('guardian-id-display'), fields.guardian_id],
@@ -499,7 +456,7 @@
                 [document.getElementById('guardian-proof-display'),
                     proof == null ? null : (typeof proof === 'string' ? proof : JSON.stringify(proof))],
             ].filter(([node]) => node);
-            showRevealed(pairs, Array.from(document.querySelectorAll('[data-action="revealGuardian"]')));
+            DpoReveal.show(pairs, Array.from(document.querySelectorAll('[data-action="revealGuardian"]')));
             return true;
         });
     }
@@ -589,14 +546,15 @@
         const purposeId = btn.getAttribute('data-purpose-id');
         const label = btn.getAttribute('data-purpose-label') || purposeId;
         const policyId = btn.getAttribute('data-policy-id');
-        if (!currentUserId) { alert("No principal identifier available."); return; }
+        const userId = await principalIdForAction("Revoking a purpose");
+        if (!userId) return;
         if (!confirm(`Confirm: Revoke consent for purpose "${label}" only? Every other granted purpose on this record is unaffected.`)) return;
 
         btn.disabled = true;
         try {
             const payload = {
                 "_func": "withdraw_consent",
-                "user_id": currentUserId,
+                "user_id": userId,
                 "purpose_ids": [purposeId],
                 "reason": "DPO revoked a single purpose.",
                 "fiduciary_id": FIDUCIARY_ID
@@ -606,7 +564,7 @@
             if (response.ok) {
                 alert(`Purpose "${label}" revoked.`);
                 closeModal();
-                loadConsentHistory(currentUserId, currentUserTyped);
+                loadConsentHistory(currentLookup, currentFiduciaryId);
             } else {
                 alert("Failed to revoke purpose: " + (body.message || `status ${response.status}`));
                 btn.disabled = false;
@@ -617,11 +575,25 @@
         }
     }
 
+    // The identifier erasure and revoke must name: typed by the DPO, or (for a principal
+    // loaded by reference) revealed now, logged, because the action is about to use it.
+    async function principalIdForAction(what) {
+        if (currentUserId) return currentUserId;
+        if (!currentLookup || !currentLookup.userRef) { alert("No principal identifier available."); return null; }
+        if (!CAN_REVEAL) {
+            alert(`${what} needs the full identifier, which only a DPO or administrator can reveal. Search by the full Data Principal ID instead.`);
+            return null;
+        }
+        const fields = await DpoReveal.fields('data_principal', currentLookup.userRef, currentFiduciaryId);
+        if (!fields || !fields.user_id) return null;
+        currentUserId = fields.user_id;
+        return currentUserId;
+    }
+
     async function initiateErasurePurge() {
-        const userId = currentUserId;
-        if (!userId) { alert("No principal identifier available."); return; }
-        const shown = currentUserTyped ? userId : principalDisplayId.textContent;
-        if (confirm(`Confirm: Initiate full Data Erasure/Purge workflow for Data Principal ID ${shown}?`)) {
+        const userId = await principalIdForAction("Erasure");
+        if (!userId) return;
+        if (confirm(`Confirm: Initiate full Data Erasure/Purge workflow for Data Principal ID ${userId}?`)) {
             try {
                 const { response } = await postJson(API_URL_CONSENT, {
                     "_func": "erasure_request",
@@ -632,7 +604,7 @@
                 });
                 if (response.ok) {
                     alert("Erasure request submitted.");
-                    loadConsentHistory(userId, currentUserTyped);
+                    loadConsentHistory(currentLookup, currentFiduciaryId);
                 }
             } catch (e) { alert("Error initiating erasure."); }
         }
@@ -683,7 +655,7 @@
         principalSearchForm.addEventListener('submit', function(event) {
             event.preventDefault();
             const identifier = principalIdInput.value.trim();
-            if (identifier) loadConsentHistory(identifier, true);
+            if (identifier) loadConsentHistory({ userId: identifier }, null);
         });
 
         loadRecentPrincipals();

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -380,6 +381,9 @@ def _verification_detail(proof: str | None) -> str | None:
         return None
     return value.get("verification_detail") if isinstance(value, dict) else None
 
+
+# A principal reference: the hex HMAC of its identifier (data_principal.user_id_hmac).
+USER_REF_RE = re.compile(r"[0-9a-f]{64}")
 
 TRAIL_ALL = "ALL"
 
@@ -1004,8 +1008,19 @@ class ConsentService(Service):
         bind_principal_field(ctx, "user_id")
         payload = ctx.payload
         page, limit = page_limit(payload)
-        where = [_USER_MATCH, "fiduciary_id = %s"]
-        params: list[Any] = [*_consent_keys(), *pii.hmac_params(require(payload.get("user_id"), "user_id")), _fid(ctx)]
+        if payload.get("user_ref") is not None:
+            # A console operator holds only the masked id and its reference (the
+            # lookup HMAC list_principals hands out); it reads by reference, in its
+            # own tenant, with no reveal. An API key or principal names the id.
+            _require_console_operator(ctx)
+            user_ref = str(payload["user_ref"])
+            if not USER_REF_RE.fullmatch(user_ref):
+                raise ApiError(400, "Bad Request", "Invalid 'user_ref'.")
+            where = ["user_id_hmac = %s", "fiduciary_id = %s"]
+            params: list[Any] = [*_consent_keys(), user_ref, _fid(ctx)]
+        else:
+            where = [_USER_MATCH, "fiduciary_id = %s"]
+            params = [*_consent_keys(), *pii.hmac_params(require(payload.get("user_id"), "user_id")), _fid(ctx)]
         # UD-03: search and filter by purpose, date and status.
         if payload.get("purpose_id"):
             where.append(

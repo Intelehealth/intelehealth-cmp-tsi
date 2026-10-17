@@ -9,6 +9,10 @@
     "user_id": {
       "type": "string"
     },
+    "user_ref": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "fiduciary_id": {
       "type": "string"
     },
@@ -32,7 +36,18 @@
     }
   },
   "required": [
-    "_func",
-    "user_id"
+    "_func"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "user_id"
+      ]
+    },
+    {
+      "required": [
+        "user_ref"
+      ]
+    }
   ]
 }

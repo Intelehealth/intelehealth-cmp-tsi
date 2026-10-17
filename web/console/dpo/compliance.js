@@ -10,8 +10,8 @@
         closeModal: (el) => closeModal(el.getAttribute('data-arg')),
         closeCesJobsModal: () => { closeModal('ces-jobs-modal'); loadPurgeRequests(); },
         loadCesJobs: () => loadCesJobs(),
-        revealPurgeRow: (el) => revealInto(el, 'purge_request', el.getAttribute('data-id'), el.previousElementSibling),
-        revealPurgeDetail: (el) => revealInto(el, 'purge_request', updateForm.getAttribute('data-id'), document.getElementById('detail-user-id')),
+        revealPurgeRow: (el) => DpoReveal.into(el, 'purge_request', el.getAttribute('data-id'), el.previousElementSibling, el.getAttribute('data-fid')),
+        revealPurgeDetail: (el) => DpoReveal.into(el, 'purge_request', updateForm.getAttribute('data-id'), document.getElementById('detail-user-id'), updateForm.getAttribute('data-fid')),
     };
     document.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
@@ -47,76 +47,6 @@
     const USER_NAME = localStorage.getItem('username');
     document.getElementById('username').textContent = USER_NAME || 'DPO User';
 
-    // --- Logged reveal (reveal_user_id) ---
-    // Console reads carry masked principal identifiers. A DPO or administrator sees one in
-    // the clear only through reveal_user_id, which writes an audit row before answering and
-    // allows 20 reveals a minute. A revealed value lives only in the page (re-masked after
-    // REMASK_MS) and is never written to localStorage.
-    const API_URL_PII = '/api/v1/admin/pii';
-    const REVEAL_LABEL = 'Reveal — this action is logged';
-    const REMASK_MS = 30000;
-    const CAN_REVEAL = ['DPO', 'ADMIN'].includes(String(localStorage.getItem('role') || '').toUpperCase());
-    let revealConfirmed = false;
-
-    function revealButton(action, id) {
-        if (!CAN_REVEAL) return null;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'reveal-btn block text-[10px] text-amber-700 hover:text-amber-900 underline';
-        btn.textContent = REVEAL_LABEL;
-        btn.setAttribute('data-action', action);
-        if (id) btn.setAttribute('data-id', id);
-        return btn;
-    }
-
-    // The revealed fields, or null (declined, refused or failed: the reason is shown).
-    async function revealFields(source, id) {
-        if (!CAN_REVEAL || !id) return null;
-        if (!revealConfirmed) {
-            if (!confirm("This reveal will be recorded in the audit log against your account. Continue?")) return null;
-            revealConfirmed = true;
-        }
-        let response, body = {};
-        try {
-            response = await fetch(API_URL_PII, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AUTH_TOKEN}` },
-                body: JSON.stringify({ "_func": "reveal_user_id", "source": source, "id": id, "fiduciary_id": localStorage.getItem('fiduciary_id') })
-            });
-            try { body = await response.json(); } catch (e) { body = {}; }
-        } catch (e) {
-            alert("Reveal failed: the server could not be reached.");
-            return null;
-        }
-        if (response.status === 429) {
-            alert("Too many reveals: you may reveal at most 20 values a minute. Wait a minute, then try again.");
-            return null;
-        }
-        if (response.status === 403) {
-            alert("You do not have permission to reveal this value. Only a DPO or an administrator may.");
-            return null;
-        }
-        if (!response.ok) {
-            alert("Reveal failed: " + (body.message || `status ${response.status}`));
-            return null;
-        }
-        return body.fields || {};
-    }
-
-    // Reveals the principal of `source` record `id` into `target` in place of its masked
-    // text, then masks it again (unless the element has since been re-rendered).
-    async function revealInto(btn, source, id, target) {
-        btn.disabled = true;
-        const fields = await revealFields(source, id);
-        if (!fields || !target) { btn.disabled = false; return; }
-        const original = target.textContent;
-        target.textContent = fields.user_id || 'N/A';
-        const shown = target.textContent;
-        setTimeout(() => {
-            if (target.textContent === shown) target.textContent = original;
-            btn.disabled = false;
-        }, REMASK_MS);
-    }
 
     // Map of operator_id -> display name, used for the "Assigned To" column/dropdown.
     // Operators can't delegate, so they never need this lookup.
@@ -136,7 +66,7 @@
         } catch (e) { console.error("Failed to load operators", e); }
     }
 
-    let tableBody, countSpan, searchInput, statusFilter, purgeModalOverlay, updateForm;
+    let tableBody, countSpan, statusFilter, purgeModalOverlay, updateForm;
 
     function toggleMenu() {
         document.getElementById('sidebar').classList.toggle('open');
@@ -185,7 +115,7 @@
         const idSpan = row.querySelector('.principal-id');
         idSpan.textContent = req.user_id || 'N/A';
         idSpan.title = req.user_id || '';
-        const reveal = revealButton('revealPurgeRow', req.id);
+        const reveal = DpoReveal.button('revealPurgeRow', { id: req.id, fid: req.fiduciary_id }, 'reveal-btn block text-[10px] text-amber-700 hover:text-amber-900 underline');
         if (reveal) idSpan.after(reveal);
         return row;
     }
@@ -197,7 +127,6 @@
             const payload = {
                 "_func": "list_purge_requests",
                 "fiduciary_id": localStorage.getItem('fiduciary_id'),
-                "search": searchInput.value,
                 "status": statusFilter.value === 'ALL' ? '' : statusFilter.value
             };
 
@@ -259,6 +188,7 @@
             }
 
             updateForm.setAttribute('data-id', id);
+            updateForm.setAttribute('data-fid', req.fiduciary_id || '');
             purgeModalOverlay.style.display = 'flex';
         } catch (e) { alert("Error fetching request details."); }
     }
@@ -364,16 +294,14 @@
     // --- Init ---
     tableBody = document.getElementById('purge-table-body');
     countSpan = document.getElementById('request-count');
-    searchInput = document.getElementById('search-input');
     statusFilter = document.getElementById('status-filter');
     purgeModalOverlay = document.getElementById('purge-modal-overlay');
     updateForm = document.getElementById('purge-update-form');
-    if (CAN_REVEAL) document.getElementById('detail-reveal-btn').classList.remove('hidden');
+    if (DpoReveal.canReveal) document.getElementById('detail-reveal-btn').classList.remove('hidden');
 
     document.getElementById('menu-toggle').addEventListener('click', toggleMenu);
     document.getElementById('sidebar-backdrop').addEventListener('click', toggleMenu);
     statusFilter.addEventListener('change', loadPurgeRequests);
-    searchInput.addEventListener('input', () => { loadPurgeRequests(); });
 
     if (!IS_OPERATOR) {
         document.getElementById('assign-operator-btn').addEventListener('click', async function() {
