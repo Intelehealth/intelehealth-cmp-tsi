@@ -312,6 +312,53 @@ def _add_append_only_triggers(cur, table: str, triggers=_APPEND_ONLY_TRIGGERS) -
         )
 
 
+def _copy_audit_access_controls(cur, table: str) -> None:
+    """Give an archive table the same row-level security (ENABLE/FORCE and
+    every policy) and the same grants as audit_logs, so reads through
+    audit.ledger_source() work for every role that can read audit_logs and
+    stay tenant-scoped (db/28, db/30)."""
+    ident = sql.Identifier(table)
+    cur.execute(
+        "SELECT relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner) AS owner"
+        " FROM pg_class WHERE oid = 'public.audit_logs'::regclass"
+    )
+    parent = cur.fetchone()
+    if parent["relrowsecurity"]:
+        cur.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(ident))
+    if parent["relforcerowsecurity"]:
+        cur.execute(sql.SQL("ALTER TABLE {} FORCE ROW LEVEL SECURITY").format(ident))
+    cur.execute(
+        "SELECT policyname, permissive, roles::text[] AS roles, cmd, qual, with_check FROM pg_policies"
+        " WHERE schemaname = 'public' AND tablename = 'audit_logs'"
+    )
+    for policy in cur.fetchall():
+        roles = sql.SQL(", ").join(
+            sql.SQL("PUBLIC") if role == "public" else sql.Identifier(role) for role in policy["roles"]
+        )
+        # qual / with_check are deparsed expressions from the catalog itself.
+        statement = sql.SQL("CREATE POLICY {} ON {} AS {} FOR {} TO {}").format(
+            sql.Identifier(policy["policyname"]),
+            ident,
+            sql.SQL(policy["permissive"]),
+            sql.SQL(policy["cmd"]),
+            roles,
+        )
+        if policy["qual"] is not None:
+            statement += sql.SQL(" USING (" + policy["qual"] + ")")
+        if policy["with_check"] is not None:
+            statement += sql.SQL(" WITH CHECK (" + policy["with_check"] + ")")
+        cur.execute(sql.SQL("DROP POLICY IF EXISTS {} ON {}").format(sql.Identifier(policy["policyname"]), ident))
+        cur.execute(statement)
+    cur.execute(
+        "SELECT grantee, privilege_type FROM information_schema.role_table_grants"
+        " WHERE table_schema = 'public' AND table_name = 'audit_logs' AND grantee <> %s",
+        (parent["owner"],),
+    )
+    for grant in cur.fetchall():
+        grantee = sql.SQL("PUBLIC") if grant["grantee"] == "PUBLIC" else sql.Identifier(grant["grantee"])
+        cur.execute(sql.SQL("GRANT " + grant["privilege_type"] + " ON {} TO {}").format(ident, grantee))
+
+
 def _attached_audit_years(cur) -> dict[int, str]:
     cur.execute(
         "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid"
@@ -375,6 +422,7 @@ def _archive_audit_year(year: int) -> bool:
         cur.execute(sql.SQL("ALTER TABLE {} RENAME TO {}").format(sql.Identifier(name), sql.Identifier(archive)))
         # DETACH drops the row triggers cloned from the parent.
         _add_append_only_triggers(cur, archive)
+        _copy_audit_access_controls(cur, archive)
         cur.execute(sql.SQL("SELECT count(*) AS n FROM {}").format(sql.Identifier(archive)))
         row_count = int(cur.fetchone()["n"])
         cur.execute(

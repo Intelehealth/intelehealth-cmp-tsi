@@ -70,6 +70,42 @@ _LEDGER_COLUMNS = (
     " purpose_id, consent_status, initiator, source_ip"
 )
 _ARCHIVE_TABLE = re.compile(r"audit_logs_y\d{4}_archive")
+# Registered archives that still exist as tables, oldest year first.
+_ARCHIVE_REGISTRY_SQL = (
+    "SELECT r.partition_name FROM audit_log_archive_registry r"
+    " JOIN pg_class c ON c.relname = r.partition_name AND c.relkind = 'r'"
+    " JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'"
+    " ORDER BY r.period_start"
+)
+
+
+def _archive_tables(rows) -> list[str]:
+    """Registry names safe to interpolate into SQL; anything else is logged and skipped."""
+    tables = []
+    for row in rows:
+        name = row.get("partition_name") if isinstance(row, dict) else None
+        if isinstance(name, str) and _ARCHIVE_TABLE.fullmatch(name):
+            tables.append(name)
+        elif name is not None:
+            log.error("Ignoring unexpected audit archive registry entry %r", name)
+    return tables
+
+
+def _newest_archived_row(cur) -> dict | None:
+    """The newest row across the archive tables, for log_event when the live
+    ledger is empty (every year archived), so the chain continues instead of
+    restarting from genesis. Runs on log_event's own cursor, under its lock."""
+    cur.execute("SELECT to_regclass('public.audit_log_archive_registry') IS NOT NULL AS present")
+    present = cur.fetchone()
+    if not present or not present.get("present"):
+        return None
+    cur.execute(_ARCHIVE_REGISTRY_SQL)
+    tables = _archive_tables(cur.fetchall())
+    if not tables:
+        return None
+    union = " UNION ALL ".join(f"SELECT current_log_hash, timestamp, id FROM {table}" for table in tables)
+    cur.execute(f"SELECT current_log_hash, timestamp FROM ({union}) AS a ORDER BY timestamp DESC, id DESC LIMIT 1")
+    return cur.fetchone()
 
 
 def ledger_source() -> str:
@@ -82,22 +118,11 @@ def ledger_source() -> str:
     of the exact archive shape are used; anything else is skipped and logged.
     """
     try:
-        rows = db.all(
-            "SELECT r.partition_name FROM audit_log_archive_registry r"
-            " JOIN pg_class c ON c.relname = r.partition_name AND c.relkind = 'r'"
-            " JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'"
-            " ORDER BY r.period_start"
-        )
+        rows = db.all(_ARCHIVE_REGISTRY_SQL)
     except psycopg.Error:
         log.warning("audit_log_archive_registry unavailable; apply db/33_audit_archive_registry.sql", exc_info=True)
         return "audit_logs"
-    tables = []
-    for row in rows:
-        name = row.get("partition_name") if isinstance(row, dict) else None
-        if isinstance(name, str) and _ARCHIVE_TABLE.fullmatch(name):
-            tables.append(name)
-        elif name is not None:
-            log.error("Ignoring unexpected audit archive registry entry %r", name)
+    tables = _archive_tables(rows)
     if not tables:
         return "audit_logs"
     arms = [f"SELECT {_LEDGER_COLUMNS} FROM {table}" for table in ["audit_logs", *tables]]
@@ -147,9 +172,10 @@ def log_event(
     with db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (AUDIT_CHAIN_LOCK,))
         # The predecessor is the newest LIVE row: archived years are always
-        # older than every live one.
+        # older than every live one. Only when the live ledger is empty (every
+        # year archived) is it the newest archived row.
         cur.execute("SELECT current_log_hash, timestamp FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
-        previous = cur.fetchone()
+        previous = cur.fetchone() or _newest_archived_row(cur)
         previous_hash = previous["current_log_hash"] if previous else ""
         # audit_logs.timestamp is TIMESTAMP (no zone): store naive UTC so the value
         # hashed is the value stored, whatever the session TimeZone. Keep it

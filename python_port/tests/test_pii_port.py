@@ -239,3 +239,81 @@ def test_ledger_source_rejects_unexpected_registry_names(monkeypatch):
 
     monkeypatch.setattr(audit.db, "all", lambda *a, **k: [{"partition_name": "x; DROP"}])
     assert audit.ledger_source() == "audit_logs"
+
+
+def _archive_everything(monkeypatch):
+    """Archive every yearly partition (now far enough ahead that none stays live)."""
+    import dataclasses
+    from datetime import UTC, datetime
+
+    from dpdpcms_py import jobs
+
+    monkeypatch.setattr(jobs, "settings", dataclasses.replace(jobs.settings, audit_live_years=1))
+    return jobs.archive_audit_partitions(datetime(2200, 6, 1, tzinfo=UTC))
+
+
+@needs_db
+def test_chain_continues_from_archive_when_live_ledger_is_empty(tx, monkeypatch):
+    from datetime import datetime
+
+    from dpdpcms_py import audit
+
+    with tx.cursor() as cur:
+        year = _live_partition_years(cur)[0]
+    _log_at(monkeypatch, datetime(year, 3, 1))
+    _log_at(monkeypatch, datetime(year, 3, 2))
+    _archive_everything(monkeypatch)
+    with tx.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM audit_logs")
+        assert cur.fetchone()["n"] == 0, "live ledger should be empty after archiving every year"
+        cur.execute(f"SELECT current_log_hash FROM audit_logs_y{year}_archive ORDER BY timestamp DESC, id DESC LIMIT 1")
+        newest_archived = cur.fetchone()["current_log_hash"]
+
+    _log_at(monkeypatch, datetime(2200, 6, 1))
+    with tx.cursor() as cur:
+        cur.execute("SELECT prev_log_hash FROM audit_logs")
+        assert cur.fetchone()["prev_log_hash"] == newest_archived
+    chain = audit.verify_chain()
+    assert chain["intact"] is True and chain["rows_checked"] >= 3
+
+
+@needs_db
+def test_archive_tables_keep_tenant_isolation(tx, monkeypatch):
+    from datetime import datetime
+
+    from dpdpcms_py import audit
+
+    with tx.cursor() as cur:
+        year = _live_partition_years(cur)[0]
+        fid_a, _ = _seed_tenant(cur)
+        fid_b, _ = _seed_tenant(cur)
+    _log_at(monkeypatch, datetime(year, 3, 1), fid=fid_a)
+    _log_at(monkeypatch, datetime(year, 3, 2), fid=fid_b)
+    _archive_everything(monkeypatch)
+    archive = f"audit_logs_y{year}_archive"
+    source = audit.ledger_source()
+    assert archive in source
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = %s::regclass", (f"public.{archive}",)
+        )
+        archived_flags = cur.fetchone()
+        cur.execute(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'public.audit_logs'::regclass"
+        )
+        assert archived_flags == cur.fetchone()
+        cur.execute("SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = %s", (archive,))
+        assert {r["policyname"] for r in cur.fetchall()} == {"tsi_unrestricted", "tsi_tenant_isolation"}
+        cur.execute(
+            "INSERT INTO tsi_reader_tenants (role_name, tenant_id) VALUES ('tsi_tenant_reader', %s)"
+            " ON CONFLICT DO NOTHING",
+            (fid_b,),
+        )
+        cur.execute("SET LOCAL ROLE tsi_tenant_reader")
+        cur.execute(
+            f"SELECT fiduciary_id::text AS fid FROM {source} WHERE fiduciary_id IN (%s, %s)",
+            (fid_a, fid_b),
+        )
+        seen = [r["fid"] for r in cur.fetchall()]
+        cur.execute("RESET ROLE")
+    assert seen == [fid_b]
