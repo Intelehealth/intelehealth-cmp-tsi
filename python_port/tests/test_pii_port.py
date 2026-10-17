@@ -800,3 +800,33 @@ def test_grievance_search_by_principal_is_exact_match(tx):
     assert detail["user_id"] == "asha@example.org" and "user_id_enc" not in detail
     with tx.cursor() as cur:
         _no_plaintext(cur, fid, "asha@example.org", ("grievances", "notifications"))
+
+
+@needs_db
+def test_principal_grievance_log_entry_names_no_principal_id(tx):
+    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.services.compliance import GrievanceService
+
+    pid = "asha@example.org"
+    with tx.cursor() as cur:
+        fid, _ = _seed_tenant(cur)
+    service = GrievanceService()
+    gid = service.submit_grievance(
+        _api_ctx(fid, {"user_id": pid, "type": "GENERAL_COMPLAINT", "subject": "s", "description": "d"})
+    )["grievance_id"]
+    principal = RequestContext(
+        path="/api/v1/rights",
+        category="client",
+        service="grievance",
+        payload={"grievance_id": gid, "message": "any update?"},
+        headers={},
+        fiduciary_id=fid,
+        principal_user_id=pid,
+        auth_via_principal_jwt=True,
+    )
+    assert service.add_grievance_communication(principal)["entry"]["by"] == "PRINCIPAL"
+    with tx.cursor() as cur:
+        cur.execute("SELECT communication_log, communication_log::text AS t FROM grievances WHERE id = %s", (gid,))
+        row = cur.fetchone()
+    assert row["communication_log"][-1]["by"] == "PRINCIPAL"
+    assert pid not in row["t"]

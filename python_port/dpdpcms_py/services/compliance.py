@@ -65,36 +65,6 @@ GRIEVANCE_STAGE_NOTICES = {
 }
 
 
-# db/34: principal identifiers are stored as <col>_enc / <col>_hmac. Lookups
-# match the HMAC (trimmed, case kept); writes set both; reads decrypt and pass
-# the value through pii.principal_view (masked for console operators).
-def _match(column: str) -> str:
-    return f"{column}_hmac = {pii.HMAC_SQL}"
-
-
-def _assign(column: str) -> str:
-    return f"{column}_enc = {pii.ENC_SQL}, {column}_hmac = {pii.HMAC_SQL}"
-
-
-def _pid_params(value: str | None) -> tuple:
-    """Parameters for an ENC_SQL, HMAC_SQL pair (an INSERT's values or _assign)."""
-    return (*pii.enc_params(value), *pii.hmac_params(value))
-
-
-_PID_VALUES = f"{pii.ENC_SQL}, {pii.HMAC_SQL}"
-
-
-def _principal_row(ctx: RequestContext, row: dict, *columns: str) -> dict:
-    """Drop each column's _enc/_hmac pair and show its decrypted value as the caller may see it."""
-    out = db.to_jsonable(row)
-    for column in columns:
-        out.pop(f"{column}_enc", None)
-        out.pop(f"{column}_hmac", None)
-        if column in out:
-            out[column] = pii.principal_view(ctx, out[column])
-    return out
-
-
 def _notify_grievance_stage(
     user_id: str, fiduciary_id: str, stage: str, context: dict | None = None, language: str | None = None
 ) -> None:
@@ -106,8 +76,8 @@ def _notify_grievance_stage(
     if notice:
         db.execute(
             "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
-            f" notification_type, context) VALUES ('PRINCIPAL', {_PID_VALUES}, %s, %s, %s)",
-            (*_pid_params(user_id), fiduciary_id, notice, db.as_jsonb(context) if context else None),
+            f" notification_type, context) VALUES ('PRINCIPAL', {pii.PID_VALUES}, %s, %s, %s)",
+            (*pii.pid_params(user_id), fiduciary_id, notice, db.as_jsonb(context) if context else None),
         )
 
 
@@ -167,9 +137,9 @@ def _notify_grievance_assignee(
     principal's copy) naming the grievance, so they know which complaint to act on."""
     db.execute(
         "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
-        f" notification_type, context) VALUES ('DPO', {_PID_VALUES}, %s, 'GRIEVANCE_ROUTED', %s)",
+        f" notification_type, context) VALUES ('DPO', {pii.PID_VALUES}, %s, 'GRIEVANCE_ROUTED', %s)",
         (
-            *_pid_params(operator_id),
+            *pii.pid_params(operator_id),
             fiduciary_id,
             db.as_jsonb(
                 {
@@ -222,7 +192,7 @@ def erase_cms_copy(
     # payloads still carry the raw id the caller supplied, compared trimmed.
     who = pii.hmac_params(user_id)
     raw = pii.normalize(user_id)
-    tok = _pid_params(token)
+    tok = pii.pid_params(token)
     with _cursor(cur) as cur:
         # P5-01: grievance handling runs BEFORE the generic loop below. The
         # generic loop re-keys grievances.user_id to the pseudonym; the DELETE
@@ -232,7 +202,7 @@ def erase_cms_copy(
         cur.execute(
             f"""
             DELETE FROM grievance_attachments
-            WHERE grievance_id IN (SELECT id FROM grievances WHERE fiduciary_id = %s AND {_match("user_id")})
+            WHERE grievance_id IN (SELECT id FROM grievances WHERE fiduciary_id = %s AND {pii.match_sql("user_id")})
             RETURNING storage_path
             """,
             (fiduciary_id, *who),
@@ -243,10 +213,10 @@ def erase_cms_copy(
         # blank it alongside the other grievance text.
         cur.execute(
             f"""
-            UPDATE grievances SET {_assign("user_id")}, subject = '[erased]', description = '[erased]',
+            UPDATE grievances SET {pii.assign_sql("user_id")}, subject = '[erased]', description = '[erased]',
                    resolution_details = NULL,
                    communication_log = '[]'::jsonb, feedback_comment = NULL, attachments = '[]'::jsonb
-            WHERE fiduciary_id = %s AND {_match("user_id")}
+            WHERE fiduciary_id = %s AND {pii.match_sql("user_id")}
             """,
             (*tok, fiduciary_id, *who),
         )
@@ -261,16 +231,16 @@ def erase_cms_copy(
         db.allow_consent_maintenance(cur)
         cur.execute(
             "UPDATE consent_records SET ip_address = '0.0.0.0', user_agent = NULL"
-            f" WHERE fiduciary_id = %s AND {_match('user_id')}",
+            f" WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}",
             (fiduciary_id, *who),
         )
         counts["consent_records.metadata"] = cur.rowcount
         cur.execute(
             f"""
-            UPDATE notification_deliveries nd SET {_assign("recipient")}
+            UPDATE notification_deliveries nd SET {pii.assign_sql("recipient")}
             FROM notifications n
             WHERE nd.notification_id = n.id AND n.fiduciary_id = %s
-              AND n.recipient_type = 'PRINCIPAL' AND n.{_match("recipient_id")}
+              AND n.recipient_type = 'PRINCIPAL' AND n.{pii.match_sql("recipient_id")}
             """,
             (*tok, fiduciary_id, *who),
         )
@@ -279,7 +249,7 @@ def erase_cms_copy(
         # context; it goes with the rest of the grievance text.
         cur.execute(
             "UPDATE notifications SET context = NULL WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL'"
-            f" AND {_match('recipient_id')} AND context IS NOT NULL",
+            f" AND {pii.match_sql('recipient_id')} AND context IS NOT NULL",
             (fiduciary_id, *who),
         )
         counts["notifications.context"] = cur.rowcount
@@ -300,9 +270,9 @@ def erase_cms_copy(
                 # breach_incidents, which does.
                 cur.execute(
                     f"""
-                    UPDATE breach_affected_principals b SET {_assign("user_id")}
+                    UPDATE breach_affected_principals b SET {pii.assign_sql("user_id")}
                     FROM breach_incidents bi
-                    WHERE b.breach_id = bi.id AND bi.fiduciary_id = %s AND b.{_match("user_id")}
+                    WHERE b.breach_id = bi.id AND bi.fiduciary_id = %s AND b.{pii.match_sql("user_id")}
                     """,
                     (*tok, fiduciary_id, *who),
                 )
@@ -312,10 +282,10 @@ def erase_cms_copy(
                 # SEC-15: besides re-keying principal-keyed rows, scrub the raw
                 # user_id JSON field the consent-alert payload carries.
                 cur.execute(
-                    f"UPDATE alerts SET {_assign('recipient_id')},"
+                    f"UPDATE alerts SET {pii.assign_sql('recipient_id')},"
                     " payload = CASE WHEN payload ? 'user_id'"
                     "             THEN jsonb_set(payload, '{user_id}', to_jsonb(%s::text)) ELSE payload END"
-                    f" WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL' AND {_match('recipient_id')}",
+                    f" WHERE fiduciary_id = %s AND recipient_type = 'PRINCIPAL' AND {pii.match_sql('recipient_id')}",
                     (*tok, token, fiduciary_id, *who),
                 )
                 counts[table] = cur.rowcount
@@ -330,29 +300,29 @@ def erase_cms_copy(
                 counts[table] += cur.rowcount
                 # An alert the principal acknowledged names them as the acknowledger.
                 cur.execute(
-                    f"UPDATE alerts SET {_assign('acknowledged_by')}"
-                    f" WHERE fiduciary_id = %s AND {_match('acknowledged_by')}",
+                    f"UPDATE alerts SET {pii.assign_sql('acknowledged_by')}"
+                    f" WHERE fiduciary_id = %s AND {pii.match_sql('acknowledged_by')}",
                     (*tok, fiduciary_id, *who),
                 )
                 counts["alerts.acknowledged_by"] = cur.rowcount
                 continue
             cur.execute(
-                f"UPDATE {table} SET {_assign(column)} WHERE fiduciary_id = %s AND {_match(column)}",
+                f"UPDATE {table} SET {pii.assign_sql(column)} WHERE fiduciary_id = %s AND {pii.match_sql(column)}",
                 (*tok, fiduciary_id, *who),
             )
             counts[table] = cur.rowcount
         # SEC-15: identifiers that survive the covered set above.
         # evidence_certificates.subject_principal_id stores a principal id.
         cur.execute(
-            f"UPDATE evidence_certificates SET {_assign('subject_principal_id')}"
-            f" WHERE fiduciary_id = %s AND {_match('subject_principal_id')}",
+            f"UPDATE evidence_certificates SET {pii.assign_sql('subject_principal_id')}"
+            f" WHERE fiduciary_id = %s AND {pii.match_sql('subject_principal_id')}",
             (*tok, fiduciary_id, *who),
         )
         counts["evidence_certificates"] = cur.rowcount
         # data_principal.guardian_id on ANOTHER principal's row: the erased
         # principal is re-keyed so the child's row no longer names the original id.
         cur.execute(
-            f"UPDATE data_principal SET {_assign('guardian_id')} WHERE fiduciary_id = %s AND {_match('guardian_id')}",
+            f"UPDATE data_principal SET {pii.assign_sql('guardian_id')} WHERE fiduciary_id = %s AND {pii.match_sql('guardian_id')}",
             (*tok, fiduciary_id, *who),
         )
         counts["data_principal.guardian_id"] = cur.rowcount
@@ -372,18 +342,18 @@ def erase_cms_copy(
         # subject without the identifier.
         if action == "DE_IDENTIFY":
             cur.execute(
-                f"UPDATE data_principal SET {_assign('user_id')} WHERE fiduciary_id = %s AND {_match('user_id')}",
+                f"UPDATE data_principal SET {pii.assign_sql('user_id')} WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}",
                 (*tok, fiduciary_id, *who),
             )
             counts["data_principal"] = cur.rowcount
         else:
             cur.execute(
-                f"DELETE FROM data_principal WHERE fiduciary_id = %s AND {_match('user_id')}",
+                f"DELETE FROM data_principal WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}",
                 (fiduciary_id, *who),
             )
             counts["data_principal"] = cur.rowcount
         cur.execute(
-            f"UPDATE purge_requests SET cms_erased_at = NOW() WHERE fiduciary_id = %s AND {_match('user_id')}",
+            f"UPDATE purge_requests SET cms_erased_at = NOW() WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}",
             (fiduciary_id, *pii.hmac_params(token)),
         )
     if pending_files is not None:
@@ -480,7 +450,7 @@ def deidentify_purpose_cms_copy(
                     )
                     FROM jsonb_array_elements(data_point_consents) AS p
                 )
-                WHERE fiduciary_id = %s AND {_match("user_id")}
+                WHERE fiduciary_id = %s AND {pii.match_sql("user_id")}
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
                               WHERE lower(btrim(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id'))) = %s)
                 """,
@@ -501,7 +471,7 @@ def deidentify_purpose_cms_copy(
                     FROM jsonb_array_elements(data_point_consents) AS p
                     WHERE lower(btrim(COALESCE(p->>'data_point_id', p->>'purpose_id', p->>'id'))) IS DISTINCT FROM %s
                 )
-                WHERE fiduciary_id = %s AND {_match("user_id")}
+                WHERE fiduciary_id = %s AND {pii.match_sql("user_id")}
                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(data_point_consents) q
                               WHERE lower(btrim(COALESCE(q->>'data_point_id', q->>'purpose_id', q->>'id'))) = %s)
                 """,
@@ -536,7 +506,7 @@ class ComplianceService(Service):
         )
         # A PURGE-scope processor needs the identifier to erase the data; the
         # console sees it masked.
-        return [_principal_row(ctx, row, "user_id") for row in rows]
+        return [pii.principal_row(ctx, row, "user_id") for row in rows]
 
     def get_purge_request(self, ctx: RequestContext) -> dict:
         scope, scope_params = tenant_filter(ctx)
@@ -546,7 +516,7 @@ class ComplianceService(Service):
         )
         if not row:
             raise ApiError(404, "Not Found", "Purge request not found.")
-        return _principal_row(ctx, row, "user_id")
+        return pii.principal_row(ctx, row, "user_id")
 
     def update_purge_status(self, ctx: RequestContext) -> dict:
         status = str(require(ctx.payload.get("status"), "status")).upper()
@@ -715,7 +685,7 @@ class ComplianceService(Service):
                 # row is about to change status, and an expired hold on it
                 # passed the CW-11 check above).
                 cur.execute(
-                    f"SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND {_match('user_id')} AND id <> %s"
+                    f"SELECT 1 FROM purge_requests WHERE fiduciary_id = %s AND {pii.match_sql('user_id')} AND id <> %s"
                     " AND status = 'LEGAL_HOLD_APPLIED' AND (hold_until IS NULL OR hold_until > NOW()) LIMIT 1",
                     (fid, *pii.hmac_params(user_id), request_id),
                 )
@@ -816,7 +786,7 @@ class GrievanceService(Service):
         # GR-14: the complaint may be linked to the consent record it concerns.
         if consent_record_id:
             linked = db.one(
-                f"SELECT id FROM consent_records WHERE id = %s AND {_match('user_id')} AND fiduciary_id = %s",
+                f"SELECT id FROM consent_records WHERE id = %s AND {pii.match_sql('user_id')} AND fiduciary_id = %s",
                 (consent_record_id, *pii.hmac_params(user_id), fid),
             )
             if not linked:
@@ -840,12 +810,12 @@ class GrievanceService(Service):
                 (id, user_id_enc, user_id_hmac, fiduciary_id, type, subject, description,
                  submission_timestamp, status, communication_log, attachments, due_date,
                  reference_number, consent_record_id, language, channel)
-            VALUES (uuid_generate_v4(), {_PID_VALUES}, %s, %s, %s, %s, NOW(), 'NEW', %s, %s,
+            VALUES (uuid_generate_v4(), {pii.PID_VALUES}, %s, %s, %s, %s, NOW(), 'NEW', %s, %s,
                     NOW() + make_interval(days => %s), %s, %s, %s, %s)
             RETURNING id, reference_number
             """,
             (
-                *_pid_params(user_id),
+                *pii.pid_params(user_id),
                 fid,
                 grievance_type,
                 require(ctx.payload.get("subject"), "subject"),
@@ -896,8 +866,8 @@ class GrievanceService(Service):
             _notify_grievance_assignee(str(target["id"]), fid, gid, reference_number, grievance_type)
         db.execute(
             "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
-            f" notification_type, context) VALUES ('PRINCIPAL', {_PID_VALUES}, %s, 'GRIEVANCE_SUBMITTED', %s)",
-            (*_pid_params(user_id), fid, db.as_jsonb({"reference_number": reference_number, "language": language})),
+            f" notification_type, context) VALUES ('PRINCIPAL', {pii.PID_VALUES}, %s, 'GRIEVANCE_SUBMITTED', %s)",
+            (*pii.pid_params(user_id), fid, db.as_jsonb({"reference_number": reference_number, "language": language})),
         )
         log_event(
             user_id,
@@ -967,7 +937,7 @@ class GrievanceService(Service):
         if not row:
             raise ApiError(404, "Not Found", "Grievance not found.")
         ensure_principal_owns(ctx, row.get("user_id"), label="Grievance")
-        return _principal_row(ctx, row, "user_id")
+        return pii.principal_row(ctx, row, "user_id")
 
     def list_grievances(self, ctx: RequestContext) -> list[dict]:
         page, limit = page_limit(ctx.payload, 50)
@@ -980,7 +950,7 @@ class GrievanceService(Service):
         # Search by principal: the whole identifier through its HMAC (trimmed,
         # case kept); an encrypted column cannot be substring-matched.
         if str(ctx.payload.get("user_id") or "").strip():
-            where.append(_match("user_id"))
+            where.append(pii.match_sql("user_id"))
             params.extend(pii.hmac_params(str(ctx.payload["user_id"])))
         params.extend([limit, (page - 1) * limit])
         rows = db.all(
@@ -989,12 +959,12 @@ class GrievanceService(Service):
             " ORDER BY submission_timestamp DESC LIMIT %s OFFSET %s",
             (*db.bind_key(), *params),
         )
-        return [_principal_row(ctx, row, "user_id") for row in rows]
+        return [pii.principal_row(ctx, row, "user_id") for row in rows]
 
     def list_user_grievances(self, ctx: RequestContext) -> list[dict]:
         bind_principal_field(ctx, "user_id")
         rows = db.all(
-            f"SELECT {_GRIEVANCE_COLUMNS} FROM grievances WHERE fiduciary_id = %s AND {_match('user_id')}"
+            f"SELECT {_GRIEVANCE_COLUMNS} FROM grievances WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}"
             " ORDER BY submission_timestamp DESC",
             (
                 *db.bind_key(),
@@ -1002,7 +972,7 @@ class GrievanceService(Service):
                 *pii.hmac_params(require(ctx.payload.get("user_id"), "user_id")),
             ),
         )
-        return [_principal_row(ctx, row, "user_id") for row in rows]
+        return [pii.principal_row(ctx, row, "user_id") for row in rows]
 
     @staticmethod
     def _log_entry(ctx: RequestContext, kind: str, text: str | None, **extra) -> dict:
@@ -1010,7 +980,12 @@ class GrievanceService(Service):
         return {
             "at": datetime.now(UTC).isoformat(),
             "kind": kind,
-            "by": ctx.principal_user_id or ctx.actor_email or ("INTEGRATOR" if ctx.fiduciary_id else "SYSTEM"),
+            # A principal is recorded as PRINCIPAL, never by id: the log is JSON,
+            # outside the encrypted columns, and the grievance's own encrypted
+            # user_id already says who they are.
+            "by": "PRINCIPAL"
+            if ctx.principal_user_id
+            else ctx.actor_email or ("INTEGRATOR" if ctx.fiduciary_id else "SYSTEM"),
             "text": text,
             **extra,
         }
@@ -1185,7 +1160,7 @@ class GrievanceService(Service):
             raise ApiError(400, "Bad Request", "message must not be empty.")
         scope, scope_params = tenant_filter(ctx)
         if ctx.auth_via_principal_jwt:
-            scope += f" AND {_match('user_id')}"
+            scope += f" AND {pii.match_sql('user_id')}"
             scope_params.extend(pii.hmac_params(ctx.principal_user_id))
         entry = self._log_entry(ctx, str(ctx.payload.get("kind") or "MESSAGE").upper(), message)
         row = db.one(
@@ -1216,7 +1191,7 @@ class GrievanceService(Service):
         row = db.one(
             f"""
             UPDATE grievances SET feedback_rating = %s, feedback_comment = %s, feedback_at = NOW(), last_updated_at = NOW()
-            WHERE id = %s AND fiduciary_id = %s AND {_match("user_id")} AND status IN ('RESOLVED', 'CLOSED')
+            WHERE id = %s AND fiduciary_id = %s AND {pii.match_sql("user_id")} AND status IN ('RESOLVED', 'CLOSED')
               AND feedback_at IS NULL
             RETURNING id
             """,
@@ -1263,7 +1238,7 @@ class GrievanceService(Service):
             raise ApiError(413, "Payload Too Large", f"Attachments must be 1 to {settings.attachment_max_bytes} bytes.")
         scope, scope_params = tenant_filter(ctx)
         if ctx.auth_via_principal_jwt:
-            scope += f" AND {_match('user_id')}"
+            scope += f" AND {pii.match_sql('user_id')}"
             scope_params.extend(pii.hmac_params(ctx.principal_user_id))
         grievance = db.one(f"SELECT id, fiduciary_id FROM grievances WHERE id = %s{scope}", (gid, *scope_params))
         if not grievance:
@@ -1280,7 +1255,7 @@ class GrievanceService(Service):
             INSERT INTO grievance_attachments
                 (grievance_id, fiduciary_id, file_name, content_type, size_bytes, sha256, storage_path,
                  uploaded_by_enc, uploaded_by_hmac)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, {_PID_VALUES})
+            VALUES (%s, %s, %s, %s, %s, %s, %s, {pii.PID_VALUES})
             RETURNING id
             """,
             (
@@ -1291,7 +1266,7 @@ class GrievanceService(Service):
                 len(data),
                 digest,
                 str(path),
-                *_pid_params(uploader),
+                *pii.pid_params(uploader),
             ),
         )
         attachment = {
@@ -1314,7 +1289,7 @@ class GrievanceService(Service):
         aid = require(ctx.payload.get("attachment_id"), "attachment_id")
         scope, scope_params = tenant_filter(ctx, "a.fiduciary_id")
         if ctx.auth_via_principal_jwt:
-            scope += f" AND g.{_match('user_id')}"
+            scope += f" AND g.{pii.match_sql('user_id')}"
             scope_params.extend(pii.hmac_params(ctx.principal_user_id))
         row = db.one(
             f"""
@@ -1331,7 +1306,7 @@ class GrievanceService(Service):
             data = Path(row["storage_path"]).read_bytes()
         except OSError:
             raise ApiError(410, "Gone", "The attachment file is no longer stored.") from None
-        meta = _principal_row(ctx, {k: v for k, v in row.items() if k != "storage_path"}, "uploaded_by")
+        meta = pii.principal_row(ctx, {k: v for k, v in row.items() if k != "storage_path"}, "uploaded_by")
         return {**meta, "attachment_id": str(row["id"]), "content_base64": base64.b64encode(data).decode("ascii")}
 
 
@@ -1647,15 +1622,15 @@ class BreachService(Service):
             for user_id in user_ids:
                 cur.execute(
                     f"INSERT INTO breach_affected_principals (breach_id, user_id_enc, user_id_hmac)"
-                    f" VALUES (%s, {_PID_VALUES}) ON CONFLICT (breach_id, user_id_hmac) DO NOTHING",
-                    (breach["id"], *_pid_params(user_id)),
+                    f" VALUES (%s, {pii.PID_VALUES}) ON CONFLICT (breach_id, user_id_hmac) DO NOTHING",
+                    (breach["id"], *pii.pid_params(user_id)),
                 )
                 if cur.rowcount == 0:
                     continue
                 cur.execute(
                     "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
-                    f" notification_type, context) VALUES ('PRINCIPAL', {_PID_VALUES}, %s, %s, %s)",
-                    (*_pid_params(user_id), fid, ntype, db.as_jsonb(context)),
+                    f" notification_type, context) VALUES ('PRINCIPAL', {pii.PID_VALUES}, %s, %s, %s)",
+                    (*pii.pid_params(user_id), fid, ntype, db.as_jsonb(context)),
                 )
                 notified += 1
             cur.execute(

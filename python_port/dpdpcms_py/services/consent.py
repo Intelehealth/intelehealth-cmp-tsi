@@ -30,25 +30,14 @@ def _fid(ctx: RequestContext) -> str:
 # Principal identifiers are stored as <col>_enc (pgp ciphertext) and <col>_hmac
 # (lookup key). Every match goes through the HMAC; a read decrypts the pair
 # back to <col> and hands it through pii.principal_view (masked for operators).
-_USER_MATCH = f"user_id_hmac = {pii.HMAC_SQL}"
+_USER_MATCH = pii.match_sql("user_id")
 # SELECT list for a full consent_records row with the identifier decrypted;
 # bind *db.bind_key() ahead of the WHERE parameters.
 _CONSENT_COLUMNS = f"*, {pii.dec_sql('user_id_enc')} AS user_id"
 
 
-def _principal_row(ctx: RequestContext, row: dict, *columns: str) -> dict:
-    """Drop each column's _enc/_hmac pair and show its decrypted value as the caller may see it."""
-    out = db.to_jsonable(row)
-    for column in columns:
-        out.pop(f"{column}_enc", None)
-        out.pop(f"{column}_hmac", None)
-        if column in out:
-            out[column] = pii.principal_view(ctx, out[column])
-    return out
-
-
 def _consent_row(ctx: RequestContext, row: dict | None) -> dict | None:
-    return _principal_row(ctx, row, "user_id") if row else None
+    return pii.principal_row(ctx, row, "user_id") if row else None
 
 
 NOTIF_CONSENT_GIVEN = "CONSENT_GIVEN_NOTIFICATION"
@@ -312,7 +301,7 @@ def _notify_principal(user_id: str, fiduciary_id: str, notification_type: str) -
     db.execute(
         "INSERT INTO notifications (recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id, notification_type)"
         f" VALUES ('PRINCIPAL', {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s)",
-        (*pii.enc_params(user_id), *pii.hmac_params(user_id), fiduciary_id, notification_type),
+        (*pii.pid_params(user_id), fiduciary_id, notification_type),
     )
 
 
@@ -923,7 +912,7 @@ class ConsentService(Service):
             " FROM data_principal WHERE fiduciary_id = %s ORDER BY created_at DESC LIMIT %s",
             (*db.bind_key(), *db.bind_key(), _fid(ctx), int(ctx.payload.get("limit") or 20)),
         )
-        return [_principal_row(ctx, row, "user_id", "guardian_id") for row in rows]
+        return [pii.principal_row(ctx, row, "user_id", "guardian_id") for row in rows]
 
     def link_user(self, ctx: RequestContext) -> dict:
         reject_principal(ctx, "Linking anonymous sessions requires an application API key.")
@@ -935,7 +924,7 @@ class ConsentService(Service):
             cur.execute(
                 f"UPDATE consent_records SET user_id_enc = {pii.ENC_SQL}, user_id_hmac = {pii.HMAC_SQL},"
                 f" last_updated_at = NOW() WHERE {_USER_MATCH} AND fiduciary_id = %s",
-                (*pii.enc_params(auth), *pii.hmac_params(auth), *pii.hmac_params(anon), fid),
+                (*pii.pid_params(auth), *pii.hmac_params(anon), fid),
             )
         # SEC-05: age_category and verification_status are server-derived from
         # the guardian/consent flows (CC-05), never from this payload. The link
@@ -947,7 +936,7 @@ class ConsentService(Service):
             f"UPDATE data_principal SET user_id_enc = {pii.ENC_SQL}, user_id_hmac = {pii.HMAC_SQL}"
             f" WHERE {_USER_MATCH} AND fiduciary_id = %s"
             f" AND NOT EXISTS (SELECT 1 FROM data_principal p WHERE p.{_USER_MATCH} AND p.fiduciary_id = %s)",
-            (*pii.enc_params(auth), *pii.hmac_params(auth), *pii.hmac_params(anon), fid, *pii.hmac_params(auth), fid),
+            (*pii.pid_params(auth), *pii.hmac_params(anon), fid, *pii.hmac_params(auth), fid),
         )
         return {"success": True, "message": "User consent records linked successfully."}
 
@@ -1020,7 +1009,7 @@ class ConsentService(Service):
             db.execute(
                 "INSERT INTO consent_validations (fiduciary_id, user_id_enc, user_id_hmac, purpose_id, status)"
                 f" VALUES (%s, {pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s)",
-                (fid, *pii.enc_params(user_id), *pii.hmac_params(user_id), purpose, "VALID" if valid else "INVALID"),
+                (fid, *pii.pid_params(user_id), purpose, "VALID" if valid else "INVALID"),
             )
         # CV-07: a denied validation must notify the principal, and the denial
         # leaves an audit trail with the purpose and outcome as discrete columns

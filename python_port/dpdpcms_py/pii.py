@@ -70,3 +70,33 @@ def mask(value: str | None) -> str | None:
 def principal_view(ctx: RequestContext, raw: str | None) -> str | None:
     """Plaintext for API-key callers, principal tokens and processors; masked for console operators."""
     return raw if ctx.operator_id is None else mask(raw)
+
+
+def principal_row(ctx: RequestContext, row: dict, *columns: str) -> dict:
+    """Drop each column's _enc/_hmac pair and show its decrypted value as the caller may see it."""
+    out = db.to_jsonable(row)
+    for column in columns:
+        out.pop(f"{column}_enc", None)
+        out.pop(f"{column}_hmac", None)
+        if column in out:
+            out[column] = principal_view(ctx, out[column])
+    return out
+
+
+# Query fragments for the <col>_enc / <col>_hmac pairs db/34 stores.
+PID_VALUES = f"{ENC_SQL}, {HMAC_SQL}"
+
+
+def match_sql(column: str) -> str:
+    """`<column>_hmac = HMAC_SQL`; bind *hmac_params(value)."""
+    return f"{column}_hmac = {HMAC_SQL}"
+
+
+def assign_sql(column: str) -> str:
+    """`<column>_enc = ENC_SQL, <column>_hmac = HMAC_SQL`; bind *pid_params(value)."""
+    return f"{column}_enc = {ENC_SQL}, {column}_hmac = {HMAC_SQL}"
+
+
+def pid_params(value: str | None) -> tuple:
+    """Parameters for an ENC_SQL, HMAC_SQL pair (PID_VALUES or assign_sql)."""
+    return (*enc_params(value), *hmac_params(value))
