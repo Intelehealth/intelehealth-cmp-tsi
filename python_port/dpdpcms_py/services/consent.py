@@ -795,6 +795,10 @@ class ConsentService(Service):
             db.bind_key(),
         )
         fid = str(record["fiduciary_id"])
+        if not record.get("user_id"):
+            # No principal to derive the ledger pseudonym from: nothing can match.
+            _audited_read(ctx, [], "get_consent_audit_trail")
+            return {"consent_record_id": str(record["id"]), "purposes": []}
         chain = [
             str(r["id"])
             for r in db.all(
@@ -829,7 +833,7 @@ class ConsentService(Service):
             WHERE user_id = %s AND fiduciary_id = %s AND context_details LIKE ANY(%s)
             ORDER BY timestamp, id
             """,
-            (principal_pseudonym(record["user_id"] or ""), fid, [f"%{rid}%" for rid in chain]),
+            (principal_pseudonym(record["user_id"]), fid, [f"%{rid}%" for rid in chain]),
         )
         linked = set(chain)
         groups: dict[str, dict] = {}

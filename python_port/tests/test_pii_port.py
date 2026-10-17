@@ -2013,3 +2013,62 @@ def test_audit_trail_rejects_api_key_and_principal(tx):
     # The trail is an audit-ledger read: an OPERATOR (no audit:read) is refused it.
     response = _console(_bearer(op_email, "OPERATOR"), "get_consent_audit_trail", payload)
     assert response.status_code == 403, response.text
+
+
+@needs_db
+def test_audit_trail_read_is_logged_with_the_consent_record_id(tx):
+    import json
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        dpo, email = _reveal_operator(cur, fid, "DPO", "dee")
+    record = _grant(fid, pol, "asha")["data"]["consent_record_id"]
+    _trail(_bearer(email, "DPO"), record, fid)
+    with tx.cursor() as cur:
+        cur.execute(
+            "SELECT context_details FROM audit_logs WHERE audit_action = 'AUDIT_LOG_READ' AND fiduciary_id = %s",
+            (fid,),
+        )
+        reads = [json.loads(r["context_details"]) for r in cur.fetchall()]
+    assert [r["read"] for r in reads] == ["get_consent_audit_trail"]
+    assert reads[0]["filters"]["consent_record_id"] == record
+    assert reads[0]["rows_returned"] == 1
+
+
+@needs_db
+def test_erased_principal_record_has_an_empty_trail(tx):
+    from dpdpcms_py.services.compliance import erase_cms_copy
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    record = _grant(fid, pol, "asha")["data"]["consent_record_id"]
+    headers = _bearer(email, "DPO")
+    assert [g["purpose_id"] for g in _trail(headers, record, fid)["purposes"]] == ["care"]
+    erase_cms_copy(fid, "asha")
+    assert _trail(headers, record, fid)["purposes"] == []
+
+
+@needs_db
+def test_audit_trail_without_a_decryptable_principal_is_empty(tx, monkeypatch):
+    from dpdpcms_py import audit
+
+    with tx.cursor() as cur:
+        fid, pol = _seed_tenant(cur)
+        _, email = _reveal_operator(cur, fid, "DPO", "dee")
+    record = _grant(fid, pol, "asha")["data"]["consent_record_id"]
+    # A NULL decrypt never derives a pseudonym (pseudonym("") is a real hash).
+    from dpdpcms_py.services import consent as consent_mod
+
+    monkeypatch.setattr(
+        consent_mod.pii, "dec_sql", lambda column: "CASE WHEN %s::text IS NULL THEN NULL ELSE NULL::text END"
+    )
+    real = audit.principal_pseudonym
+
+    def pseudonym(value):
+        if not value:
+            pytest.fail("pseudonym derived for a NULL principal")
+        return real(value)
+
+    monkeypatch.setattr(audit, "principal_pseudonym", pseudonym)
+    assert _trail(_bearer(email, "DPO"), record, fid)["purposes"] == []

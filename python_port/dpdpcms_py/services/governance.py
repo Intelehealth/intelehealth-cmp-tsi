@@ -188,7 +188,17 @@ def _audited_read(ctx: RequestContext, rows: list[dict], what: str) -> list[dict
     """R6-c: reading the audit ledger is itself an audited event."""
     filters = {
         k: ctx.payload.get(k)
-        for k in ("fiduciary_id", "user_id", "audit_action", "purpose_id", "start_date", "end_date", "limit", "id")
+        for k in (
+            "fiduciary_id",
+            "user_id",
+            "audit_action",
+            "purpose_id",
+            "start_date",
+            "end_date",
+            "limit",
+            "id",
+            "consent_record_id",
+        )
         if ctx.payload.get(k) not in (None, "")
     }
     log_event(
