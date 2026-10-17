@@ -25,7 +25,7 @@ Required environment variables: `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`,
 Run the background worker as its own process (Compose exposes it as the `python_worker`
 service). It performs the P1 sweeps: notification delivery (email/SMS/push), webhook
 dispatch, time-bound purpose closure, alert/grievance escalation, the retention sweep,
-and the queued-export job runner.
+the audit-partition archive sweep (`archive_audit_partitions`), and the queued-export job runner.
 
 ```bash
 python -m dpdpcms_py.worker              # poll every WORKER_POLL_SECONDS
@@ -39,6 +39,7 @@ python -m dpdpcms_py.worker --poll 60    # override the poll interval
 | --- | --- | --- |
 | `WORKER_POLL_SECONDS` | Seconds between worker sweep cycles | `30` |
 | `WORKER_BATCH_SIZE` | Rows per sweep | `50` |
+| `AUDIT_LIVE_YEARS` | Audit partitions newer than this many years (current year included) stay live; older ones are detached into `audit_logs_y<YYYY>_archive` tables | `3` |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM` / `SMTP_STARTTLS` | Email delivery channel (unset → email skipped, never silently "sent") | unset |
 | `SMS_GATEWAY_URL` / `PUSH_GATEWAY_URL` | JSON POST gateways receiving `{"channel","recipient_id","message"}` | unset |
 | `NOTIFICATION_RETRY_LIMIT` / `WEBHOOK_RETRY_LIMIT` | Delivery retries before FAILED | `5` |

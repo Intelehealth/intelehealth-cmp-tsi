@@ -66,7 +66,8 @@ Point `POSTGRES_HOST` at your Postgres (Compose maps it to host port **5434**). 
 | `POSTGRES_HOST` | `postgresql://host:port` (JDBC-style `jdbc:postgresql://...` is still accepted) |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWD` | Database connection |
 | `JWT_SECRET` | HS256 signing key (min 32 characters) |
-| `DB_ENCRYPTION_KEY` | `pgcrypto` PII key — **do not rotate** after data exists |
+| `DB_ENCRYPTION_KEY` | `pgcrypto` PII key; also encrypts and HMAC-keys every principal identifier — **do not rotate** after data exists, and losing it loses principal identities |
+| `AUDIT_LIVE_YEARS` | Years of audit partitions kept live (current year included); older years are detached to archive tables, never deleted. Default `3` |
 | `TSI_LOOKUP_SALT` | HMAC salt for audit pseudonyms |
 | `BOOTSTRAP_TOKEN` | One-time gate for Super-Admin bootstrap (`/api/v1/bootstrap/setup`); min 32 characters |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins |
@@ -171,7 +172,7 @@ P1 additions (see the MeitY/NeGD BRD API traceability workbook, "New APIs to Bui
 
 P1 infrastructure:
 
-- **Background worker** — `python -m dpdpcms_py.worker` (see Compose `python_worker`). Runs notification delivery, webhook dispatch, time-bound purpose closure, alert/grievance escalation, the retention sweep, and queued export jobs.
+- **Background worker** — `python -m dpdpcms_py.worker` (see Compose `python_worker`). Runs notification delivery, webhook dispatch, time-bound purpose closure, alert/grievance escalation, the retention sweep, the audit-partition archive sweep, and queued export jobs.
 - **Notification delivery adapter** — delivers `notifications` rows by email (SMTP), SMS/push (gateway webhooks, SSRF-guarded); in-app delivery is the row itself. Delivery attempts are tracked in `notification_deliveries`.
 - **Webhook dispatcher** — HMAC-signed, SSRF-guarded dispatch of queued events to `webhook_configs`; tracked in `webhook_deliveries`.
 

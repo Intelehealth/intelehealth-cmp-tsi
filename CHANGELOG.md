@@ -4,6 +4,31 @@ All notable changes in this branch are documented here for reviewers and operato
 
 ## [Unreleased] — P1/P2 Python port (branch `p1_changes`)
 
+### Added (P15 — principal-identifier encryption, audit archiving, DPO reveal)
+
+Ported from the Consent-Manager reference implementation. Migrations `31`-`36`, in order:
+
+- `31_grievance_channel.sql`: `grievances.channel` (`PORTAL` default, `EMAIL`, `PHONE`, `LETTER`, `IN_PERSON`, `OTHER`); only console callers may set a non-PORTAL value.
+- `32_partition_audit_logs.sql`: `audit_logs` becomes a table partitioned by year, with a default partition so a row dated in an unplanned year never fails. The previous table is kept as `audit_logs_legacy_pre32`; its rows are not copied (ledger reset).
+- `33_audit_archive_registry.sql`: `audit_log_archive_registry`. The worker sweep `archive_audit_partitions` detaches yearly partitions older than `AUDIT_LIVE_YEARS` (default `3`: the current year and the two before) into `audit_logs_y<YYYY>_archive` tables. Nothing is deleted, and verification, search and certificates still read archived years.
+- `34_principal_pii_encryption.sql`: every principal identifier column becomes `<col>_enc` (pgcrypto, base64) plus `<col>_hmac` (HMAC-SHA256 of the trimmed value, case kept); the plaintext columns are dropped and keys are rebuilt on the HMAC columns under the same names. If rows exist and `app.enc_key` is unset the file raises before changing anything.
+- `35_evidence_ip_encryption.sql`: guardian `verification_ref_id` and `proof_metadata`, `consent_records.ip_address`, and `audit_logs.source_ip` are stored encrypted; the claimed IP in `client_metadata` is stored as `ip_address_enc`. `tsi_audit_source_ip()` decrypts audit IPs for console reads and passes pre-35 plaintext through.
+- `36_pii_reveal_permission.sql`: the `pii:reveal` permission for the DPO role.
+
+New and changed endpoints:
+
+- Admin `pii` service: `reveal_user_id` (DPO for their own fiduciary, ADMIN for any; permission `pii:reveal`; never by API key or principal token; 20 reveals per operator per rolling 60 s, then 429; the `PII_REVEALED` audit row is committed before the plaintext is returned).
+- Consent: `get_consent_audit_trail` (needs `audit:read`, logs `AUDIT_LOG_READ`), `get_parental_verification` (guardian verification details for DPOs), `list_consent_history` accepts `user_ref` for console callers, `list_principals` returns `user_ref`.
+- Grievance: `submit_grievance` accepts `channel`; the console can log a grievance received by another channel.
+
+Behaviour changes operators must know:
+
+- Console responses mask principal identifiers and return no consent IP to operators. Plaintext goes only to API-key callers on their own fiduciary, PURGE-scope processors on purge reads and `confirm_purge_status`, processor webhooks and alerts, and a principal exporting their own history.
+- Audit `details` pseudonymise principal keys (`<key>_hmac`); `audit_logs.user_id` is unchanged.
+- Principal identities now depend on `DB_ENCRYPTION_KEY`. Losing the key makes every principal unattributable, and rotating it needs re-encryption of every `_enc` column and a rebuild of every `_hmac` column (see `docs/security/KEY_MANAGEMENT.md`).
+- Env: `AUDIT_LIVE_YEARS` (default `3`, minimum `1`).
+- Console: DPO audit trail and guardian details, per-purpose revoke, and a logged reveal control on the principals page.
+
 ### Added
 
 **P1 — purpose lifecycle, alerts, delivery**

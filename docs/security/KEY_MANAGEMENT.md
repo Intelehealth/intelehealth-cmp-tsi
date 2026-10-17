@@ -4,7 +4,7 @@
 
 | Secret | Protects | Minimum | Rotatable? | Where it must live |
 | --- | --- | --- | --- | --- |
-| `DB_ENCRYPTION_KEY` | pgcrypto columns: principal and operator email and phone, MFA secrets, webhook secrets, queued OTPs. Also the default certificate signing key. | 32 chars | **No.** Every encrypted column must be re-encrypted first (see below). | A secrets manager, injected as an environment variable. Never in the image, the repo, or a backup. |
+| `DB_ENCRYPTION_KEY` | pgcrypto columns: every principal identifier (stored as `_enc` ciphertext plus an `_hmac` lookup key), guardian verification evidence, consent and audit IP addresses, principal and operator email and phone, MFA secrets, webhook secrets, queued OTPs. Also the default certificate signing key. | 32 chars | **No.** Every encrypted column must be re-encrypted first (see below). | A secrets manager, injected as an environment variable. Never in the image, the repo, or a backup. |
 | `TSI_LOOKUP_SALT` | HMAC pseudonyms of principal ids in the audit ledger | 32 chars | **No.** Rotating it orphans every ledger pseudonym. | A secrets manager, kept apart from the database and its backups |
 | `JWT_SECRET` | Operator and principal session tokens (HS256) | 32 chars | Yes. Rotating it signs everyone out. | A secrets manager |
 | `BOOTSTRAP_TOKEN` | One-time super-admin bootstrap | 32 chars | Yes. Rotate, or unset it, once the first admin exists. | A secrets manager |
@@ -29,7 +29,10 @@ The key cannot be swapped in place. The procedure is:
 
 1. Take a backup and run `restore-test.sh`.
 2. In one maintenance transaction, re-encrypt each column: `pgp_sym_encrypt(pgp_sym_decrypt(col, old), new)`.
-3. Restart with the new key and run the smoke test.
+3. Principal identifiers need one more step. Each `<col>_hmac` is `hmac(trim(value), key, 'sha256')`, so after re-encrypting each `<col>_enc` you must recompute its `<col>_hmac` from the decrypted value with the new key, in the same transaction. The keys already sit on the `_hmac` columns, so nothing else is rebuilt.
+4. Restart with the new key and run the smoke test.
+
+Principal identifiers depend on this key entirely. Since migration 34 no plaintext copy exists, so losing `DB_ENCRYPTION_KEY` loses who every consent, grievance, purge request and notification belongs to. Back it up separately from the database. Migration 34 refuses to run on a database that has rows when `app.enc_key` is unset; set it first (`ALTER DATABASE <db> SET app.enc_key = '<DB_ENCRYPTION_KEY>'`, then reconnect).
 
 Record each rotation below.
 
