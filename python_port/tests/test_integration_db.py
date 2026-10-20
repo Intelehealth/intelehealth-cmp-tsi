@@ -64,6 +64,7 @@ def tx(monkeypatch):
     if settings.db_encryption_key:
         with conn.cursor() as cur:
             cur.execute("SELECT set_config('app.enc_key', %s, false)", (settings.db_encryption_key,))
+            cur.execute("SELECT set_config('app.lookup_key', %s, false)", (settings.pii_lookup_key,))
 
     @contextlib.contextmanager
     def shared():
@@ -120,7 +121,7 @@ def _seed_tenant(cur, purposes=("care",)):
 # SQL literals for "asha" stored as db/34 stores it, for tests that write a
 # consent row inline (the tx fixture sets app.enc_key on the connection).
 _ASHA_ENC = "encode(pgp_sym_encrypt('asha', current_setting('app.enc_key')), 'base64')"
-_ASHA_HMAC = "encode(hmac('asha', current_setting('app.enc_key'), 'sha256'), 'hex')"
+_ASHA_HMAC = "encode(hmac('asha', tsi_lookup_key(), 'sha256'), 'hex')"
 
 
 def _pid(cur, value):
@@ -1818,7 +1819,7 @@ def test_maintenance_opt_in_cannot_forge_consent(tx):
                 cur.execute(sql, (fid,))
         cur.execute(
             "UPDATE consent_records SET user_id_enc = encode(pgp_sym_encrypt('erased:x', current_setting('app.enc_key')), 'base64'),"
-            " user_id_hmac = encode(hmac('erased:x', current_setting('app.enc_key'), 'sha256'), 'hex'),"
+            " user_id_hmac = encode(hmac('erased:x', tsi_lookup_key(), 'sha256'), 'hex'),"
             " ip_address_enc = encode(pgp_sym_encrypt('0.0.0.0', current_setting('app.enc_key')), 'base64')"
             " WHERE fiduciary_id = %s",
             (fid,),

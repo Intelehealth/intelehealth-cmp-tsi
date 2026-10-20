@@ -366,7 +366,7 @@ def test_params_normalise_and_append_key():
     from dpdpcms_py import pii
     from dpdpcms_py.config import settings
 
-    assert pii.hmac_params(" a ") == ("a", settings.db_encryption_key)
+    assert pii.hmac_params(" a ") == ("a", settings.pii_lookup_key)
     assert pii.enc_params(None) == (None, settings.db_encryption_key)
     assert pii.dec_sql("c") == "pgp_sym_decrypt(decode(c, 'base64'), %s)"
 
@@ -379,7 +379,7 @@ def test_python_and_sql_hmac_agree(tx):
     # Postgres trim() strips spaces only; the tab/newline value proves Python agrees.
     for value in (" x@y.z ", "\t x@y.z\n ", "ABC"):
         with tx.cursor() as cur:
-            cur.execute(f"SELECT {pii.HMAC_SQL} AS h", (value, settings.db_encryption_key))
+            cur.execute(f"SELECT {pii.HMAC_SQL} AS h", (value, settings.pii_lookup_key))
             assert cur.fetchone()["h"] == pii.hmac_hex(value)
 
 
@@ -477,7 +477,7 @@ def _enc_hmac(cur, value):
     from dpdpcms_py.config import settings
 
     key = settings.db_encryption_key
-    cur.execute(f"SELECT {pii.ENC_SQL} AS e, {pii.HMAC_SQL} AS h", (value, key, value, key))
+    cur.execute(f"SELECT {pii.ENC_SQL} AS e, {pii.HMAC_SQL} AS h", (value, key, value, settings.pii_lookup_key))
     row = cur.fetchone()
     return row["e"], row["h"]
 

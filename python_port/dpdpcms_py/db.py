@@ -45,6 +45,10 @@ def connection():
         if settings.db_encryption_key:
             with conn.cursor() as cur:
                 cur.execute("SELECT set_config('app.enc_key', %s, false)", (settings.db_encryption_key,))
+        if settings.pii_lookup_key:
+            # P16-04: the key db/37's triggers check a principal lookup HMAC with.
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.lookup_key', %s, false)", (settings.pii_lookup_key,))
         yield conn
 
 

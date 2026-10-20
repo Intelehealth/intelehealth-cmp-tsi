@@ -360,6 +360,36 @@ def _console_record(ctx: RequestContext, columns: str, keys: tuple = ()) -> dict
     return row
 
 
+# P16-01: the shortest free-text reason accepted for a withdrawal an operator
+# makes on a principal's behalf when no grievance is linked.
+OPERATOR_WITHDRAWAL_REASON_MIN = 10
+
+
+def _operator_withdrawal_basis(ctx: RequestContext, fid: str) -> dict[str, Any]:
+    """P16-01: why a console operator withdrew (or asked erasure of) a principal's consent.
+
+    s.6(4) makes withdrawal the principal's act, so an operator acting for one
+    must record the instruction: a grievance of this fiduciary (by its
+    reference number), or a written reason. Refused before anything is written.
+    """
+    reference = str(ctx.payload.get("grievance_reference") or "").strip()
+    if reference:
+        row = db.one(
+            "SELECT id FROM grievances WHERE fiduciary_id = %s AND reference_number = %s LIMIT 1", (fid, reference)
+        )
+        if not row:
+            raise ApiError(400, "Bad Request", "grievance_reference does not name a grievance of this fiduciary.")
+        return {"grievance_reference": reference, "grievance_id": str(row["id"])}
+    if len(str(ctx.payload.get("reason") or "").strip()) < OPERATOR_WITHDRAWAL_REASON_MIN:
+        raise ApiError(
+            400,
+            "Bad Request",
+            "A withdrawal made by a console operator needs a grievance_reference, or a reason of at least "
+            f"{OPERATOR_WITHDRAWAL_REASON_MIN} characters recording the principal's instruction.",
+        )
+    return {}
+
+
 def _has_proof_metadata(proof: str | None) -> bool:
     """Whether the guardian log holds caller-supplied proof, beyond the server's own verification_detail."""
     if not proof:
@@ -1428,6 +1458,7 @@ class ConsentService(Service):
         fid = _fid(ctx)
         user_id = require(ctx.payload.get("user_id"), "user_id")
         purpose_ids = _normalise_purpose_ids(ctx.payload)
+        operator_basis = _operator_withdrawal_basis(ctx, fid) if ctx.operator_id else None
         status = "ERASURE_REQUESTED" if erasure else "WITHDRAWN"
         expiry = (datetime.now(UTC) + timedelta(days=RETENTION_CESSATION_DAYS)).isoformat()
         record_id = None
@@ -1598,16 +1629,31 @@ class ConsentService(Service):
                     if hold:
                         held.append({"purpose_id": target, "legal_reference": hold["legal_reference"]})
         _notify_principal(user_id, fid, NOTIF_ERASURE_REQUESTED if erasure else NOTIF_WITHDRAWAL_ACK)
+        details: dict[str, Any] = {
+            "reason": ctx.payload.get("reason"),
+            "purpose_ids": purpose_ids,
+            "record_id": record_id,
+        }
+        if operator_basis is not None:
+            details.update(operator_basis)
         log_event(
             user_id,
             fid,
-            "APP",
+            # P16-01: a console operator's withdrawal is attributed to that
+            # operator, as a grievance the operator logs already is.
+            "DPO_CONSOLE" if ctx.operator_id else "APP",
             None,
             "ERASURE_REQUESTED" if erasure else "CONSENT_WITHDRAWN",
-            {"reason": ctx.payload.get("reason"), "purpose_ids": purpose_ids, "record_id": record_id},
+            details,
             purpose_id=purpose_ids[0] if purpose_ids and len(purpose_ids) == 1 else None,
             consent_status=status,
-            initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+            initiator=(
+                f"OPERATOR:{ctx.operator_id}"
+                if ctx.operator_id
+                else "PRINCIPAL"
+                if ctx.auth_via_principal_jwt
+                else "INTEGRATOR"
+            ),
             source_ip=ctx.source_ip,
         )
         # CW-08: push a stop signal to linked systems instead of relying on them

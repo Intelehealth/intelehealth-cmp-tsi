@@ -62,7 +62,7 @@ def test_maintenance_guard_still_allows_real_maintenance(tx):
         real_db.allow_consent_maintenance(cur)
         cur.execute(
             "UPDATE consent_records SET user_id_enc = encode(pgp_sym_encrypt('erased:x', current_setting('app.enc_key')), 'base64'),"
-            " user_id_hmac = encode(hmac('erased:x', current_setting('app.enc_key'), 'sha256'), 'hex'),"
+            " user_id_hmac = encode(hmac('erased:x', tsi_lookup_key(), 'sha256'), 'hex'),"
             " data_point_consents = %s WHERE fiduciary_id = %s",
             (real_db.as_jsonb([{"data_point_id": "research", "consent_granted": False, "status": "withdrawn"}]), fid),
         )
@@ -246,6 +246,7 @@ def test_withdrawal_reaches_only_registered_processors(tx):
 
 def test_erasure_scrubs_the_identifier_from_fiduciary_and_processor_alerts(tx):
     """P11-06: only PRINCIPAL alerts were scrubbed."""
+    from dpdpcms_py import pii
     from dpdpcms_py.services.compliance import erase_cms_copy
     from dpdpcms_py.services.lifecycle import record_alert
 
@@ -259,8 +260,9 @@ def test_erasure_scrubs_the_identifier_from_fiduciary_and_processor_alerts(tx):
     record_alert(fid, "CONSENT_WITHDRAWN", None, {"user_id": "ravi"})
     with tx.cursor() as cur:
         counts = erase_cms_copy(fid, "asha", cur=cur, pending_files=set())
-        cur.execute("SELECT payload ->> 'user_id' AS uid FROM alerts WHERE fiduciary_id = %s", (fid,))
-        uids = [r["uid"] for r in cur.fetchall()]
+        cur.execute("SELECT payload FROM alerts WHERE fiduciary_id = %s", (fid,))
+        # P16-03: payload principal ids are sealed at rest.
+        uids = [p.get("user_id") for p in pii.open_principal_keys([r["payload"] for r in cur.fetchall()])]
     assert counts["alerts"] == 2
     assert "asha" not in uids and "ravi" in uids
 

@@ -48,6 +48,7 @@
         { type: 'PURGE_EXECUTED', label: 'Deletion Requests Raised (DPO)' },
         { type: 'PURGE_OVERDUE', label: 'Deletion Overdue (DPO)' },
         { type: 'SECURITY_AUTH_FAILURE_BURST', label: 'Failed Sign-in Burst (DPO)', placeholders: ['failures', 'window_minutes'] },
+        { type: 'SECURITY_PII_REVEAL_VOLUME', label: 'Identifier Reveal Volume (DPO)', placeholders: ['operator', 'reveals', 'window_minutes'] },
         { type: 'BREACH_NOTIFICATION', label: 'Personal Data Breach', placeholders: ['title', 'description', 'likely_consequences', 'mitigation_measures', 'actionable_steps', 'contact_point', 'detected_at'] },
         { type: 'BREACH_BOARD_DEADLINE_DUE', label: 'Board Intimation Due (DPO)', placeholders: ['title', 'deadline'] },
         { type: 'BREACH_BOARD_DEADLINE_MISSED', label: 'Board Intimation Missed (DPO)', placeholders: ['title', 'deadline'] }

@@ -46,6 +46,8 @@ WINDOWED_CHAIN_CHECK_ROWS = 100_000
 ANCHORED_CHAIN_CHECK_ROWS = 1_000_000
 # The most events a certificate embeds; older ones are flagged as truncated.
 CERTIFICATE_TRAIL_LIMIT = 500
+# P16-04: the marker naming PII_LOOKUP_KEY as the key of a certificate's principal_id_hmac.
+CERTIFICATE_SUBJECT_KEY = "PII_LOOKUP_KEY"
 
 
 def _refuse_reason(chain: dict) -> str | None:
@@ -236,6 +238,11 @@ class AuditService(Service):
         # P6-12: the full-ledger walk runs in the worker; report its latest
         # verdict alongside this bounded on-demand window.
         result["last_full_verification"] = latest_chain_verification()
+        if not ctx.fiduciary_id:
+            # P16-02: the platform-wide view also reports the sealed pre-db/32 ledger.
+            from ..audit import latest_legacy_verification
+
+            result["legacy_ledger_verification"] = latest_legacy_verification()
         return result
 
     def list_recent_audit_logs(self, ctx: RequestContext) -> list[dict]:
@@ -876,6 +883,9 @@ class LegalService(Service):
             # The signed payload binds the principal by HMAC, never in plaintext;
             # the readable id lives encrypted in subject_principal_id_enc.
             "principal_id_hmac": pii.hmac_hex(principal),
+            # P16-04: which key made principal_id_hmac. Certificates without it
+            # were made under DB_ENCRYPTION_KEY, before PII_LOOKUP_KEY existed.
+            "principal_id_hmac_key": CERTIFICATE_SUBJECT_KEY,
             "case_ref_id": case_ref,
             "fiduciary_name": (fiduciary or {}).get("name") or "",
             "timestamp": generated_at.isoformat(),
@@ -1002,7 +1012,12 @@ class LegalService(Service):
         # skipped; the signature, trail hashes, order and chain still are not.
         subject_erased = str(subject or "").startswith("erased:")
         if not principal_id and data.get("principal_id_hmac") and not subject_erased:
-            if not subject or pii.hmac_hex(str(subject)) != data["principal_id_hmac"]:
+            key = (
+                settings.pii_lookup_key
+                if data.get("principal_id_hmac_key") == CERTIFICATE_SUBJECT_KEY
+                else settings.db_encryption_key
+            )
+            if not subject or pii.hmac_hex(str(subject), key) != data["principal_id_hmac"]:
                 return {
                     "valid": False,
                     "reason": "The certificate's subject no longer matches its signed principal (erased or altered).",

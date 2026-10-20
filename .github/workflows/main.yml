@@ -100,6 +100,7 @@ jobs:
       JWT_SECRET: ci-jwt-0123456789abcdef0123456789abcdef
       DB_ENCRYPTION_KEY: ci-enc-0123456789abcdef0123456789abcdef
       TSI_LOOKUP_SALT: ci-salt-0123456789abcdef0123456789abcdef
+      PII_LOOKUP_KEY: ci-lookup-0123456789abcdef0123456789abcdef
       BOOTSTRAP_TOKEN: ci-boot-0123456789abcdef0123456789abcdef
       TSI_DPDP_CMS_ENV: local
     steps:

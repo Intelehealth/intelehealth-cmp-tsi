@@ -4,7 +4,9 @@ Ported from Consent-Manager's Pii.java. Only a DPO (own fiduciary) or a global
 ADMIN holding `pii:reveal` reaches it; API keys and principal tokens never do
 (it is not in CLIENT_ALLOWED_FUNCS and the admin category refuses them). Every
 reveal is audit-logged, and committed, before the plaintext is returned, and an
-operator may reveal at most REVEAL_LIMIT values per rolling REVEAL_WINDOW.
+operator may reveal at most REVEAL_LIMIT values per rolling REVEAL_WINDOW and
+REVEAL_DAILY_LIMIT per rolling REVEAL_DAILY_WINDOW (P16-05). The security
+monitor (jobs.flag_security_anomalies) alerts the DPO on reveal volume.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ from .roles import require_permission
 REVEAL_ROLES = {"DPO", "ADMIN"}
 REVEAL_LIMIT = 20
 REVEAL_WINDOW = timedelta(seconds=60)
+# P16-05: the per-minute limit alone allowed ~28,800 reveals a day per operator.
+REVEAL_DAILY_LIMIT = 200
+REVEAL_DAILY_WINDOW = timedelta(hours=24)
 REVEAL_ACTION = "PII_REVEALED"
 REVEAL_SERVICE_TYPE = "DPO_CONSOLE"
 
@@ -128,13 +133,20 @@ class PiiService(Service):
         # plaintext leaves this method.
         with db.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(hashtext('pii_reveal'), hashtext(%s))", (initiator,))
-            since = audit._now().astimezone(UTC).replace(tzinfo=None) - REVEAL_WINDOW
+            now = audit._now().astimezone(UTC).replace(tzinfo=None)
             cur.execute(
-                "SELECT COUNT(*) AS n FROM audit_logs WHERE service_type = %s AND timestamp > %s"
-                " AND audit_action = %s AND initiator = %s",
-                (REVEAL_SERVICE_TYPE, since, REVEAL_ACTION, initiator),
+                "SELECT COUNT(*) FILTER (WHERE timestamp > %s) AS minute, COUNT(*) AS day FROM audit_logs"
+                " WHERE service_type = %s AND timestamp > %s AND audit_action = %s AND initiator = %s",
+                (now - REVEAL_WINDOW, REVEAL_SERVICE_TYPE, now - REVEAL_DAILY_WINDOW, REVEAL_ACTION, initiator),
             )
-            if cur.fetchone()["n"] >= REVEAL_LIMIT:
+            counts = cur.fetchone()
+            if counts["day"] >= REVEAL_DAILY_LIMIT:
+                raise ApiError(
+                    429,
+                    "Too Many Requests",
+                    f"Daily reveal limit reached ({REVEAL_DAILY_LIMIT} per 24 hours). Ask another DPO or an administrator.",
+                )
+            if counts["minute"] >= REVEAL_LIMIT:
                 raise ApiError(
                     429, "Too Many Requests", f"Reveal rate limit exceeded ({REVEAL_LIMIT}/min). Try again shortly."
                 )

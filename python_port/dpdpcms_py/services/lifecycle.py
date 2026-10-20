@@ -139,7 +139,8 @@ def record_alert(
                 *pii.pid_params(str(recipient_id or fiduciary_id)),
                 alert_type,
                 event_ref_id,
-                db.as_jsonb(payload or {}),
+                # P16-03: principal ids in the payload are sealed at rest.
+                db.as_jsonb(pii.seal_principal_keys(payload or {})),
             ),
         )
     except Exception as exc:

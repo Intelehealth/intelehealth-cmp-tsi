@@ -64,7 +64,7 @@ class AlertService(Service):
                 *pii.pid_params(str(recipient_id) if recipient_id else None),
                 alert_type,
                 ctx.payload.get("event_ref_id"),
-                db.as_jsonb(ctx.payload.get("payload") or {}),
+                db.as_jsonb(pii.seal_principal_keys(ctx.payload.get("payload") or {})),
                 bool(ctx.payload.get("requires_action", True)),
             ),
         )
@@ -157,8 +157,9 @@ class AlertService(Service):
             [*db.bind_key(), *db.bind_key(), *params],
         )
         out = [pii.recipient_row(ctx, row, "recipient_id", "acknowledged_by") for row in rows]
-        for alert in out:
-            # Alert payloads keep the raw id for API keys and processors; a
-            # console operator sees it masked (consent alerts carry user_id).
-            alert["payload"] = pii.payload_view(ctx, alert.get("payload"))
+        # P16-03: principal ids are sealed at rest; opened here for API keys and
+        # processors, and masked again for a console operator.
+        opened = pii.open_principal_keys([alert.get("payload") for alert in out])
+        for alert, payload in zip(out, opened, strict=True):
+            alert["payload"] = pii.payload_view(ctx, payload)
         return out

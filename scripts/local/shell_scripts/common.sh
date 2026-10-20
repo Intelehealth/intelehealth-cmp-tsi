@@ -46,6 +46,7 @@ UPGRADE_MIGRATIONS=(
   34_principal_pii_encryption.sql
   35_evidence_ip_encryption.sql
   36_pii_reveal_permission.sql
+  37_p16_remediation.sql
 )
 REQUIRED_SECRETS=(JWT_SECRET DB_ENCRYPTION_KEY TSI_LOOKUP_SALT BOOTSTRAP_TOKEN)
 CONTAINER_NAMES=(tsi_dpdp_cms_py_db tsi_dpdp_cms_py_server tsi_dpdp_cms_py_worker)

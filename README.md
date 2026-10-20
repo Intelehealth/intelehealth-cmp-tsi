@@ -66,7 +66,8 @@ Point `POSTGRES_HOST` at your Postgres (Compose maps it to host port **5434**). 
 | `POSTGRES_HOST` | `postgresql://host:port` (JDBC-style `jdbc:postgresql://...` is still accepted) |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWD` | Database connection |
 | `JWT_SECRET` | HS256 signing key (min 32 characters) |
-| `DB_ENCRYPTION_KEY` | `pgcrypto` PII key; also encrypts and HMAC-keys every principal identifier — **do not rotate** after data exists, and losing it loses principal identities |
+| `DB_ENCRYPTION_KEY` | `pgcrypto` PII key; encrypts every principal identifier — **do not rotate** after data exists, and losing it loses principal identities |
+| `PII_LOOKUP_KEY` | Key of every principal lookup HMAC, distinct from `DB_ENCRYPTION_KEY` (min 32 characters). **Required in production**; elsewhere falls back to `DB_ENCRYPTION_KEY` when unset. Setting it on existing data: `python -m dpdpcms_py.rekey_lookup` (see `docs/security/KEY_MANAGEMENT.md`) |
 | `AUDIT_LIVE_YEARS` | Years of audit partitions kept live (current year included); older years are detached to archive tables, never deleted. Default `3` |
 | `TSI_LOOKUP_SALT` | HMAC salt for audit pseudonyms |
 | `BOOTSTRAP_TOKEN` | One-time gate for Super-Admin bootstrap (`/api/v1/bootstrap/setup`); min 32 characters |
@@ -125,13 +126,14 @@ Postgres init scripts in `db/` run **once** when the data volume is first create
 | `29_p12_remediation.sql` | Board intimation asserted time and Rule 7 report fields (P12-04), tenant readers mapped in `tsi_reader_tenants` (P12-05), `consent_policies` keyed per tenant (P12-06), legacy template text taken back out of live types (P12-07), audit purpose index (LG-05) |
 | `30_p13_remediation.sql` | Tenant-reader RLS consults the security-barrier view `tsi_reader_my_tenants` (own mappings only); the role-taking helper `tsi_reader_may_see` is dropped (P13-03) |
 | `31_grievance_channel.sql` | `grievances.channel` (PORTAL, EMAIL, PHONE, LETTER, IN_PERSON, OTHER): how a grievance reached the fiduciary; a DPO logs offline ones with the real channel |
-| `32_partition_audit_logs.sql` | `audit_logs` range-partitioned by year with a DEFAULT partition; pre-production ledger reset (the old table is kept as `audit_logs_legacy_pre32`, its rows are not copied and the hash chain restarts from genesis) |
+| `32_partition_audit_logs.sql` | `audit_logs` range-partitioned by year with a DEFAULT partition; pre-production ledger reset (the old table is kept as `audit_logs_legacy_pre32` with its append-only triggers, its rows are not copied and the hash chain restarts from genesis) |
 | `33_audit_archive_registry.sql` | `audit_log_archive_registry`: yearly partitions older than `AUDIT_LIVE_YEARS` that the worker detached into `audit_logs_y<YYYY>_archive` tables (never deleted; still read by verification, search and certificates) |
 | `34_principal_pii_encryption.sql` | Every Data Principal identifier column (consent, principal, grievance, purge, validation, breach, parental, notification, delivery, correction, re-consent, nomination, alert, certificate tables) replaced by `<col>_enc` (pgcrypto) + `<col>_hmac` (lookup key); keys and indexes move to `_hmac`. Needs `app.enc_key` set when any of those tables has rows (fails before changing anything otherwise) |
 | `35_evidence_ip_encryption.sql` | Guardian evidence (`parental_verification_logs.verification_ref_id`, `.proof_metadata`) and the consent session IP (`consent_records.ip_address`) replaced by encrypted `<col>_enc`; `audit_logs.source_ip` widened to TEXT (partitions and archive tables too) so new audit rows store the client IP encrypted; `tsi_audit_source_ip()` shows it in console audit reads. Needs `app.enc_key` set when either table has rows (fails before changing anything otherwise) |
 | `36_pii_reveal_permission.sql` | Adds `pii:reveal` to the built-in DPO role, for the audited, rate-limited `reveal_user_id` (admin `pii` service). Additive |
+| `37_p16_remediation.sql` | P16-02: append-only triggers back on `audit_logs_legacy_pre32`, its row count and chain head sealed (`audit_legacy_ledger_seal`, verdicts in `audit_legacy_ledger_verifications`); P16-03: the webhook payload floor accepts sealed principal keys; P16-04: `tsi_lookup_key()` and the delivery floor check lookup HMACs with `PII_LOOKUP_KEY` |
 
-**Existing deployments** that already have a Postgres volume must apply `13`–`36` manually (each of `13`–`36` is idempotent; `01`–`12` are for an empty database only). Example:
+**Existing deployments** that already have a Postgres volume must apply `13`–`37` manually (each of `13`–`37` is idempotent; `01`–`12` are for an empty database only). Example:
 
 ```bash
 for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction.sql \
@@ -144,7 +146,8 @@ for f in db/13_breach_notification_deadline.sql db/14_nomination_data_correction
          db/29_p12_remediation.sql db/30_p13_remediation.sql \
          db/31_grievance_channel.sql db/32_partition_audit_logs.sql \
          db/33_audit_archive_registry.sql db/34_principal_pii_encryption.sql \
-         db/35_evidence_ip_encryption.sql db/36_pii_reveal_permission.sql; do
+         db/35_evidence_ip_encryption.sql db/36_pii_reveal_permission.sql \
+         db/37_p16_remediation.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```

@@ -8,6 +8,8 @@ A log satisfies only the first part of Rule 6(1)(c). The clause also asks for mo
 | --- | --- | --- |
 | Ledger tampering | `audit.record_chain_verification`: the worker walks the full chain once a day | A stored verdict in `audit_chain_verifications`; a BROKEN verdict appears on the console audit page |
 | 20 or more failed sign-ins in 60 minutes for one fiduciary | `jobs.flag_security_anomalies` | A `SECURITY_AUTH_FAILURE_BURST` alert and a DPO notice, once per window |
+| 50 or more identifier reveals (`PII_REVEALED`) by one operator in one fiduciary in 60 minutes | `jobs.flag_security_anomalies` | A `SECURITY_PII_REVEAL_VOLUME` alert naming the operator and a DPO notice, once per operator per window. `reveal_user_id` itself refuses more than 20 a minute or 200 a day per operator |
+| Tampering with the pre-db/32 ledger | `audit.verify_legacy_ledger`: weekly walk of `audit_logs_legacy_pre32` against its `db/37` seal | A verdict in `audit_legacy_ledger_verifications`; a broken one is logged as an error and shown in `verify_audit_chain` |
 | Board intimation due or missed | `jobs.flag_breach_board_deadlines` | `BREACH_BOARD_DEADLINE_DUE` / `_MISSED` alerts and DPO notices |
 | Worker stopped, or a sweep failing | `/healthz/worker` | HTTP 503 for the uptime monitor (detail only with `X-Health-Token`) |
 | Someone reading the ledger | `AUDIT_LOG_READ` events on every audit read, and in the access report | Reviewed monthly (below) |

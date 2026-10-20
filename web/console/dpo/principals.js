@@ -549,6 +549,8 @@
         const userId = await principalIdForAction("Revoking a purpose");
         if (!userId) return;
         if (!confirm(`Confirm: Revoke consent for purpose "${label}" only? Every other granted purpose on this record is unaffected.`)) return;
+        const basis = operatorBasis("revoke this purpose");
+        if (!basis) return;
 
         btn.disabled = true;
         try {
@@ -556,7 +558,7 @@
                 "_func": "withdraw_consent",
                 "user_id": userId,
                 "purpose_ids": [purposeId],
-                "reason": "DPO revoked a single purpose.",
+                ...basis,
                 "fiduciary_id": FIDUCIARY_ID
             };
             if (policyId) payload.policy_id = policyId;
@@ -573,6 +575,19 @@
             alert("Error revoking purpose.");
             btn.disabled = false;
         }
+    }
+
+    // Withdrawal is the principal's act (DPDP Act s.6(4)): an operator acting for one
+    // records the instruction - a grievance reference, or the instruction in words.
+    function operatorBasis(what) {
+        const reference = (prompt(`Grievance reference number this request comes from (leave blank if none):`) || '').trim();
+        if (reference) return { "grievance_reference": reference, "reason": `Grievance ${reference}` };
+        const reason = (prompt(`Record the Data Principal's instruction to ${what} (at least 10 characters):`) || '').trim();
+        if (reason.length < 10) {
+            if (reason) alert("The instruction must be at least 10 characters.");
+            return null;
+        }
+        return { "reason": reason };
     }
 
     // The identifier erasure and revoke must name: typed by the DPO, or (for a principal
@@ -594,17 +609,21 @@
         const userId = await principalIdForAction("Erasure");
         if (!userId) return;
         if (confirm(`Confirm: Initiate full Data Erasure/Purge workflow for Data Principal ID ${userId}?`)) {
+            const basis = operatorBasis("erase their data");
+            if (!basis) return;
             try {
-                const { response } = await postJson(API_URL_CONSENT, {
+                const { response, body } = await postJson(API_URL_CONSENT, {
                     "_func": "erasure_request",
                     "user_id": userId,
                     "language_selected": "en",
-                    "reason": "DPO initiated erasure.",
+                    ...basis,
                     "fiduciary_id": FIDUCIARY_ID
                 });
                 if (response.ok) {
                     alert("Erasure request submitted.");
                     loadConsentHistory(currentLookup, currentFiduciaryId);
+                } else {
+                    alert("Failed to submit erasure request: " + (body.message || `status ${response.status}`));
                 }
             } catch (e) { alert("Error initiating erasure."); }
         }

@@ -261,6 +261,8 @@ def verify_chain(
     fiduciary_id: str | None = None,
     since: datetime | str | None = None,
     until: datetime | str | None = None,
+    *,
+    source: str | None = None,
 ) -> dict:
     """LG-04: walk the ledger and recompute it.
 
@@ -292,11 +294,14 @@ def verify_chain(
     export examines the rows that export holds - not the newest `limit` rows of
     the ledger - and the newest row of the window must be the one its successor
     links to, or a row deleted just above the window would go unnoticed.
+
+    `source` walks another ledger table instead (P16-02: the sealed pre-db/32
+    ledger); it is a fixed name, never caller input.
     """
     cols = ", ".join(_HASHED_COLUMNS)
     # Archived years included, so a window reaching back past the live
     # partitions still verifies (and its links across the boundary are checked).
-    source = ledger_source()
+    source = source or ledger_source()
     select = f"SELECT {cols}, prev_log_hash, current_log_hash, system_metadata FROM {source} "
     bounds, bound_params = [], []
     if since is not None:
@@ -456,6 +461,76 @@ def record_chain_verification(limit: int = 5_000_000) -> dict:
         )
         raise
     return {"intact": result["intact"], "rows_checked": result["rows_checked"], "broken_count": result["broken_count"]}
+
+
+LEGACY_LEDGER = "audit_logs_legacy_pre32"
+# P16-02: how often the sealed pre-db/32 ledger is re-walked.
+LEGACY_VERIFY_INTERVAL_DAYS = 7
+
+
+def verify_legacy_ledger(limit: int = 5_000_000) -> dict:
+    """P16-02: recompute the pre-db/32 ledger db/32 set aside and compare it with its seal.
+
+    db/37 put the append-only triggers back on audit_logs_legacy_pre32 and
+    sealed its row count and chain head. The walk checks every link and every
+    v2 row hash, then that the table still holds the sealed number of rows
+    ending at the sealed head; the verdict is recorded (append-only). Runs in
+    the worker at most once per LEGACY_VERIFY_INTERVAL_DAYS; nothing to do
+    when the table was never created or has been dropped.
+    """
+    present = db.one(
+        "SELECT to_regclass(%s) IS NOT NULL AS legacy, to_regclass('public.audit_legacy_ledger_seal') IS NOT NULL AS seal",
+        (f"public.{LEGACY_LEDGER}",),
+    )
+    if not present or not present["legacy"] or not present["seal"]:
+        return {"skipped": True}
+    seal = db.one("SELECT row_count, head_hash FROM audit_legacy_ledger_seal WHERE table_name = %s", (LEGACY_LEDGER,))
+    if not seal:
+        return {"skipped": True, "reason": "no seal recorded; apply db/37_p16_remediation.sql"}
+    recent = db.one(
+        "SELECT 1 FROM audit_legacy_ledger_verifications WHERE table_name = %s"
+        " AND verified_at > NOW() - make_interval(days => %s) LIMIT 1",
+        (LEGACY_LEDGER, LEGACY_VERIFY_INTERVAL_DAYS),
+    )
+    if recent:
+        return {"skipped": True}
+    chain = verify_chain(limit, source=LEGACY_LEDGER)
+    head = db.one(f"SELECT current_log_hash FROM {LEGACY_LEDGER} ORDER BY timestamp DESC, id DESC LIMIT 1")
+    head_hash = (head or {}).get("current_log_hash")
+    result = {
+        "chain_intact": chain["intact"],
+        "broken_count": chain["broken_count"],
+        "coverage_complete": chain["coverage_complete"],
+        "rows": _count_rows(None, None, None, LEGACY_LEDGER),
+        "sealed_rows": int(seal["row_count"]),
+        "head_matches_seal": head_hash == seal["head_hash"],
+    }
+    intact = (
+        chain["intact"]
+        and chain["coverage_complete"]
+        and result["rows"] == result["sealed_rows"]
+        and result["head_matches_seal"]
+    )
+    db.execute(
+        "INSERT INTO audit_legacy_ledger_verifications (table_name, intact, rows_checked, result) VALUES (%s, %s, %s, %s)",
+        (LEGACY_LEDGER, intact, chain["rows_checked"], db.as_jsonb(result)),
+    )
+    if not intact:
+        log.error("The sealed pre-db/32 audit ledger no longer matches its seal: %s", result)
+    return {"intact": intact, **result}
+
+
+def latest_legacy_verification() -> dict | None:
+    """The newest recorded verdict on the pre-db/32 ledger, if any."""
+    try:
+        row = db.one(
+            "SELECT verified_at, intact, rows_checked, result FROM audit_legacy_ledger_verifications"
+            " WHERE table_name = %s ORDER BY verified_at DESC LIMIT 1",
+            (LEGACY_LEDGER,),
+        )
+    except psycopg.Error:
+        return None
+    return db.to_jsonable(row) if row else None
 
 
 def _store_chain_verdict(result: dict) -> None:

@@ -1,7 +1,8 @@
 """Principal-ID HMAC, encryption and masking primitives.
 
 The principal-ID HMAC trims spaces but keeps case, and the Python side must
-equal the SQL `encode(hmac(trim(v), key, 'sha256'), 'hex')` byte for byte.
+equal the SQL `encode(hmac(trim(v), key, 'sha256'), 'hex')` byte for byte. It
+is keyed by PII_LOOKUP_KEY, encryption by DB_ENCRYPTION_KEY (P16-04).
 """
 
 from __future__ import annotations
@@ -24,15 +25,17 @@ def normalize(value: str | None) -> str | None:
 
 
 def hmac_params(value: str | None) -> tuple[str | None, str]:
-    return (normalize(value), settings.db_encryption_key)
+    return (normalize(value), settings.pii_lookup_key)
 
 
 def enc_params(value: str | None) -> tuple[str | None, str]:
     return (normalize(value), settings.db_encryption_key)
 
 
-def hmac_hex(value: str) -> str:
-    return _hmac.new(settings.db_encryption_key.encode(), normalize(value).encode(), hashlib.sha256).hexdigest()
+def hmac_hex(value: str, key: str | None = None) -> str:
+    """The lookup HMAC of a value; `key` only to check one made under an older key."""
+    key = key or settings.pii_lookup_key
+    return _hmac.new(key.encode(), normalize(value).encode(), hashlib.sha256).hexdigest()
 
 
 def dec_sql(column: str) -> str:
@@ -149,6 +152,135 @@ def mask_principal_keys(value):
     return map_principal_keys(
         value, lambda key, item: (key, mask(item) if isinstance(item, str) or item is None else "***")
     )
+
+
+# P16-03: queued alert and webhook payloads hold a principal id under
+# PRINCIPAL_KEYS only as `<key>_enc` (ciphertext under DB_ENCRYPTION_KEY) and
+# `<key>_hmac` (the lookup HMAC erasure matches on); `<key>_json` marks a
+# non-string value, sealed as its canonical JSON. Opened only when read.
+SEAL_ENC = "_enc"
+SEAL_HMAC = "_hmac"
+SEAL_JSON = "_json"
+
+
+def _crypt_many(sql: str, values: list[str]) -> list[str]:
+    """Apply one pgcrypto expression over `v` to many values in a single round trip, in order."""
+    if not values:
+        return []
+    rows = db.all(
+        f"SELECT {sql} AS out FROM unnest(%s::text[]) WITH ORDINALITY AS t(v, ord) ORDER BY ord",
+        (*db.bind_key(), values),
+    )
+    return [row["out"] for row in rows]
+
+
+def seal_principal_keys(value):
+    """Copy of a JSON value for storage: every PRINCIPAL_KEYS entry encrypted and HMAC-keyed (P16-03)."""
+    plain: list[str] = []
+
+    def collect(key, item):
+        if item is not None:
+            plain.append(canonical_json(item))
+        return key, item
+
+    map_principal_keys(value, collect)
+    sealed = iter(_crypt_many("encode(pgp_sym_encrypt(v, %s), 'base64')", plain))
+
+    def walk(node):
+        if isinstance(node, dict):
+            out = {}
+            for key, item in node.items():
+                if key not in PRINCIPAL_KEYS:
+                    out[key] = walk(item)
+                elif item is None:
+                    out[key] = None
+                else:
+                    out[key + SEAL_ENC] = next(sealed)
+                    out[key + SEAL_HMAC] = hmac_hex(canonical_json(item))
+                    if not isinstance(item, str):
+                        out[key + SEAL_JSON] = True
+            return out
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(value)
+
+
+def _sealed_base(key: str) -> str | None:
+    if key.endswith(SEAL_ENC) and key[: -len(SEAL_ENC)] in PRINCIPAL_KEYS:
+        return key[: -len(SEAL_ENC)]
+    return None
+
+
+def open_principal_keys(values: list):
+    """The stored payloads `values` with every sealed principal key decrypted back to its plain key."""
+    cipher: list[str] = []
+
+    def collect(node):
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if _sealed_base(key) and isinstance(item, str):
+                    cipher.append(item)
+                else:
+                    collect(item)
+        elif isinstance(node, list):
+            for item in node:
+                collect(item)
+
+    for value in values:
+        collect(value)
+    opened = iter(_crypt_many("pgp_sym_decrypt(decode(v, 'base64'), %s)", cipher))
+
+    def walk(node):
+        if isinstance(node, dict):
+            out = {}
+            for key, item in node.items():
+                base = _sealed_base(key)
+                if base and isinstance(item, str):
+                    plain = next(opened)
+                    out[base] = json.loads(plain) if node.get(base + SEAL_JSON) else plain
+                elif key.endswith((SEAL_HMAC, SEAL_JSON)) and isinstance(
+                    node.get(key.rsplit("_", 1)[0] + SEAL_ENC), str
+                ):
+                    continue  # the companions of a sealed key
+                else:
+                    out[key] = walk(item)
+            return out
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return [walk(value) for value in values]
+
+
+def reseal_matching(value, old_hmac: str, sealed_enc: str, new_hmac: str):
+    """Copy of a sealed payload with every principal key whose HMAC is `old_hmac`
+    re-sealed as the given (ciphertext, HMAC) pair: erasure's re-key. None when nothing matched."""
+    changed = False
+
+    def walk(node):
+        nonlocal changed
+        if isinstance(node, dict):
+            out = {}
+            for key, item in node.items():
+                base = _sealed_base(key)
+                if base and node.get(base + SEAL_HMAC) == old_hmac:
+                    changed = True
+                    out[key] = sealed_enc
+                elif key.endswith(SEAL_HMAC) and item == old_hmac and _sealed_base(key[: -len(SEAL_HMAC)] + SEAL_ENC):
+                    out[key] = new_hmac
+                elif key.endswith(SEAL_JSON) and node.get(key[: -len(SEAL_JSON)] + SEAL_HMAC) == old_hmac:
+                    continue  # the erasure token is a string
+                else:
+                    out[key] = walk(item)
+            return out
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    out = walk(value)
+    return out if changed else None
 
 
 def payload_view(ctx: RequestContext, value):

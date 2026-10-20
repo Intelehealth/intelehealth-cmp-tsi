@@ -9,11 +9,13 @@
 --
 -- PRE-PRODUCTION LEDGER RESET (spec decision). The existing table is renamed
 -- to audit_logs_legacy_pre32 and its rows are NOT copied: the new ledger's
--- hash chain starts again from genesis. The legacy table keeps its rows and
--- indexes (renamed with a _legacy suffix) but loses its append-only triggers;
--- the application never reads it. An operator may export and then
---     DROP TABLE audit_logs_legacy_pre32;
--- once satisfied nothing in it is needed.
+-- hash chain starts again from genesis. The legacy table keeps its rows,
+-- indexes (renamed with a _legacy suffix) and its append-only triggers
+-- (P16-02: they were dropped here before), and db/37 seals its row count and
+-- chain head for audit.verify_legacy_ledger. Its rows are not copied because
+-- they carry raw principal ids in context_details. An operator may export it
+-- and, once the Rule 6(1)(e) year has passed, DROP TABLE audit_logs_legacy_pre32
+-- (row triggers do not block DROP); see docs/security/LOG_RETENTION.md.
 --
 -- Postgres requires the partition key in the primary key, so the PK is
 -- (id, timestamp). No foreign key or view references audit_logs.
@@ -50,8 +52,6 @@ BEGIN
         LOOP
             EXECUTE format('ALTER INDEX public.%I RENAME TO %I', idx.relname, left(idx.relname, 56) || '_legacy');
         END LOOP;
-        DROP TRIGGER IF EXISTS trg_audit_logs_no_update_delete ON audit_logs_legacy_pre32;
-        DROP TRIGGER IF EXISTS trg_audit_logs_no_truncate ON audit_logs_legacy_pre32;
     END IF;
 
     -- The exact column list of db/01 + db/02 + db/16.

@@ -23,13 +23,13 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 pg_pass="$(new_secret | cut -c1-24)"
-jwt="$(new_secret)"; enc="$(new_secret)"; salt="$(new_secret)"; boot="$(new_secret)"
+jwt="$(new_secret)"; enc="$(new_secret)"; salt="$(new_secret)"; lookup="$(new_secret)"; boot="$(new_secret)"
 sed -e "s|^POSTGRES_PASSWD=.*|POSTGRES_PASSWD=$pg_pass|" \
     -e "s|^JWT_SECRET=.*|JWT_SECRET=$jwt|" \
     -e "s|^DB_ENCRYPTION_KEY=.*|DB_ENCRYPTION_KEY=$enc|" \
-    -e "s|^TSI_LOOKUP_SALT=.*|TSI_LOOKUP_SALT=$salt|" \
+    -e "s|^TSI_LOOKUP_SALT=.*|TSI_LOOKUP_SALT=$salt|"     -e "s|^PII_LOOKUP_KEY=.*|PII_LOOKUP_KEY=$lookup|" \
     -e "s|^BOOTSTRAP_TOKEN=.*|BOOTSTRAP_TOKEN=$boot|" \
     "$REPO_ROOT/.env.example" > "$ENV_FILE"
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 ok '.env written with generated secrets.'
-warn 'Keep DB_ENCRYPTION_KEY and TSI_LOOKUP_SALT stable: changing them after data exists makes encrypted columns and pseudonyms unreadable.'
+warn 'Keep DB_ENCRYPTION_KEY, TSI_LOOKUP_SALT and PII_LOOKUP_KEY stable: changing them after data exists makes encrypted columns, pseudonyms and lookups unreadable.'

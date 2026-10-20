@@ -48,6 +48,28 @@ def _environment() -> str:
     return value
 
 
+def _pii_lookup_key(environment: str) -> str:
+    """P16-04: the key of every principal lookup HMAC, apart from DB_ENCRYPTION_KEY.
+
+    One key for both meant one leaked secret gave decryption and linkability,
+    and encryption could not be rotated without re-keying every lookup. Unset,
+    it falls back to DB_ENCRYPTION_KEY outside production; production refuses
+    to start without a distinct value (scripts/rekey_pii_lookup.py moves an
+    existing database across).
+    """
+    encryption_key = _secret("DB_ENCRYPTION_KEY")
+    if not (os.getenv("PII_LOOKUP_KEY") or "").strip():
+        if environment == "production":
+            raise RuntimeError(
+                "PII_LOOKUP_KEY must be set with TSI_DPDP_CMS_ENV=production (docs/security/KEY_MANAGEMENT.md)."
+            )
+        return encryption_key
+    value = _secret("PII_LOOKUP_KEY")
+    if value == encryption_key:
+        raise RuntimeError("PII_LOOKUP_KEY must differ from DB_ENCRYPTION_KEY.")
+    return value
+
+
 def _outbound_allowed_hosts(environment: str) -> tuple[str, ...]:
     """Rule 14 / P12-11: an unset allowlist fails closed outside local."""
     hosts = tuple(
@@ -126,6 +148,8 @@ class Settings:
     # key so nothing new needs provisioning; a deployment may set its own
     # CERTIFICATE_SIGNING_KEY (still a server secret, never a client one).
     certificate_signing_key: str = ""
+    # P16-04: keys the principal lookup HMACs (<col>_hmac); see _pii_lookup_key.
+    pii_lookup_key: str = ""
     # P5-02: IPs of reverse proxies in front of the API. X-Forwarded-For is only
     # honoured when the immediate peer is one of these, so a direct caller cannot
     # self-declare its identity and every operator behind the proxy no longer
@@ -205,6 +229,7 @@ class Settings:
             sso_jwks_url=os.getenv("SSO_JWKS_URL", ""),
             attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
             certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
+            pii_lookup_key=_pii_lookup_key(environment),
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
             notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),
             audit_live_years=max(int(os.getenv("AUDIT_LIVE_YEARS", "3")), 1),

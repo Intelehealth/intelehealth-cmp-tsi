@@ -26,6 +26,7 @@ every in-scope area below except denial of service and social engineering.
 | Business logic | `test_business_logic.py` | Caller-set consent expiry; bundled, duplicate, non-boolean, undeclared and two-purpose decisions; consent on a superseded notice; granting a closed purpose; empty withdrawal; erasure for a stranger; purge completion without evidence or by the requesting app; future detection and out-of-range Board intimation; re-consent expiry smuggling |
 | SSRF | `test_ssrf.py` | 25 internal or forbidden webhook targets: loopback, link-local metadata, RFC 1918, IPv6, IPv4-mapped, NAT64, decimal, hex and octal IPs, userinfo, DNS-to-loopback, and `file`/`gopher`/`ftp`/`dict`/`javascript` schemes |
 | Transport | `test_transport.py` | CSP and the other security headers on pages and API responses; no cookies; CORS with an untrusted origin; writes over GET; credentials in the query string; other HTTP methods; health detail; leaked internals in errors; `/docs` hidden (remote); HTTP-to-HTTPS (remote) |
+| Identifier reveal | `test_pii_reveal.py` | `reveal_user_id` by OPERATOR and AUDITOR; by a DPO on another tenant's record, naming either tenant; by API key, principal token and no credential; over GET; 21 reveals in a minute (P16-05) |
 | Brute force | `test_zz_lockout.py` | Password spray and recovery-passphrase guessing are throttled (runs last) |
 
 **Running it**

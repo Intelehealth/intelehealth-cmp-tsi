@@ -310,10 +310,12 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
         "prune_old_notification_deliveries",
         "flag_breach_board_deadlines",
         "archive_audit_partitions",
+        "seal_queued_payloads",
     ):
         monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})
     monkeypatch.setattr(worker.throttle, "prune_expired", lambda: {"pruned": 0})
     monkeypatch.setattr(worker.audit, "record_chain_verification", lambda: {"ran": "audit_chain"})
+    monkeypatch.setattr(worker.audit, "verify_legacy_ledger", lambda: {"ran": "legacy_ledger"})
     monkeypatch.setattr(worker, "retire_all_superseded_versions", lambda: {"archived": 0})
     heartbeats = []
     monkeypatch.setattr(worker, "record_heartbeat", heartbeats.append)

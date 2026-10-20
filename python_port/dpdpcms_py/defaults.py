@@ -49,6 +49,10 @@ DEFAULT_NOTIFICATION_MESSAGES = {
     "SECURITY_AUTH_FAILURE_BURST": {
         "en": "{failures} failed sign-in attempts were recorded in the last {window_minutes} minutes. Review the access log."
     },
+    # P16-05: identifier reveal volume, DPO-facing.
+    "SECURITY_PII_REVEAL_VOLUME": {
+        "en": "{operator} revealed {reveals} principal identifiers in the last {window_minutes} minutes. Review the access log."
+    },
     "PURGE_EXECUTED": {
         "en": "A retention period has ended and erasure or de-identification requests were raised for the data held under it."
     },
@@ -99,6 +103,9 @@ PLAIN_NOTIFICATION_MESSAGES = {
     },
     "GRIEVANCE_ROUTED": {"en": "A grievance has been assigned to you for action."},
     "SECURITY_AUTH_FAILURE_BURST": {"en": "A burst of failed sign-in attempts was recorded. Review the access log."},
+    "SECURITY_PII_REVEAL_VOLUME": {
+        "en": "An unusual number of principal identifiers was revealed. Review the access log."
+    },
     "BREACH_NOTIFICATION": {"en": "A personal data breach notification is available. Sign in to read what to do."},
     "BREACH_BOARD_DEADLINE_DUE": {"en": "A breach's Data Protection Board intimation is due within 12 hours."},
     "BREACH_BOARD_DEADLINE_MISSED": {"en": "A breach's 72-hour Data Protection Board intimation deadline has passed."},

@@ -341,6 +341,25 @@ def erase_cms_copy(
             (token, fiduciary_id, raw),
         )
         counts["webhook_deliveries"] = cur.rowcount
+        # P16-03: payloads queued since db/37 hold the id sealed (<key>_enc +
+        # <key>_hmac), at any depth; re-seal each match as the token.
+        old_hmac = pii.hmac_hex(raw)
+        sealed_token = None
+        for sealed_table in ("alerts", "webhook_deliveries"):
+            cur.execute(
+                f"SELECT id, payload FROM {sealed_table} WHERE fiduciary_id = %s AND strpos(payload::text, %s) > 0",
+                (fiduciary_id, old_hmac),
+            )
+            for row in cur.fetchall() or []:
+                if sealed_token is None:
+                    cur.execute(f"SELECT {pii.ENC_SQL} AS enc", pii.enc_params(token))
+                    sealed_token = (cur.fetchall()[0]["enc"], pii.hmac_hex(token))
+                resealed = pii.reseal_matching(row["payload"], old_hmac, *sealed_token)
+                if resealed is not None:
+                    cur.execute(
+                        f"UPDATE {sealed_table} SET payload = %s WHERE id = %s", (db.as_jsonb(resealed), row["id"])
+                    )
+                    counts[sealed_table] = counts.get(sealed_table, 0) + 1
 
         # PL-03: the BRD's two dispositions diverge here. ERASE removes the
         # data_principal profile entirely; DE_IDENTIFY keeps a de-identified

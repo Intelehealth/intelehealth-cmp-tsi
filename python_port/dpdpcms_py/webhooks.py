@@ -7,7 +7,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from . import db
+from . import db, pii
 from .config import settings
 from .netutil import post_json
 
@@ -30,17 +30,19 @@ def queue_webhook(
     asynchronously by the worker. Delivery failures are retried up to the
     configured limit without blocking the API call that raised the event.
     `app_id` addresses the event to one processor's own endpoint (CW-08)
-    instead of the fiduciary's.
+    instead of the fiduciary's. Principal ids in the payload are sealed at rest
+    (P16-03) and opened only by the dispatcher, immediately before the POST.
     """
     if not fiduciary_id or not event_type:
         return
     try:
+        sealed = pii.seal_principal_keys(payload)
         db.execute(
             """
             INSERT INTO webhook_deliveries (fiduciary_id, category, event_type, payload, app_id)
             VALUES (%s, %s, %s, %s, %s)
             """,
-            (str(fiduciary_id), category or DEFAULT_CATEGORY, event_type, db.as_jsonb(payload), app_id),
+            (str(fiduciary_id), category or DEFAULT_CATEGORY, event_type, db.as_jsonb(sealed), app_id),
         )
     except Exception:
         # A failed webhook queue must never break the consent action that
@@ -135,7 +137,7 @@ def _render_otp(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _send(delivery: dict[str, Any], config: dict[str, Any]) -> tuple[int | None, str | None]:
     """POST one queued delivery to one webhook config. Returns (status, error)."""
-    payload = _render_otp(delivery.get("payload") or {})
+    payload = _render_otp(pii.open_principal_keys([delivery.get("payload") or {}])[0])
     envelope = {
         "event_id": str(delivery["id"]),
         "event_type": delivery["event_type"],

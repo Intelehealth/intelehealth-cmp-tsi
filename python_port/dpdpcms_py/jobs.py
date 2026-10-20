@@ -459,6 +459,44 @@ def expire_nominations() -> dict[str, int]:
     return {"expired": expired or 0}
 
 
+# P16-03: a payload still holding a principal key in the clear (queued before
+# db/37) - a key followed by a non-null value, at any depth.
+_PLAIN_PRINCIPAL_KEY = '"(' + "|".join(sorted(pii.PRINCIPAL_KEYS)) + ')": (?!null)'
+SEAL_BATCH = 500
+
+
+def seal_queued_payloads(limit: int = SEAL_BATCH) -> dict[str, int]:
+    """P16-03: seal the principal ids of alert and webhook payloads queued before db/37.
+
+    New payloads are sealed when written; this converts older rows in place,
+    a batch per table per cycle, and is a no-op once none is left. The
+    webhook payload floor (db/37) accepts the change because the sealed value
+    decrypts to the value it replaces. A row that cannot be sealed (a
+    non-string id the floor cannot compare) is logged and counted.
+    """
+    out: dict[str, int] = {}
+    for table in ("alerts", "webhook_deliveries"):
+        rows = db.all(
+            f"SELECT id, payload FROM {table} WHERE payload::text ~ %s ORDER BY created_at LIMIT %s",
+            (_PLAIN_PRINCIPAL_KEY, limit),
+        )
+        sealed = failed = 0
+        for row in rows:
+            try:
+                db.execute(
+                    f"UPDATE {table} SET payload = %s WHERE id = %s",
+                    (db.as_jsonb(pii.seal_principal_keys(row["payload"])), row["id"]),
+                )
+                sealed += 1
+            except Exception as exc:  # noqa: BLE001 - one row must not stop the batch
+                log.error("Could not seal %s payload %s: %s", table, row["id"], type(exc).__name__)
+                failed += 1
+        out[table] = sealed
+        if failed:
+            out[f"{table}_failed"] = failed
+    return out
+
+
 def prune_old_webhook_deliveries(days: int | None = None) -> dict[str, int]:
     """SEC-13 / P5-07: retention on webhook_deliveries.
 
@@ -518,7 +556,7 @@ SECURITY_WINDOW_MINUTES = 60
 
 
 def flag_security_anomalies() -> dict[str, int]:
-    """R6-c: alert on bursts of failed authentication recorded in the ledger."""
+    """R6-c: alert on bursts of failed authentication, and on identifier reveal volume, recorded in the ledger."""
     from .services.lifecycle import record_alert
 
     bursts = db.all(
@@ -556,7 +594,46 @@ def flag_security_anomalies() -> dict[str, int]:
             {"failures": int(row["failures"]), "window_minutes": SECURITY_WINDOW_MINUTES},
         )
         raised += 1
+    raised += _flag_reveal_volume(record_alert)
     return {"alerts_raised": raised}
+
+
+# P16-05: reveals of principal identifiers (PII_REVEALED) by one operator in one
+# tenant above this many per window alert the DPO, once per window.
+REVEAL_VOLUME_THRESHOLD = 50
+REVEAL_VOLUME_WINDOW_MINUTES = 60
+
+
+def _flag_reveal_volume(record_alert) -> int:
+    from .services.pii import REVEAL_ACTION
+
+    rows = db.all(
+        """
+        SELECT a.fiduciary_id, a.initiator, COUNT(*) AS reveals
+        FROM audit_logs a JOIN fiduciaries f ON f.id = a.fiduciary_id
+        WHERE a.audit_action = %s
+          AND a.timestamp > (NOW() AT TIME ZONE 'UTC') - make_interval(mins => %s)
+        GROUP BY a.fiduciary_id, a.initiator
+        HAVING COUNT(*) >= %s
+        """,
+        (REVEAL_ACTION, REVEAL_VOLUME_WINDOW_MINUTES, REVEAL_VOLUME_THRESHOLD),
+    )
+    raised = 0
+    for row in rows:
+        fid = str(row["fiduciary_id"])
+        operator = str(row["initiator"] or "")
+        recent = db.one(
+            "SELECT 1 FROM alerts WHERE fiduciary_id = %s AND alert_type = 'SECURITY_PII_REVEAL_VOLUME'"
+            " AND event_ref_id = %s AND created_at > NOW() - make_interval(mins => %s) LIMIT 1",
+            (fid, operator, REVEAL_VOLUME_WINDOW_MINUTES),
+        )
+        if recent:
+            continue
+        context = {"operator": operator, "reveals": int(row["reveals"]), "window_minutes": REVEAL_VOLUME_WINDOW_MINUTES}
+        record_alert(fid, "SECURITY_PII_REVEAL_VOLUME", operator, context)
+        _notify("DPO", _dpo_recipient(fid), fid, "SECURITY_PII_REVEAL_VOLUME", context)
+        raised += 1
+    return raised
 
 
 # s.8(6) / Rule 7(2): the 72-hour Board intimation clock. A breach whose
