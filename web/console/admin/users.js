@@ -191,7 +191,10 @@
         });
 
         if (res.ok) { closeModals(); loadUsers(); }
-        else { alert("Failed to save."); }
+        else {
+            const body = await res.json().catch(() => ({}));
+            alert("Failed to save: " + (body.message || `Status: ${res.status}`));
+        }
     };
 
     function closeModals() {
