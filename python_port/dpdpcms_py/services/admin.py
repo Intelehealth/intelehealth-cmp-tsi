@@ -373,8 +373,14 @@ class OperatorService(Service):
                 source_ip=ctx.source_ip,
             )
             raise ApiError(401, "Unauthorized", "Invalid or expired authenticator code.")
+        # On first enrolment, sessions issued before MFA was on still carry mfa=true
+        # (login grants it to accounts without MFA), so they are revoked here.
         db.execute(
-            "UPDATE operators SET mfa_enabled = TRUE, mfa_verified_at = NOW(), last_updated_at = NOW() WHERE id = %s",
+            """
+            UPDATE operators SET mfa_enabled = TRUE, mfa_verified_at = NOW(), last_updated_at = NOW(),
+                   tokens_valid_after = CASE WHEN mfa_enabled THEN tokens_valid_after ELSE NOW() END
+            WHERE id = %s
+            """,
             (operator_id,),
         )
         log_event(

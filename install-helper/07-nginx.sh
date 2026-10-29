@@ -12,6 +12,7 @@ if [ "$TLS_MODE" = "external" ]; then
   ok "TLS_MODE=external - nginx for https://$DOMAIN is managed outside this host; nothing installed."
   cat <<EOF
   Make sure your nginx server block for $DOMAIN has, at minimum:
+    server_tokens off;
     client_max_body_size 12m;
     location ~ ^/(docs|redoc|openapi\.json)(/|\$) { return 404; }
     location / {

@@ -42,7 +42,8 @@
                     "type": "string"
                   },
                   "legal_basis": {
-                    "type": "string"
+                    "type": "string",
+                    "enum": ["consent", "legal_obligation", "vital_interest", "legitimate_use"]
                   },
                   "is_mandatory_for_service": {
                     "type": "boolean"

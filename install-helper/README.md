@@ -37,7 +37,7 @@ APP_BIND_HOST=0.0.0.0            # or this container's IP
 EXTRA_TRUSTED_PROXY_IPS=10.0.3.1 # host bridge IP your nginx connects from
 ```
 
-uvicorn listens on `APP_BIND_HOST:APP_PORT`. With `ENABLE_UFW=yes`, only `EXTRA_TRUSTED_PROXY_IPS` can reach that port, and the same IPs are trusted for `X-Forwarded-For`. Point the host nginx at `http://<container IP>:8080`. `07-nginx.sh` prints the `location` blocks it needs: the proxy headers, a 404 on `/docs` and `/openapi.json`, and, after `bootstrap-admin.sh`, a 403 on `/api/v1/bootstrap/`.
+uvicorn listens on `APP_BIND_HOST:APP_PORT`. With `ENABLE_UFW=yes`, only `EXTRA_TRUSTED_PROXY_IPS` can reach that port, and the same IPs are trusted for `X-Forwarded-For`. Point the host nginx at `http://<container IP>:8080`. `07-nginx.sh` prints the directives it needs: `server_tokens off` (so the `Server` header does not reveal the nginx version), the proxy headers, a 404 on `/docs` and `/openapi.json`, and, after `bootstrap-admin.sh`, a 403 on `/api/v1/bootstrap/`.
 
 `install.sh` runs the numbered steps in order. Each step can be re-run on its own, and re-running is safe: secrets and data are kept.
 

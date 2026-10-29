@@ -1463,6 +1463,7 @@ class ConsentService(Service):
         expiry = (datetime.now(UTC) + timedelta(days=RETENTION_CESSATION_DAYS)).isoformat()
         record_id = None
         held: list[dict] = []
+        purge_requests: list[dict] = []
         with db.connection() as conn, conn.cursor() as cur:
             # Legal-hold race: serialise with _set_purge_status for this
             # principal, so a purge being confirmed either sees the hold rows
@@ -1612,6 +1613,7 @@ class ConsentService(Service):
                              legal_reference, hold_until, app_id)
                         VALUES ({pii.ENC_SQL}, {pii.HMAC_SQL}, %s, %s, 'ErasureRequest', %s, %s, %s,
                                 CASE WHEN %s::int IS NULL THEN NULL ELSE NOW() + make_interval(days => %s::int) END, %s)
+                        RETURNING id, status, hold_until
                         """,
                         (
                             *pii.enc_params(user_id),
@@ -1626,8 +1628,26 @@ class ConsentService(Service):
                             initiator_app_id,
                         ),
                     )
+                    # The principal gets a handle on each request opened in their name.
+                    purge = cur.fetchone() or {}
+                    hold_until = purge.get("hold_until")
+                    purge_requests.append(
+                        {
+                            "purge_request_id": str(purge["id"]) if purge.get("id") is not None else None,
+                            "purpose_id": target,
+                            "status": purge.get("status"),
+                            "legal_reference": hold["legal_reference"] if hold else None,
+                            "hold_until": hold_until.isoformat() if hasattr(hold_until, "isoformat") else hold_until,
+                        }
+                    )
                     if hold:
-                        held.append({"purpose_id": target, "legal_reference": hold["legal_reference"]})
+                        held.append(
+                            {
+                                "purpose_id": target,
+                                "legal_reference": hold["legal_reference"],
+                                "hold_until": purge_requests[-1]["hold_until"],
+                            }
+                        )
         _notify_principal(user_id, fid, NOTIF_ERASURE_REQUESTED if erasure else NOTIF_WITHDRAWAL_ACK)
         details: dict[str, Any] = {
             "reason": ctx.payload.get("reason"),
@@ -1697,6 +1717,8 @@ class ConsentService(Service):
             "consent_record_ids": record_ids,
             "processors_notified": len(processors),
         }
+        if purge_requests:
+            out["purge_requests"] = purge_requests
         if held:
             out["retained_under_legal_hold"] = held
         return out
