@@ -4,6 +4,13 @@ All notable changes in this branch are documented here for reviewers and operato
 
 ## [Unreleased] — P1/P2 Python port (branch `p1_changes`)
 
+### Fixed (CMP API test run e01db1)
+
+- **TC-N-13** `create_policy` and `update_policy` accept only `consent`, `legal_obligation`, `vital_interest` or `legitimate_use` as a purpose's `legal_basis` (400 otherwise), instead of a 201 or a CHECK-violation 500.
+- **TC-39 / TC-N-19** `erasure_request` returns `purge_requests`: each request's `purge_request_id`, `purpose_id`, `status` (`PENDING` or `LEGAL_HOLD_APPLIED`), `legal_reference` and `hold_until`. `retained_under_legal_hold` entries also carry `hold_until`.
+- **MFA** The first successful `verify_mfa` on an account revokes its sessions issued before MFA was on (they carried `mfa=true` from a password-only login). Clients switch to the token `verify_mfa` returns. Later MFA sign-ins revoke nothing.
+- **TC-N-27** The external-nginx snippet printed by `install-helper/07-nginx.sh` and the install-helper README include `server_tokens off`.
+
 ### Fixed (P16 — workbook revision 17)
 
 Migration `37_p16_remediation.sql` (idempotent) and:
@@ -67,7 +74,7 @@ Behaviour changes operators must know:
 
 **Tooling**
 
-- Unit tests under `python_port/tests/` (561 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the workbook v11 findings in `test_p13_remediation.py`, the revision-17 findings in `test_p16_remediation.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
+- Unit tests under `python_port/tests/` (575 tests: P1/P2 helpers, SSRF, TOTP, roles, retention, a regression test per open defect in `test_defect_fixes.py`, BRD traceability rules in `test_brd_traceability.py`, the workbook v4 defects in `test_review_v4_fixes.py`, the workbook v5 defects in `test_review_v5_fixes.py`, the security-gap fixes in `test_security_gaps.py`, the workbook v10 findings in `test_p12_remediation.py`, the workbook v11 findings in `test_p13_remediation.py`, the revision-17 findings in `test_p16_remediation.py`, the CMP API test run e01db1 findings in `test_cmp_run_fixes.py`, the automated pen-test findings in `test_pentest_findings.py`, the bugs found re-verifying the BRD sheet in `test_brd_v5_bugs.py`, and DB-backed regressions in `test_integration_db.py` that run against a real Postgres and skip without one).
 - GitHub Actions: Ruff lint, compile/import smoke test, pytest, Docker build (see `.github/workflows/main.yml`).
 - Local deployment scripts in `scripts/local/` (preflight, init-env, deploy, migrate, bootstrap-admin, smoke-test, manage), in PowerShell (`.ps1`) and bash (`.sh`, for Linux, macOS, Git Bash and WSL), and the plan in `docs/LOCAL_DEPLOYMENT.md`.
 - `docker-compose.yml`: the exports volume and `TSI_EXPORT_PATH` are fixed at `/var/lib/tsi/exports/` inside the containers. A relative `TSI_EXPORT_PATH` in `.env` (meant for native runs) used to break `docker compose up`. The app and worker now also load `.env` via `env_file`, so optional settings (DigiLocker, SSO, attachment limit, DUMMY_OTP opt-in) reach the containers.
