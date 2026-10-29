@@ -39,7 +39,7 @@ else
     mapfile -t files < <(cd "$db_dir" && ls -1 [0-9]*.sql | LC_ALL=C sort | awk -F_ '($1 + 0) >= 13')
   fi
   step 'Backup before migrating'
-  "$HELPER_DIR/08-backups.sh" --now
+  bash "$HELPER_DIR/08-backups.sh" --now
 fi
 
 step "Applying ${#files[@]} migration(s) to $DB_NAME ($mode)"
