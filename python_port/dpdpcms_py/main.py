@@ -13,7 +13,7 @@ from . import db
 from .config import WEB_ROOT, settings
 from .context import RequestContext
 from .errors import ApiError, error_body
-from .security import api_key_valid, bearer_token, decode_token
+from .security import api_key_valid, bearer_token, decode_token, is_operator_token
 from .services import SERVICE_REGISTRY
 from .services.base import same_principal
 from .services.consent import resolve_wallet_action
@@ -398,8 +398,9 @@ def authenticate(ctx: RequestContext) -> None:
         if not token:
             raise ApiError(401, "Unauthorized", "Authentication failed.")
         # Principal and operator JWTs share a signing key, so the token type must
-        # be checked: a principal token is never an operator session.
-        if token.get("typ") == "principal" or not token.get("email"):
+        # be checked. P17-02: only typ=operator is an operator session; any other
+        # type (principal, or one added later) is refused, not just principal.
+        if not is_operator_token(token):
             raise ApiError(401, "Unauthorized", "Authentication failed.")
         # Every admin call must map to an ACTIVE operator. This also revokes the
         # tokens of deactivated accounts, and makes the database role (not the

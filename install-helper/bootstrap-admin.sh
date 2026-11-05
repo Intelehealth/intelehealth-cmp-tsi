@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Create the first Super-Admin through /api/v1/bootstrap/setup (one-time), then
-# close the bootstrap path: BOOTSTRAP_TOKEN is rotated to a value nobody keeps
+# close the bootstrap path: TSI_BOOTSTRAP_TOKEN is rotated to a value nobody keeps
 # and nginx answers 403 on /api/v1/bootstrap/.
 # Usage: sudo bash bootstrap-admin.sh <email> [name]
 # The password is prompted without echo (min 12 chars) and never written to disk.
@@ -9,15 +9,18 @@ require_root
 
 email="${1:?usage: bootstrap-admin.sh <email> [name]}"
 name="${2:-Super Admin}"
-token="$(env_get BOOTSTRAP_TOKEN)"
-[ "${#token}" -ge 32 ] || die "BOOTSTRAP_TOKEN missing from $ENV_FILE"
+# The app reads TSI_BOOTSTRAP_TOKEN, falling back to BOOTSTRAP_TOKEN on older hosts.
+token_var=TSI_BOOTSTRAP_TOKEN
+[ -n "$(env_get TSI_BOOTSTRAP_TOKEN)" ] || token_var=BOOTSTRAP_TOKEN
+token="$(env_get "$token_var")"
+[ "${#token}" -ge 32 ] || die "TSI_BOOTSTRAP_TOKEN missing from $ENV_FILE"
 
 close_bootstrap() {
   step 'Closing the bootstrap path'
-  env_set BOOTSTRAP_TOKEN "$(new_secret)"
+  env_set "$token_var" "$(new_secret)"
   systemctl restart "${SERVICES[@]}"
   wait_healthy 120 || die 'API unhealthy after restart.'
-  ok 'BOOTSTRAP_TOKEN rotated to an unrecorded value; services restarted.'
+  ok "$token_var rotated to an unrecorded value; services restarted."
   if [ "$TLS_MODE" = "external" ]; then
     warn "Add 'location ^~ /api/v1/bootstrap/ { return 403; }' to your nginx for $DOMAIN."
   elif [ -d /etc/nginx/snippets ] && local_nginx; then

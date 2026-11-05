@@ -36,7 +36,9 @@ env_set_default JWT_SECRET "$(new_secret)"
 env_set_default DB_ENCRYPTION_KEY "$(new_secret)"
 env_set_default TSI_LOOKUP_SALT "$(new_secret)"
 env_set_default PII_LOOKUP_KEY "$(new_secret)"
-env_set_default BOOTSTRAP_TOKEN "$(new_secret)"
+# First-run setup token. Hosts installed before the rename keep BOOTSTRAP_TOKEN,
+# which the app still reads when TSI_BOOTSTRAP_TOKEN is unset.
+[ -n "$(env_get BOOTSTRAP_TOKEN)" ] || env_set_default TSI_BOOTSTRAP_TOKEN "$(new_secret)"
 env_set_default HEALTHZ_TOKEN "$(new_secret)"
 # Set explicitly so it never silently follows DB_ENCRYPTION_KEY (signed
 # certificates would otherwise depend on that key forever).

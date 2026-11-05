@@ -384,7 +384,8 @@ def test_api_key_valid_rejects_expired(monkeypatch):
 
     seen = []
     monkeypatch.setattr(security.db, "one", lambda sql, params=(): seen.append(sql) or None)
-    ok, *_ = security.api_key_valid("k", "s")
+    # P17-09: a key id must be a UUID to reach the lookup at all.
+    ok, *_ = security.api_key_valid("6f1c2a4e-0b8d-4c3e-9a57-2d1e8f0b7c11", "s")
     assert ok is False
     assert any("k.expires_at IS NULL OR k.expires_at > NOW()" in sql for sql in seen)
 

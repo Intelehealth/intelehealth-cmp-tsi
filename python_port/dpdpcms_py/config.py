@@ -22,12 +22,33 @@ if load_dotenv:
     load_dotenv(PY_ROOT / ".env", override=True)
 
 
-def _secret(name: str, minimum: int = 32) -> str:
-    value = (os.getenv(name) or "").strip()
+# P17-06: fragments of the development defaults shipped in docker-compose.yml
+# and .env.example. They are public, so outside TSI_DPDP_CMS_ENV=local a secret
+# carrying one is refused: a staging or production stack started without its
+# own .env must not come up with a known JWT, encryption or bootstrap key.
+PLACEHOLDER_SECRET_MARKERS = (
+    "do-not-use-in-production",
+    "secure_dev_password",
+    "local-dev-",
+    "placeholder",
+    "changeme",
+)
+
+
+def _secret(name: str, minimum: int = 32, fallback: str | None = None) -> str:
+    raw = os.getenv(name)
+    if not (raw or "").strip() and fallback and (os.getenv(fallback) or "").strip():
+        name, raw = fallback, os.getenv(fallback)
+    value = (raw or "").strip()
     if len(value) < minimum or value.startswith("<") or "change-me" in value.lower():
         raise RuntimeError(
             f"{name} must be set to a random value of at least {minimum} characters. "
             "Copy .env.example to .env and generate secrets with: openssl rand -hex 32"
+        )
+    if _environment() != "local" and any(marker in value.lower() for marker in PLACEHOLDER_SECRET_MARKERS):
+        raise RuntimeError(
+            f"{name} is a published development default and is refused outside TSI_DPDP_CMS_ENV=local. "
+            "Generate a value with: openssl rand -hex 32"
         )
     return value
 
@@ -205,7 +226,9 @@ class Settings:
             brand_name=brand,
             environment=environment,
             export_path=Path(os.getenv("TSI_EXPORT_PATH", str(ROOT / "exports"))),
-            bootstrap_token=_secret("BOOTSTRAP_TOKEN"),
+            # P17-04: TSI_BOOTSTRAP_TOKEN gates first-run setup; BOOTSTRAP_TOKEN
+            # is still read when it is unset so existing .env files keep working.
+            bootstrap_token=_secret("TSI_BOOTSTRAP_TOKEN", fallback="BOOTSTRAP_TOKEN"),
             worker_poll_seconds=int(os.getenv("WORKER_POLL_SECONDS", "30")),
             worker_batch_size=int(os.getenv("WORKER_BATCH_SIZE", "50")),
             smtp_host=os.getenv("SMTP_HOST", ""),
@@ -228,7 +251,11 @@ class Settings:
             sso_audience=os.getenv("SSO_AUDIENCE", ""),
             sso_jwks_url=os.getenv("SSO_JWKS_URL", ""),
             attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
-            certificate_signing_key=os.getenv("CERTIFICATE_SIGNING_KEY", "") or _secret("DB_ENCRYPTION_KEY"),
+            certificate_signing_key=(
+                _secret("CERTIFICATE_SIGNING_KEY", minimum=1)
+                if (os.getenv("CERTIFICATE_SIGNING_KEY") or "").strip()
+                else _secret("DB_ENCRYPTION_KEY")
+            ),
             pii_lookup_key=_pii_lookup_key(environment),
             webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
             notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),

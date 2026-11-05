@@ -35,7 +35,7 @@ Watch first boot:
 docker compose logs -f python_app
 ```
 
-Open `/console/setup/init.html` to create the first admin (password ≥ 12 characters). You need the server `BOOTSTRAP_TOKEN` (header `X-Bootstrap-Token` or `bootstrap_token` in the body).
+Open `/console/setup/init.html` to create the first admin (password ≥ 12 characters). You need the server `TSI_BOOTSTRAP_TOKEN` (header `X-Bootstrap-Token` or `bootstrap_token` in the body).
 
 The **`python_worker`** service must be running for notification delivery, webhooks, purpose closure, escalations, retention sweeps, and queued export jobs.
 
@@ -45,7 +45,7 @@ You still need Postgres (the Compose `postgres_db` service is enough).
 
 ```bash
 cp .env.example .env
-# Set POSTGRES_PASSWD, JWT_SECRET, DB_ENCRYPTION_KEY, TSI_LOOKUP_SALT, and BOOTSTRAP_TOKEN.
+# Set POSTGRES_PASSWD, JWT_SECRET, DB_ENCRYPTION_KEY, TSI_LOOKUP_SALT, and TSI_BOOTSTRAP_TOKEN.
 # Generate secrets: openssl rand -hex 32
 
 cd python_port
@@ -70,7 +70,7 @@ Point `POSTGRES_HOST` at your Postgres (Compose maps it to host port **5434**). 
 | `PII_LOOKUP_KEY` | Key of every principal lookup HMAC, distinct from `DB_ENCRYPTION_KEY` (min 32 characters). **Required in production**; elsewhere falls back to `DB_ENCRYPTION_KEY` when unset. Setting it on existing data: `python -m dpdpcms_py.rekey_lookup` (see `docs/security/KEY_MANAGEMENT.md`) |
 | `AUDIT_LIVE_YEARS` | Years of audit partitions kept live (current year included); older years are detached to archive tables, never deleted. Default `3` |
 | `TSI_LOOKUP_SALT` | HMAC salt for audit pseudonyms |
-| `BOOTSTRAP_TOKEN` | One-time gate for Super-Admin bootstrap (`/api/v1/bootstrap/setup`); min 32 characters |
+| `TSI_BOOTSTRAP_TOKEN` | One-time gate for Super-Admin bootstrap (`/api/v1/bootstrap/setup`); min 32 characters |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins |
 | `TSI_DPDP_CMS_ENV` | One of `local`, `test`, `staging`, `production` (case-insensitive; anything else refuses to start). `local` enables `/docs`; the others hide OpenAPI and require SSL to Postgres |
 | `BRAND_NAME` | Optional UI label, max 12 characters |
@@ -91,13 +91,13 @@ export POSTGRES_PASSWD=ci-only-password-not-real-1234567890
 export JWT_SECRET=ci-only-jwt-secret-not-real-1234567890abcd
 export DB_ENCRYPTION_KEY=ci-only-enc-key-not-real-1234567890abcdef
 export TSI_LOOKUP_SALT=ci-only-salt-not-real-1234567890abcdefgh
-export BOOTSTRAP_TOKEN=ci-only-bootstrap-token-not-real-1234567890ab
+export TSI_BOOTSTRAP_TOKEN=ci-only-bootstrap-token-not-real-1234567890ab
 export TSI_DPDP_CMS_ENV=local
 ruff check python_port
 cd python_port && pytest -q
 ```
 
-GitHub Actions (workflow in `.github/workflows/main.yml`) runs on pushes and pull requests to **`p1_changes`**: Ruff lint, byte-compile, `import dpdpcms_py.main`, pytest, and a Docker image build. CI injects the same placeholder secrets as above (including `BOOTSTRAP_TOKEN`).
+GitHub Actions (workflow in `.github/workflows/main.yml`) runs on pushes and pull requests to **`p1_changes`**: Ruff lint, byte-compile, `import dpdpcms_py.main`, pytest, and a Docker image build. CI injects the same placeholder secrets as above (including `TSI_BOOTSTRAP_TOKEN`).
 
 More detail: [python_port/README.md](python_port/README.md).
 
@@ -201,7 +201,7 @@ Two client auth modes share `/api/v1/client/{service}`:
 | **Integrator API key** | `X-API-Key`, `X-API-Secret` | Bound to one fiduciary; permissions `READ` / `WRITE` / `PURGE` per function |
 | **Principal JWT** | `Authorization: Bearer …` (from `principal_login`) | Bound to one `user_id` within the fiduciary; cannot call PURGE or raise alerts; read/write paths enforce the token subject |
 
-Admin and bootstrap routes use operator JWT or `BOOTSTRAP_TOKEN` respectively. See [CHANGELOG.md](CHANGELOG.md) for the full feature list.
+Admin and bootstrap routes use operator JWT or `TSI_BOOTSTRAP_TOKEN` respectively. See [CHANGELOG.md](CHANGELOG.md) for the full feature list.
 
 ## Production deployment
 

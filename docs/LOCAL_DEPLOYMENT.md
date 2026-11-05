@@ -106,7 +106,7 @@ To run the migrations on their own: `.\scripts\local\migrate.ps1`. For a single 
 ```
 
 The script prompts for the password twice (minimum 12 characters) and posts to
-`/api/v1/bootstrap/setup` with `BOOTSTRAP_TOKEN` from `.env`. It does nothing if an admin already
+`/api/v1/bootstrap/setup` with `TSI_BOOTSTRAP_TOKEN` from `.env`. It does nothing if an admin already
 exists. After signing in, enrol MFA from the console.
 
 ## 7. Phase 4 — verify

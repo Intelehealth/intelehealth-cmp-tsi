@@ -21,6 +21,15 @@ MAX_ATTEMPTS = 5
 REQUEST_WINDOW_MINUTES = 15
 MAX_REQUESTS_PER_WINDOW = 5
 DIGITS = 6
+# P17-08: the login throttle (throttle.py, the port of LoginRateLimiter) also
+# guards the OTP endpoints. Failed verifications lock the principal after
+# MAX_SUBJECT_FAILURES (across codes, so requesting a fresh code does not reset
+# the count) and the source IP after MAX_IP_FAILURES (looser: a clinic or
+# carrier NAT can front many principals).
+THROTTLE_SUBJECT_SCOPE = "otp:subject"
+THROTTLE_IP_SCOPE = "otp:ip"
+MAX_SUBJECT_FAILURES = 10
+MAX_IP_FAILURES = 30
 
 # The rights portal's evaluation mode advertises this fixed code. It is only
 # honoured where ALLOW_DUMMY_OTP permits (local environments by default).

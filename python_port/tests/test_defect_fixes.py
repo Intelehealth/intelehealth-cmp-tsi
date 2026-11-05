@@ -118,6 +118,11 @@ def otp_store(monkeypatch):
     monkeypatch.setattr(consent.db, "connection", store.connection)
     monkeypatch.setattr(consent, "log_event", lambda *a, **k: None)
     monkeypatch.setattr("dpdpcms_py.webhooks.queue_webhook", lambda *a, **k: store.webhooks.append((a, k)))
+    # P17-08: the OTP endpoints consult the login throttle; its auth_throttles
+    # table is covered by the integration tier, so it is a no-op here.
+    monkeypatch.setattr(consent.throttle, "require_allowed", lambda scope, key: None)
+    monkeypatch.setattr(consent.throttle, "record_failure", lambda scope, key, **kw: None)
+    monkeypatch.setattr(consent.throttle, "record_success", lambda scope, key: None)
     # UD-05: the portal-session lookup is exercised against Postgres in the
     # integration tier; here the OTP store is all the fake understands.
     monkeypatch.setattr(

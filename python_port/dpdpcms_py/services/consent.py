@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .. import db, pii, principal_otp
+from .. import db, pii, principal_otp, throttle
 from ..audit import log_event
 from ..context import RequestContext
 from ..errors import ApiError
@@ -1792,6 +1792,8 @@ class PrincipalService(Service):
         """
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         user_id = pii.normalize(str(require(ctx.payload.get("user_id"), "user_id")))
+        # P17-08: a locked principal or source IP cannot mint fresh codes either.
+        self._otp_throttle_check(fid, user_id, ctx.source_ip)
         mode, template = self._otp_mode(fid)
         if mode == "DUMMY_OTP":
             if not principal_otp.dummy_allowed():
@@ -1843,13 +1845,18 @@ class PrincipalService(Service):
         fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         user_id = pii.normalize(str(require(ctx.payload.get("user_id"), "user_id")))
         supplied = str(require(ctx.payload.get("otp"), "otp")).strip()
+        # P17-08: LoginRateLimiter semantics on the OTP login, per principal and per IP.
+        self._otp_throttle_check(fid, user_id, ctx.source_ip)
         mode, _ = self._otp_mode(fid)
         if mode == "DUMMY_OTP":
             if not principal_otp.dummy_allowed() or not principal_otp.dummy_matches(supplied):
+                self._otp_throttle_failure(fid, user_id, ctx.source_ip)
                 raise ApiError(401, "Unauthorized", "Invalid OTP or account not found.")
         elif not self._consume_otp(fid, user_id, supplied):
+            self._otp_throttle_failure(fid, user_id, ctx.source_ip)
             log_event(user_id, fid, "APP", None, "PRINCIPAL_LOGIN_FAILURE", {"reason": "Invalid or expired OTP."})
             raise ApiError(401, "Unauthorized", "Invalid OTP or account not found.")
+        throttle.record_success(principal_otp.THROTTLE_SUBJECT_SCOPE, principal_otp.subject_key(fid, user_id))
         log_event(user_id, fid, "APP", None, "PRINCIPAL_LOGIN_SUCCESS", {"otp_mode": mode}, source_ip=ctx.source_ip)
         token = principal_token(fid, user_id)
         # UD-05: the rights portal builds its session from this response
@@ -1910,6 +1917,27 @@ class PrincipalService(Service):
             "policies": policies,
             "pca_qr_enabled": (fiduciary or {}).get("pca_qr_enabled") is not False,
         }
+
+    @staticmethod
+    def _otp_throttle_check(fid: str, user_id: str, source_ip: str | None) -> None:
+        """P17-08: refuse (429) while the principal or the source IP is locked out."""
+        throttle.require_allowed(principal_otp.THROTTLE_SUBJECT_SCOPE, principal_otp.subject_key(fid, user_id))
+        throttle.require_allowed(principal_otp.THROTTLE_IP_SCOPE, source_ip or "unknown")
+
+    @staticmethod
+    def _otp_throttle_failure(fid: str, user_id: str, source_ip: str | None) -> None:
+        """P17-08: count one failed OTP verification against the principal and the IP.
+
+        The IP bucket is not cleared on success: one IP succeeding for its own
+        principal must not wipe the record of it spraying codes at others."""
+        throttle.record_failure(
+            principal_otp.THROTTLE_SUBJECT_SCOPE,
+            principal_otp.subject_key(fid, user_id),
+            max_failures=principal_otp.MAX_SUBJECT_FAILURES,
+        )
+        throttle.record_failure(
+            principal_otp.THROTTLE_IP_SCOPE, source_ip or "unknown", max_failures=principal_otp.MAX_IP_FAILURES
+        )
 
     @staticmethod
     def _consume_otp(fid: str, user_id: str, supplied: str) -> bool:
