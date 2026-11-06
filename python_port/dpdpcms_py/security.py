@@ -21,6 +21,23 @@ BCRYPT_ROUNDS = 12
 BCRYPT_PREFIX = b"2a"
 
 
+OPERATOR_TOKEN_TYPE = "operator"
+# P17-02: operator tokens issued before typ=operator existed carry no typ. They
+# are honoured only when issued before this process started (they expire within
+# token_ttl_minutes); an untyped token minted after start-up is refused.
+UNTYPED_TOKEN_CUTOFF = int(datetime.now(UTC).timestamp())
+
+
+def is_operator_token(claims: dict[str, Any]) -> bool:
+    """True when decoded `claims` are an operator session token."""
+    if not claims.get("email"):
+        return False
+    typ = claims.get("typ")
+    if typ is None:
+        return int(claims.get("iat") or 0) < UNTYPED_TOKEN_CUTOFF
+    return typ == OPERATOR_TOKEN_TYPE
+
+
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt(rounds=BCRYPT_ROUNDS, prefix=BCRYPT_PREFIX)
     return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
@@ -55,6 +72,9 @@ def token(email: str, name: str, role: str, subject: str | None = None, extra: d
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.token_ttl_minutes)).timestamp()),
         "jti": str(uuid.uuid4()),
+        # P17-02: every token says what it is. The admin API accepts only
+        # typ=operator; principal_token overrides this with typ=principal.
+        "typ": OPERATOR_TOKEN_TYPE,
     }
     if extra:
         payload.update(extra)
@@ -86,18 +106,31 @@ def pseudonym(value: str | None) -> str:
     return digest[:32]
 
 
-def api_key_valid(api_key: str | None, api_secret: str | None) -> tuple[bool, str | None, set[str]]:
+def api_key_valid(api_key: str | None, api_secret: str | None) -> tuple[bool, str | None, set[str], str | None]:
     if not api_key or not api_secret:
-        return False, None, set()
+        return False, None, set(), None
+    # P17-09: key ids are UUIDs. A malformed one is a failed authentication
+    # (401), not a value Postgres rejects with a DataError.
+    try:
+        api_key = str(uuid.UUID(str(api_key).strip()))
+    except ValueError:
+        return False, None, set(), None
+    # INV-08 (SA-05): a key authenticates only while its fiduciary, and the app
+    # it is bound to, are still ACTIVE - deactivating either stops its keys.
     row = db.one(
-        "SELECT fiduciary_id, key_value, permissions FROM api_keys WHERE id = %s AND status = 'ACTIVE'",
+        "SELECT k.fiduciary_id, k.app_id, k.key_value, k.permissions FROM api_keys k"
+        " JOIN fiduciaries f ON f.id = k.fiduciary_id AND f.status = 'ACTIVE'"
+        " LEFT JOIN apps a ON a.id = k.app_id"
+        " WHERE k.id = %s AND k.status = 'ACTIVE' AND (k.expires_at IS NULL OR k.expires_at > NOW())"
+        " AND (k.app_id IS NULL OR a.status = 'ACTIVE')",
         (api_key,),
     )
     if not row or not verify_password(api_secret, row.get("key_value")):
-        return False, None, set()
+        return False, None, set(), None
     raw = row.get("permissions") or []
     if isinstance(raw, str):
         scopes = {part.strip().upper() for part in raw.strip("[]").replace('"', "").split(",") if part.strip()}
     else:
         scopes = {str(part).strip().upper() for part in raw}
-    return True, str(row["fiduciary_id"]), scopes
+    app_id = str(row["app_id"]) if row.get("app_id") else None
+    return True, str(row["fiduciary_id"]), scopes, app_id

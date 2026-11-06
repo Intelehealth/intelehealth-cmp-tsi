@@ -1,20 +1,63 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
+import json
+from datetime import UTC, datetime
 
-from .. import db
-from ..audit import get_log, list_logs, log_event
+from .. import db, pii
+from ..audit import (
+    SOURCE_IP_SQL,
+    certificate_signature,
+    get_log,
+    latest_chain_verification,
+    ledger_source,
+    list_logs,
+    log_event,
+    principal_pseudonym,
+    verify_chain,
+)
+from ..config import settings
 from ..context import RequestContext
 from ..errors import ApiError
+from ..netutil import validate_outbound_url
 from ..security import hash_password, random_secret
-from .base import Service, require
-from .catalog import resolve_fiduciary
+from .admin import authenticated_user_id
+from .base import Service, bind_principal_field, csv_safe, principal_list_filter, require, tenant_filter
+from .catalog import activate_policy_if_complete, resolve_fiduciary
 
 API_KEY_COLUMNS = (
     "ak.id AS key_id, ak.fiduciary_id, ak.app_id, ap.name AS app_name, ak.description, "
     "ak.permissions, ak.status, ak.created_at, ak.expires_at, ak.last_used_at, ak.revoked_at"
 )
+
+# P6-12: certificate verification used to pull up to 2,000,000 unfiltered audit
+# rows into the API process for every Verify Integrity press. The trail is now
+# re-derived from the certificate's own hashes, and the global chain check is
+# bounded to this window (the most recent rows, where tampering is attempted and
+# noticed). Sized to be a cheap in-process scan, not a whole-ledger dump.
+WINDOWED_CHAIN_CHECK_ROWS = 100_000
+# P7-02: certificate paths anchor the walk on the certificate's own oldest trail
+# entry and must examine every row from there to the head. This is the ceiling
+# on that anchored walk; beyond it the certificate is refused as unverifiable
+# (never certified on a partial window). The full ledger is walked off the
+# request path by the worker (audit.record_chain_verification).
+ANCHORED_CHAIN_CHECK_ROWS = 1_000_000
+# The most events a certificate embeds; older ones are flagged as truncated.
+CERTIFICATE_TRAIL_LIMIT = 500
+# P16-04: the marker naming PII_LOOKUP_KEY as the key of a certificate's principal_id_hmac.
+CERTIFICATE_SUBJECT_KEY = "PII_LOOKUP_KEY"
+
+
+def _refuse_reason(chain: dict) -> str | None:
+    """P7-02 / P8-04: why a chain result cannot back a certificate, if it cannot."""
+    if chain.get("unexamined_tenant") or not chain.get("coverage_complete"):
+        return (
+            f"The audit chain walk examined {chain.get('rows_checked', 0)} of "
+            f"{chain.get('rows_in_scope_total', 0)} rows in scope; a certificate cannot rest on an unexamined or partially examined chain."
+        )
+    return None
 
 
 def api_key_id(payload: dict) -> str:
@@ -28,6 +71,19 @@ class ApiKeyService(Service):
         fiduciary_id = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
         app_id = ctx.payload.get("app_id") or None
         permissions = ctx.payload.get("permissions") or ["READ"]
+        if app_id:
+            # Rule 6(1)(f): no processor is onboarded without a recorded data
+            # processing agreement - a key for an app is issued only once the
+            # app carries its DPA reference.
+            app = db.one("SELECT dpa_reference FROM apps WHERE id = %s AND fiduciary_id = %s", (app_id, fiduciary_id))
+            if not app:
+                raise ApiError(404, "Not Found", "App not found for this fiduciary.")
+            if not str(app.get("dpa_reference") or "").strip():
+                raise ApiError(
+                    400,
+                    "Bad Request",
+                    "This app has no dpa_reference; record its data processing agreement before issuing a key.",
+                )
         row = db.insert_returning(
             """
             INSERT INTO api_keys
@@ -79,46 +135,178 @@ class ApiKeyService(Service):
         return db.to_jsonable(db.all(sql, tuple(params)))
 
     def revoke_api_key(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE api_keys SET status = 'REVOKED', revoked_at = NOW() WHERE id = %s", (api_key_id(ctx.payload),)
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"UPDATE api_keys SET status = 'REVOKED', revoked_at = NOW() WHERE id = %s{scope}",
+            (api_key_id(ctx.payload), *scope_params),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "API key not found.")
         return {"success": True, "message": "API Key revoked successfully."}
 
     def get_api_key_details(self, ctx: RequestContext) -> dict:
+        scope, scope_params = tenant_filter(ctx, "ak.fiduciary_id")
         row = db.one(
-            f"SELECT {API_KEY_COLUMNS} FROM api_keys ak LEFT JOIN apps ap ON ak.app_id = ap.id WHERE ak.id = %s",
-            (api_key_id(ctx.payload),),
+            f"SELECT {API_KEY_COLUMNS} FROM api_keys ak LEFT JOIN apps ap ON ak.app_id = ap.id WHERE ak.id = %s{scope}",
+            (api_key_id(ctx.payload), *scope_params),
         )
         if not row:
             raise ApiError(404, "Not Found", "API key not found.")
         return db.to_jsonable(row)
 
     def update_api_key_status(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE api_keys SET status = %s WHERE id = %s",
-            (require(ctx.payload.get("status"), "status"), api_key_id(ctx.payload)),
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"UPDATE api_keys SET status = %s WHERE id = %s{scope}",
+            (require(ctx.payload.get("status"), "status"), api_key_id(ctx.payload), *scope_params),
         )
+        if updated == 0:
+            raise ApiError(404, "Not Found", "API key not found.")
         return {"success": True}
+
+
+# SA-07: audit actions that make up the access and role-modification report.
+ACCESS_REPORT_ACTIONS = {
+    "LOGIN_SUCCESS",
+    "LOGIN_FAILURE",
+    "USER_CREATED",
+    "USER_UPDATED",
+    "USER_DEACTIVATED",
+    "ROLE_CREATED",
+    "ROLE_PERMISSIONS_UPDATED",
+    "ROLE_DELETED",
+    "MFA_ENROLL_STARTED",
+    "MFA_ENABLED",
+    "MFA_VERIFY_FAILED",
+    # R6-c: Data Principal sign-ins to the rights portal, and who read the
+    # audit ledger itself.
+    "PRINCIPAL_LOGIN_SUCCESS",
+    "PRINCIPAL_LOGIN_FAILURE",
+    "AUDIT_LOG_READ",
+}
+
+
+def _audited_read(ctx: RequestContext, rows: list[dict], what: str) -> list[dict]:
+    """R6-c: reading the audit ledger is itself an audited event."""
+    filters = {
+        k: ctx.payload.get(k)
+        for k in (
+            "fiduciary_id",
+            "user_id",
+            "audit_action",
+            "purpose_id",
+            "start_date",
+            "end_date",
+            "limit",
+            "id",
+            "consent_record_id",
+        )
+        if ctx.payload.get(k) not in (None, "")
+    }
+    log_event(
+        authenticated_user_id(ctx) or ctx.actor_email or "OPERATOR",
+        ctx.fiduciary_id or ctx.payload.get("fiduciary_id"),
+        "ADMIN_CONSOLE",
+        None,
+        "AUDIT_LOG_READ",
+        {"read": what, "filters": filters, "rows_returned": len(rows)},
+        source_ip=ctx.source_ip,
+    )
+    return rows
 
 
 class AuditService(Service):
     def list_audit_logs(self, ctx: RequestContext) -> list[dict]:
-        return list_logs(ctx.payload)
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        return _audited_read(ctx, list_logs(ctx.payload), "list_audit_logs")
+
+    def verify_audit_chain(self, ctx: RequestContext) -> dict:
+        """LG-04: recompute the hash-chained ledger and report any break.
+
+        SEC-10: a tenant-scoped DPO or auditor may verify its own tenant's
+        rows (fiduciary_id is passed as a scope), while a global operator keeps
+        the platform-wide view. Neither learns other tenants' row ids. The walk
+        is newest-first so recent tampering cannot hide outside the limit.
+        """
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        limit = min(max(int(ctx.payload.get("limit") or 100_000), 1), 1_000_000)
+        result = verify_chain(limit, fiduciary_id=ctx.fiduciary_id)
+        # P6-12: the full-ledger walk runs in the worker; report its latest
+        # verdict alongside this bounded on-demand window.
+        result["last_full_verification"] = latest_chain_verification()
+        if not ctx.fiduciary_id:
+            # P16-02: the platform-wide view also reports the sealed pre-db/32 ledger.
+            from ..audit import latest_legacy_verification
+
+            result["legacy_ledger_verification"] = latest_legacy_verification()
+        return result
 
     def list_recent_audit_logs(self, ctx: RequestContext) -> list[dict]:
-        return list_logs(ctx.payload)
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        return _audited_read(ctx, list_logs(ctx.payload), "list_recent_audit_logs")
 
     def list_access_logs(self, ctx: RequestContext) -> list[dict]:
-        return list_logs(ctx.payload)
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        return _audited_read(ctx, list_logs(ctx.payload), "list_access_logs")
 
     def get_audit_log(self, ctx: RequestContext) -> dict:
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
         row = get_log(require(ctx.payload.get("id"), "id"))
-        if not row:
+        if not row or (ctx.fiduciary_id and str(row.get("fiduciary_id")) != ctx.fiduciary_id):
             raise ApiError(404, "Not Found", "Audit log not found.")
+        _audited_read(ctx, [row], "get_audit_log")
         return row
 
     def get_audit_log_entry(self, ctx: RequestContext) -> dict:
         return self.get_audit_log(ctx)
+
+    def list_access_report(self, ctx: RequestContext) -> dict:
+        """SA-07: who signed in (or failed to), and every change to accounts,
+        roles and MFA, for a date range. Tenant-scoped like every audit read."""
+        from .roles import require_audit_access
+
+        require_audit_access(ctx)
+        where = ["audit_action = ANY(%s)"]
+        params: list = [*db.bind_key(), sorted(ACCESS_REPORT_ACTIONS)]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
+        elif ctx.payload.get("fiduciary_id"):
+            where.append("fiduciary_id = %s")
+            params.append(ctx.payload["fiduciary_id"])
+        if ctx.payload.get("start_date"):
+            where.append("timestamp >= %s::timestamp")
+            params.append(ctx.payload["start_date"])
+        if ctx.payload.get("end_date"):
+            where.append("timestamp <= %s::timestamp")
+            params.append(ctx.payload["end_date"])
+        params.append(min(int(ctx.payload.get("limit") or 500), 5000))
+        rows = db.to_jsonable(
+            db.all(
+                f"""
+                SELECT id, timestamp, fiduciary_id, user_id, service_type, service_id, audit_action,
+                       context_details, {SOURCE_IP_SQL} AS source_ip
+                FROM {ledger_source()} WHERE {" AND ".join(where)}
+                ORDER BY timestamp DESC LIMIT %s
+                """,
+                params,
+            )
+        )
+        summary: dict[str, int] = {}
+        for row in rows:
+            summary[row["audit_action"]] = summary.get(row["audit_action"], 0) + 1
+        _audited_read(ctx, rows, "list_access_report")
+        return {"success": True, "summary": summary, "events": rows}
 
     def log_event(self, ctx: RequestContext) -> dict:
         log_event(
@@ -128,31 +316,96 @@ class AuditService(Service):
             ctx.payload.get("service_id"),
             require(ctx.payload.get("audit_action"), "audit_action"),
             ctx.payload.get("context_details"),
+            purpose_id=ctx.payload.get("purpose_id"),
+            consent_status=ctx.payload.get("consent_status"),
+            initiator=ctx.payload.get("initiator"),
+            source_ip=ctx.source_ip,
         )
         return {"success": True}
 
 
 class NotificationService(Service):
     def list_notifications(self, ctx: RequestContext) -> list[dict]:
-        recipient = ctx.payload.get("recipient_id") or ctx.payload.get("user_id")
+        bind_principal_field(ctx, "user_id")
+        recipient = principal_list_filter(ctx, "recipient_id") or ctx.payload.get("user_id")
         where = ["fiduciary_id = %s"]
         params = [require(resolve_fiduciary(ctx), "fiduciary_id")]
+        if ctx.auth_via_principal_jwt:
+            where.append("recipient_type = %s")
+            params.append("PRINCIPAL")
         if recipient:
-            where.append("recipient_id = %s")
-            params.append(recipient)
+            where.append(pii.match_sql("recipient_id"))
+            params.extend(pii.hmac_params(recipient))
         params.append(int(ctx.payload.get("limit") or 50))
-        return db.to_jsonable(
-            db.all(f"SELECT * FROM notifications WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s", params)
+        rows = db.all(
+            f"SELECT *, {pii.dec_sql('recipient_id_enc')} AS recipient_id FROM notifications"
+            f" WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s",
+            [*db.bind_key(), *params],
         )
+        return [pii.recipient_row(ctx, row, "recipient_id") for row in rows]
 
     def mark_notification_read(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE notifications SET read_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("notification_id"), "notification_id"),),
-        )
+        # NT-05: the schema and the documented sample name the field `id`; older
+        # callers send `notification_id`. Accept either.
+        nid = require(ctx.payload.get("notification_id") or ctx.payload.get("id"), "notification_id")
+        where = ["id = %s"]
+        params: list = [nid]
+        if ctx.fiduciary_id:
+            where.append("fiduciary_id = %s")
+            params.append(ctx.fiduciary_id)
+        if ctx.auth_via_principal_jwt:
+            where.append("recipient_type = %s")
+            params.append("PRINCIPAL")
+            where.append(pii.match_sql("recipient_id"))
+            params.extend(pii.hmac_params(require(ctx.principal_user_id, "principal")))
+        read = db.execute(f"UPDATE notifications SET read_at = NOW() WHERE {' AND '.join(where)}", params)
+        if read:
+            row = db.one(
+                f"SELECT {pii.dec_sql('recipient_id_enc')} AS recipient_id, fiduciary_id FROM notifications WHERE id = %s",
+                (*db.bind_key(), nid),
+            )
+            if row:
+                log_event(
+                    row.get("recipient_id") or ctx.actor_email or "PRINCIPAL",
+                    row["fiduciary_id"],
+                    "APP",
+                    # P9-03: the resolved id, never payload['notification_id'],
+                    # which is absent when the caller uses the schema's 'id'.
+                    str(nid),
+                    "NOTIFICATION_ACKNOWLEDGED",
+                    {"notification_id": str(nid)},
+                    initiator="PRINCIPAL" if ctx.auth_via_principal_jwt else "INTEGRATOR",
+                    source_ip=ctx.source_ip,
+                )
         return {"success": True}
 
     def set_notification_message(self, ctx: RequestContext) -> dict:
+        # NT-02: a template saved under a name the delivery engine never looks
+        # up is a localisation that silently never reaches anyone. Only the
+        # types the services write (and DPO-defined breach categories) are
+        # accepted. NT-03: messages are keyed by English or an Eighth Schedule
+        # language code.
+        from ..defaults import DEFAULT_NOTIFICATION_MESSAGES, NOTIFICATION_LANGUAGES
+
+        ntype = str(require(ctx.payload.get("notification_type"), "notification_type")).strip().upper()
+        if ntype not in DEFAULT_NOTIFICATION_MESSAGES and not ntype.startswith("BREACH_NOTIFICATION"):
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"Unknown notification_type '{ntype}'. Use one of {sorted(DEFAULT_NOTIFICATION_MESSAGES)} "
+                "or a BREACH_NOTIFICATION_* category.",
+            )
+        messages = require(ctx.payload.get("messages"), "messages")
+        if not isinstance(messages, dict):
+            raise ApiError(400, "Bad Request", "messages must be an object keyed by language code.")
+        unknown = sorted(str(k) for k in messages if str(k) not in NOTIFICATION_LANGUAGES)
+        if unknown:
+            raise ApiError(
+                400,
+                "Bad Request",
+                f"Unsupported language code(s) {unknown}; use en or an Eighth Schedule language code.",
+            )
+        ctx.payload["notification_type"] = ntype
         db.execute(
             """
             INSERT INTO notification_message_templates (fiduciary_id, notification_type, messages, last_updated_at)
@@ -169,31 +422,116 @@ class NotificationService(Service):
         return {"success": True}
 
     def get_notification_messages(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(
+        fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
+        rows = db.to_jsonable(
             db.all(
                 "SELECT notification_type, messages, last_updated_at FROM notification_message_templates WHERE fiduciary_id = %s ORDER BY notification_type",
-                (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
+                (fid,),
             )
         )
+        # P12-07: legacy text db/27 archived (and no longer merges) is shown
+        # beside the live type it maps to, so the DPO can re-home it by hand.
+        archived: dict[str, list[dict]] = {}
+        for row in db.to_jsonable(
+            db.all(
+                "SELECT notification_type, messages, migrated_to, archived_at FROM notification_message_templates_archive"
+                " WHERE fiduciary_id = %s AND migrated_to IS NOT NULL ORDER BY notification_type",
+                (fid,),
+            )
+        ):
+            archived.setdefault(str(row.pop("migrated_to")), []).append(row)
+        for row in rows:
+            row["archived_legacy"] = archived.pop(str(row["notification_type"]), [])
+        rows.extend(
+            {"notification_type": ntype, "messages": {}, "last_updated_at": None, "archived_legacy": legacy}
+            for ntype, legacy in sorted(archived.items())
+        )
+        return rows
 
     def set_webhook_config(self, ctx: RequestContext) -> dict:
+        webhook_url = require(ctx.payload.get("webhook_url"), "webhook_url")
+        # SSRF guard at save time: the URL must be http(s) and resolve to a
+        # public address. It is re-validated at dispatch time before every POST.
+        try:
+            validate_outbound_url(webhook_url, "webhook_url")
+        except ValueError as exc:
+            raise ApiError(400, "Bad Request", str(exc)) from None
         db.execute(
             f"""
             INSERT INTO webhook_configs (fiduciary_id, category, webhook_url, secret_enc, enabled, last_updated_at)
             VALUES (%s, %s, %s, {db.enc_expr()}, %s, NOW())
             ON CONFLICT (fiduciary_id, category) DO UPDATE SET
-                webhook_url = EXCLUDED.webhook_url, secret_enc = EXCLUDED.secret_enc,
+                webhook_url = EXCLUDED.webhook_url, secret_enc = CASE WHEN %s THEN EXCLUDED.secret_enc ELSE webhook_configs.secret_enc END,
                 enabled = EXCLUDED.enabled, last_updated_at = NOW()
             """,
             (
                 require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),
                 require(ctx.payload.get("category"), "category"),
-                require(ctx.payload.get("webhook_url"), "webhook_url"),
+                webhook_url,
                 *db.bind_encrypt(ctx.payload.get("secret", "")),
                 bool(ctx.payload.get("enabled", True)),
+                # A blank secret on an edit keeps the stored one (the console says so).
+                bool(ctx.payload.get("secret")),
             ),
         )
         return {"success": True}
+
+    def set_processor_webhook_config(self, ctx: RequestContext) -> dict:
+        """CW-08: a processor's own endpoint, so a withdrawal reaches each
+        linked processor instead of one endpoint per category."""
+        fid = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
+        app_id = require(ctx.payload.get("app_id"), "app_id")
+        category = str(require(ctx.payload.get("category"), "category")).upper()
+        if category not in {"NOTIFICATION", "PURGE"}:
+            raise ApiError(400, "Bad Request", "category must be NOTIFICATION or PURGE.")
+        if not db.one("SELECT 1 FROM apps WHERE id = %s AND fiduciary_id = %s", (app_id, fid)):
+            raise ApiError(404, "Not Found", "App not found for this fiduciary.")
+        webhook_url = require(ctx.payload.get("webhook_url"), "webhook_url")
+        try:
+            validate_outbound_url(webhook_url, "webhook_url")
+        except ValueError as exc:
+            raise ApiError(400, "Bad Request", str(exc)) from None
+        db.execute(
+            f"""
+            INSERT INTO processor_webhook_configs (app_id, fiduciary_id, category, webhook_url, secret_enc, enabled, last_updated_at)
+            VALUES (%s, %s, %s, %s, {db.enc_expr()}, %s, NOW())
+            ON CONFLICT (app_id, category) DO UPDATE SET
+                webhook_url = EXCLUDED.webhook_url, secret_enc = CASE WHEN %s THEN EXCLUDED.secret_enc ELSE processor_webhook_configs.secret_enc END,
+                enabled = EXCLUDED.enabled, last_updated_at = NOW()
+            """,
+            (
+                app_id,
+                fid,
+                category,
+                webhook_url,
+                *db.bind_encrypt(ctx.payload.get("secret", "")),
+                bool(ctx.payload.get("enabled", True)),
+                # A blank secret on an edit keeps the stored one (the console says so).
+                bool(ctx.payload.get("secret")),
+            ),
+        )
+        log_event(
+            ctx.actor_email or "DPO",
+            str(fid),
+            "DPO_CONSOLE",
+            None,
+            "PROCESSOR_WEBHOOK_CONFIGURED",
+            {"app_id": str(app_id), "category": category, "enabled": bool(ctx.payload.get("enabled", True))},
+            source_ip=ctx.source_ip,
+        )
+        return {"success": True}
+
+    def list_processor_webhook_configs(self, ctx: RequestContext) -> list[dict]:
+        return db.to_jsonable(
+            db.all(
+                """
+                SELECT p.app_id, a.name AS app_name, p.category, p.webhook_url, p.enabled, p.last_updated_at
+                FROM processor_webhook_configs p JOIN apps a ON a.id = p.app_id
+                WHERE p.fiduciary_id = %s ORDER BY a.name, p.category
+                """,
+                (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
+            )
+        )
 
     def list_webhook_configs(self, ctx: RequestContext) -> list[dict]:
         return db.to_jsonable(
@@ -204,6 +542,12 @@ class NotificationService(Service):
         )
 
     def set_rights_app_config(self, ctx: RequestContext) -> dict:
+        otp_mode = str(require(ctx.payload.get("otp_mode"), "otp_mode")).upper()
+        # SEC-14: DUMMY_OTP is a fixed, unauthenticated code. It is only ever
+        # honoured where ALLOW_DUMMY_OTP permits; refusing to even record it in
+        # other environments makes the evaluation mode impossible by accident.
+        if otp_mode == "DUMMY_OTP" and not settings.allow_dummy_otp:
+            raise ApiError(400, "Bad Request", "DUMMY_OTP is only available when ALLOW_DUMMY_OTP is enabled.")
         db.execute(
             """
             INSERT INTO rights_app_config (fiduciary_id, otp_mode, otp_message_template, pca_qr_enabled, last_updated_at)
@@ -216,7 +560,7 @@ class NotificationService(Service):
             """,
             (
                 require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),
-                require(ctx.payload.get("otp_mode"), "otp_mode"),
+                otp_mode,
                 ctx.payload.get("otp_message_template"),
                 bool(ctx.payload.get("pca_qr_enabled", True)),
             ),
@@ -228,21 +572,49 @@ class NotificationService(Service):
             "SELECT * FROM rights_app_config WHERE fiduciary_id = %s",
             (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
         )
+        # SEC-14: no config row must never default to the evaluation mode. A
+        # fiduciary that never configured the rights app now reads as EMAIL_OTP
+        # (real delivery, fail-closed) instead of DUMMY_OTP (fixed code).
         return db.to_jsonable(
-            row or {"fiduciary_id": ctx.payload.get("fiduciary_id"), "otp_mode": "DUMMY_OTP", "pca_qr_enabled": True}
+            row or {"fiduciary_id": ctx.payload.get("fiduciary_id"), "otp_mode": "EMAIL_OTP", "pca_qr_enabled": True}
         )
 
     def dispatch_notification(self, ctx: RequestContext) -> dict:
+        # P10-10: the caller supplies the values the template's placeholders
+        # need (`context`; `payload_data` is the older name), so a dispatched
+        # notice is filled like one the services raise.
+        context = ctx.payload.get("context") or ctx.payload.get("payload_data")
+        if context is not None and not isinstance(context, dict):
+            raise ApiError(400, "Bad Request", "context must be an object.")
         row = db.insert_returning(
-            "INSERT INTO notifications (id, recipient_type, recipient_id, fiduciary_id, notification_type, created_at) VALUES (uuid_generate_v4(), %s, %s, %s, %s, NOW()) RETURNING id",
+            "INSERT INTO notifications (id, recipient_type, recipient_id_enc, recipient_id_hmac, fiduciary_id,"
+            f" notification_type, context, created_at) VALUES (uuid_generate_v4(), %s, {pii.PID_VALUES}, %s, %s, %s, NOW())"
+            " RETURNING id",
             (
                 require(ctx.payload.get("recipient_type"), "recipient_type"),
-                require(ctx.payload.get("recipient_id"), "recipient_id"),
+                *pii.pid_params(str(require(ctx.payload.get("recipient_id"), "recipient_id"))),
                 require(resolve_fiduciary(ctx), "fiduciary_id"),
-                require(ctx.payload.get("notification_type"), "notification_type"),
+                require(ctx.payload.get("notification_type") or ctx.payload.get("template_id"), "notification_type"),
+                db.as_jsonb(context) if context else None,
             ),
         )
         return {"success": True, "notification_id": str(row["id"])}
+
+
+def _job_input_payload(raw: object) -> str | None:
+    """jobs.input_payload is stored as JSON text with every principal id replaced
+    by its HMAC (pii.hmac_principal_keys); free text, which could carry an id
+    nothing can find, is refused."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if not isinstance(raw, (dict, list)):
+        raise ApiError(400, "Bad Request", "input_payload must be a JSON object or array.")
+    return json.dumps(pii.hmac_principal_keys(raw))
 
 
 class JobService(Service):
@@ -259,7 +631,7 @@ class JobService(Service):
                 ctx.payload.get("subtype"),
                 ctx.payload.get("start_date"),
                 ctx.payload.get("end_date"),
-                ctx.payload.get("input_payload"),
+                _job_input_payload(ctx.payload.get("input_payload")),
             ),
         )
         return {"success": True, "job_id": str(row["id"])}
@@ -273,8 +645,33 @@ class JobService(Service):
         )
 
     def download_file(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT output_file_path FROM jobs WHERE id = %s", (require(ctx.payload.get("job_id"), "job_id"),))
-        return db.to_jsonable(row or {})
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT output_file_path, subtype FROM jobs WHERE id = %s{scope}",
+            (require(ctx.payload.get("job_id"), "job_id"), *scope_params),
+        )
+        if not row or not row.get("output_file_path"):
+            return {"success": False, "message": "Export file not ready yet."}
+        # P6-03/LG-07: the export is returned as BASE64 inside the authenticated
+        # JSON response, because the console pages are browser navigations that
+        # cannot set an Authorization header. The old behaviour (returning a
+        # server-side path and downloading via ?auth= in the URL) is gone.
+        import base64
+        from pathlib import Path
+
+        path = Path(str(row["output_file_path"]))
+        if not path.exists():
+            return {"success": False, "message": "Export file not found on disk."}
+        data = path.read_bytes()
+        filename = str(row.get("subtype") or path.name).lower() or path.name
+        return {
+            "success": True,
+            "job_id": ctx.payload.get("job_id"),
+            "filename": path.name,
+            "content_type": "text/csv; charset=utf-8",
+            "content_base64": base64.b64encode(data).decode("ascii"),
+            "subtype": filename,
+        }
 
 
 class RopaService(Service):
@@ -285,8 +682,8 @@ class RopaService(Service):
                 (id, fiduciary_id, app_id, activity_name, purpose, legal_basis,
                  data_categories, data_subject_categories, retention_period_days,
                  retention_start_event, processors, cross_border_transfers,
-                 security_measures, linked_policy_ids, status, version, created_at, updated_at)
-            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', 1, NOW(), NOW())
+                 security_measures, linked_policy_ids, dpo_id, status, version, created_at, updated_at)
+            VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', 1, NOW(), NOW())
             RETURNING id
             """,
             (
@@ -303,6 +700,7 @@ class RopaService(Service):
                 db.as_jsonb(ctx.payload.get("cross_border_transfers") or []),
                 ctx.payload.get("security_measures"),
                 db.as_jsonb(ctx.payload.get("linked_policy_ids") or []),
+                ctx.payload.get("dpo_id"),
             ),
         )
         return {"success": True, "id": str(row["id"])}
@@ -319,6 +717,7 @@ class RopaService(Service):
             "retention_start_event",
             "security_measures",
             "status",
+            "dpo_id",
         ]:
             if key in ctx.payload:
                 fields.append(f"{key} = %s")
@@ -333,13 +732,18 @@ class RopaService(Service):
             if key in ctx.payload:
                 fields.append(f"{key} = %s")
                 params.append(db.as_jsonb(ctx.payload[key]))
-        params.append(rid)
-        db.execute(f"UPDATE ropa_entries SET {', '.join(fields)} WHERE id = %s", params)
+        scope, scope_params = tenant_filter(ctx)
+        params.extend([rid, *scope_params])
+        if db.execute(f"UPDATE ropa_entries SET {', '.join(fields)} WHERE id = %s{scope}", params) == 0:
+            raise ApiError(404, "Not Found", "ROPA entry not found.")
         return {"success": True}
 
     def publish_entry(self, ctx: RequestContext) -> dict:
         entry_id = require(ctx.payload.get("id"), "id")
-        entry = db.one("SELECT fiduciary_id, linked_policy_ids FROM ropa_entries WHERE id = %s", (entry_id,))
+        scope, scope_params = tenant_filter(ctx)
+        entry = db.one(
+            f"SELECT fiduciary_id, linked_policy_ids FROM ropa_entries WHERE id = %s{scope}", (entry_id, *scope_params)
+        )
         if not entry:
             raise ApiError(404, "Not Found", "ROPA entry not found.")
         db.execute("UPDATE ropa_entries SET status = 'active', updated_at = NOW() WHERE id = %s", (entry_id,))
@@ -353,27 +757,22 @@ class RopaService(Service):
         return {"success": True, "message": "ROPA entry published.", "activated_policies": activated}
 
     def _activate_policy_if_complete(self, policy_id: str, fiduciary_id: str) -> bool:
-        """A policy goes live only once every ROPA entry that references it is active or retired."""
-        pending = db.one(
-            "SELECT COUNT(*) AS count FROM ropa_entries WHERE linked_policy_ids @> %s AND fiduciary_id = %s AND status NOT IN ('active', 'retired')",
-            (db.as_jsonb([policy_id]), fiduciary_id),
-        )
-        if pending and pending["count"] > 0:
-            return False
-        updated = db.execute(
-            "UPDATE consent_policies SET status = 'ACTIVE', last_updated_at = NOW() WHERE id = %s AND status = 'UNDER_REVIEW'",
-            (policy_id,),
-        )
-        if not updated:
+        """A policy goes live only once every ROPA entry that references it is
+        active or retired; activation also sends the re-consent notices (P10-02)."""
+        if not activate_policy_if_complete(policy_id, fiduciary_id):
             return False
         log_event("DPO", fiduciary_id, "DPO_CONSOLE", fiduciary_id, "POLICY_ACTIVATED_BY_DPO", f"policy:{policy_id}")
         return True
 
     def retire_entry(self, ctx: RequestContext) -> dict:
-        db.execute(
-            "UPDATE ropa_entries SET status = 'retired', updated_at = NOW() WHERE id = %s",
-            (require(ctx.payload.get("id"), "id"),),
+        scope, scope_params = tenant_filter(ctx)
+        updated = db.execute(
+            f"UPDATE ropa_entries SET status = 'retired', updated_at = NOW() WHERE id = %s{scope}",
+            (require(ctx.payload.get("id"), "id"), *scope_params),
         )
+        # SEC-12: a retire that did not happen is not reported as done.
+        if updated == 0:
+            raise ApiError(404, "Not Found", "ROPA entry not found.")
         return {"success": True}
 
     def list_entries(self, ctx: RequestContext) -> list[dict]:
@@ -391,19 +790,32 @@ class RopaService(Service):
         )
 
     def get_entry(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM ropa_entries WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT * FROM ropa_entries WHERE id = %s{scope}", (require(ctx.payload.get("id"), "id"), *scope_params)
+        )
         if not row:
             raise ApiError(404, "Not Found", "ROPA entry not found.")
         return db.to_jsonable(row)
 
     def validate_completeness(self, ctx: RequestContext) -> dict:
         row = self.get_entry(ctx)
-        missing = [
-            k
-            for k in ["activity_name", "purpose", "legal_basis", "data_categories", "data_subject_categories"]
-            if not row.get(k)
+        required = [
+            "activity_name",
+            "purpose",
+            "legal_basis",
+            "data_categories",
+            "data_subject_categories",
+            "dpo_id",
         ]
-        return {"is_complete": not missing, "missing": missing}
+        missing = [k for k in required if not row.get(k)]
+        complete = not missing
+        return {
+            "is_complete": complete,
+            "complete": complete,
+            "missing": missing,
+            "missing_fields": missing,
+        }
 
     def export_ropa(self, ctx: RequestContext) -> str:
         rows = self.list_entries(ctx)
@@ -413,7 +825,7 @@ class RopaService(Service):
         )
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key) for key in writer.fieldnames})
+            writer.writerow({key: csv_safe(row.get(key)) for key in writer.fieldnames})
         return output.getvalue()
 
     def derive_from_policy(self, ctx: RequestContext) -> dict:
@@ -422,36 +834,327 @@ class RopaService(Service):
 
 class LegalService(Service):
     def generate_certificate(self, ctx: RequestContext) -> dict:
-        logs = list_logs(
+        """LG-05/SA-14: crystallise a principal's hash-chained trail as evidence.
+
+        The certificate embeds the verified chain segment (an evidence trail),
+        environment metadata and an HMAC signature over that payload. The signing
+        key is a deployment secret (`certificate_signing_key`), not a client
+        secret the CMS serves; the algorithm and metadata are recorded so the
+        certificate is verifiable rather than a bare log dump. SEC-10: the chain
+        the certificate embeds is itself verified first — a certificate over a
+        tampered ledger is refused rather than signed without complaint.
+        """
+        principal = require(ctx.payload.get("subject_principal_id"), "subject_principal_id")
+        fiduciary_id = require(ctx.payload.get("fiduciary_id"), "fiduciary_id")
+        case_ref = ctx.payload.get("case_ref_id")
+        logs = list_logs({"fiduciary_id": fiduciary_id, "user_id": principal, "limit": CERTIFICATE_TRAIL_LIMIT + 1})
+        # The trail is the newest CERTIFICATE_TRAIL_LIMIT events; the signed
+        # payload says so when older events exist, so the certificate never
+        # silently presents a partial history as complete.
+        trail_truncated = len(logs) > CERTIFICATE_TRAIL_LIMIT
+        logs = logs[:CERTIFICATE_TRAIL_LIMIT]
+        if not logs:
+            raise ApiError(409, "Conflict", "No audit events exist for this principal; there is no trail to certify.")
+        # SEC-10: never sign a ledger that does not verify. P7-02 / P8-04: the
+        # walk is anchored on the oldest event the certificate embeds, so EVERY
+        # row from there to the head (all tenants, for linkage) is examined; a
+        # walk that could not reach the anchor is refused, not certified.
+        chain = verify_chain(limit=ANCHORED_CHAIN_CHECK_ROWS, fiduciary_id=fiduciary_id, since=logs[-1]["timestamp"])
+        refusal = _refuse_reason(chain)
+        if refusal:
+            raise ApiError(409, "Conflict", refusal)
+        if not chain["intact"]:
+            raise ApiError(
+                409,
+                "Conflict",
+                "The audit chain for this fiduciary does not verify; a certificate cannot be issued over tampered evidence.",
+            )
+        fiduciary = db.one("SELECT name FROM fiduciaries WHERE id = %s", (fiduciary_id,))
+        generated_at = datetime.now(UTC)
+        evidence_trail = [
             {
-                "fiduciary_id": ctx.payload.get("fiduciary_id"),
-                "user_id": ctx.payload.get("subject_principal_id"),
-                "limit": 500,
+                "ts": row["timestamp"].isoformat() if hasattr(row["timestamp"], "isoformat") else str(row["timestamp"]),
+                "act": row["audit_action"],
+                "hash": row.get("current_log_hash") or "",
             }
-        )
+            for row in logs
+        ]
+        data = {
+            # The signed payload binds the principal by HMAC, never in plaintext;
+            # the readable id lives encrypted in subject_principal_id_enc.
+            "principal_id_hmac": pii.hmac_hex(principal),
+            # P16-04: which key made principal_id_hmac. Certificates without it
+            # were made under DB_ENCRYPTION_KEY, before PII_LOOKUP_KEY existed.
+            "principal_id_hmac_key": CERTIFICATE_SUBJECT_KEY,
+            "case_ref_id": case_ref,
+            "fiduciary_name": (fiduciary or {}).get("name") or "",
+            "timestamp": generated_at.isoformat(),
+            "environment": settings.environment,
+            "brand": settings.brand_name,
+            "system_metadata": {
+                "environment": settings.environment,
+                "generated_by": "TSI DPDP CMS",
+                "node": "python_port",
+                "chain_verified_at": generated_at.isoformat(),
+                "summary": {
+                    key: chain.get(key)
+                    for key in ("rows_checked", "legacy_rows_linkage_only", "truncated", "anchored_since")
+                },
+            },
+            "evidence_trail": evidence_trail,
+            "trail_truncated": trail_truncated,
+            "signature_algorithm": "HMAC-SHA256",
+        }
+        # SEC-10: generation and verification share one canonicalisation rule.
+        data["signature"] = certificate_signature(data)
         row = db.insert_returning(
-            "INSERT INTO evidence_certificates (id, fiduciary_id, subject_principal_id, certifying_officer_id, case_ref_id, certificate_data, attestation_text) VALUES (uuid_generate_v4(), %s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO evidence_certificates (id, fiduciary_id, subject_principal_id_enc, subject_principal_id_hmac,"
+            " certifying_officer_id, case_ref_id, certificate_data, attestation_text)"
+            f" VALUES (uuid_generate_v4(), %s, {pii.PID_VALUES}, %s, %s, %s, %s) RETURNING id",
             (
-                require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),
-                require(ctx.payload.get("subject_principal_id"), "subject_principal_id"),
-                ctx.payload.get("certifying_officer_id"),
-                ctx.payload.get("case_ref_id"),
-                db.as_jsonb({"logs": logs}),
+                fiduciary_id,
+                *pii.pid_params(principal),
+                ctx.operator_id or ctx.payload.get("certifying_officer_id"),
+                case_ref,
+                db.as_jsonb(data),
                 ctx.payload.get("attestation_text", "System-generated evidence certificate."),
             ),
+        )
+        log_event(
+            ctx.actor_email or principal,
+            fiduciary_id,
+            "DPO_CONSOLE",
+            None,
+            "EVIDENCE_CERTIFICATE_GENERATED",
+            {"subject_principal_id": principal, "case_ref_id": case_ref},
+            source_ip=ctx.source_ip,
         )
         return {"success": True, "certificate_id": str(row["id"])}
 
     def list_certificates(self, ctx: RequestContext) -> list[dict]:
-        return db.to_jsonable(
-            db.all(
-                "SELECT id, fiduciary_id, subject_principal_id, generated_at, case_ref_id FROM evidence_certificates WHERE fiduciary_id = %s ORDER BY generated_at DESC",
-                (require(ctx.payload.get("fiduciary_id"), "fiduciary_id"),),
-            )
+        rows = db.all(
+            f"SELECT id, id AS certificate_id, fiduciary_id, {pii.dec_sql('subject_principal_id_enc')} AS principal_id,"
+            " generated_at AS timestamp, case_ref_id AS case_ref FROM evidence_certificates"
+            " WHERE fiduciary_id = %s ORDER BY generated_at DESC",
+            (*db.bind_key(), require(ctx.payload.get("fiduciary_id"), "fiduciary_id")),
         )
+        return [pii.principal_row(ctx, row, "principal_id") for row in rows]
 
     def get_certificate(self, ctx: RequestContext) -> dict:
-        row = db.one("SELECT * FROM evidence_certificates WHERE id = %s", (require(ctx.payload.get("id"), "id"),))
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT *, {pii.dec_sql('subject_principal_id_enc')} AS subject_principal_id"
+            f" FROM evidence_certificates WHERE id = %s{scope}",
+            (*db.bind_key(), require(ctx.payload.get("id"), "id"), *scope_params),
+        )
         if not row:
             raise ApiError(404, "Not Found", "Certificate not found.")
-        return db.to_jsonable(row)
+        out = pii.principal_row(ctx, row, "subject_principal_id")
+        # The console views read certificate_id, data and attestation; keep the
+        # raw row under `data` so the viewer renders the signed payload.
+        try:
+            data = row["certificate_data"]
+            if isinstance(data, str):
+                data = json.loads(data)
+        except (ValueError, TypeError):
+            data = {}
+        if isinstance(data, dict) and "principal_id" in data:
+            # Certificates signed before principal_id_hmac name the principal in
+            # plaintext; the stored copy stays intact, the console view is masked.
+            data = {**data, "principal_id": pii.principal_view(ctx, data["principal_id"])}
+        out["data"] = data
+        out["attestation"] = out.get("attestation_text")
+        return out
+
+    def verify_certificate(self, ctx: RequestContext) -> dict:
+        """SEC-10: verify an evidence certificate's HMAC signature.
+
+        The signature is compared in constant time, and the certificate's
+        embedded evidence trail is re-derived against `audit_logs` — so a
+        certificate signed before the ledger was tampered with no longer returns
+        "valid" on signature alone. A chain break, or any embedded trail hash
+        that no longer exists in the ledger, is reported.
+        """
+        scope, scope_params = tenant_filter(ctx)
+        row = db.one(
+            f"SELECT certificate_data, fiduciary_id, {pii.dec_sql('subject_principal_id_enc')} AS subject"
+            f" FROM evidence_certificates WHERE id = %s{scope}",
+            (*db.bind_key(), require(ctx.payload.get("id"), "id"), *scope_params),
+        )
+        if not row:
+            raise ApiError(404, "Not Found", "Certificate not found.")
+        data = row.get("certificate_data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (ValueError, TypeError):
+                data = {}
+        if not isinstance(data, dict) or "signature" not in data:
+            return {"valid": False, "reason": "Certificate carries no signature."}
+        expected = data.get("signature")
+        recomputed = certificate_signature(data)
+        # SEC-10: constant-time comparison; a plain != let a timing side-channel
+        # distinguish how much of the digest matched. compare_digest raises
+        # TypeError on non-ASCII str, so coerce to bytes first — a tampered,
+        # non-ASCII signature must read as INVALID, never 500.
+        try:
+            same = hmac.compare_digest(str(expected).encode("utf-8"), str(recomputed).encode("utf-8"))
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return {"valid": False, "reason": "Signature mismatch — the certificate has been altered."}
+        # The signed payload binds the principal by HMAC (legacy certificates
+        # carry principal_id); the subject column must still be that principal.
+        principal_id = data.get("principal_id")
+        subject = row.get("subject")
+        # Ruling O: an erased subject is not tampering. The binding (and the
+        # per-principal completeness checks, which need the principal) are
+        # skipped; the signature, trail hashes, order and chain still are not.
+        subject_erased = str(subject or "").startswith("erased:")
+        if not principal_id and data.get("principal_id_hmac") and not subject_erased:
+            key = (
+                settings.pii_lookup_key
+                if data.get("principal_id_hmac_key") == CERTIFICATE_SUBJECT_KEY
+                else settings.db_encryption_key
+            )
+            if not subject or pii.hmac_hex(str(subject), key) != data["principal_id_hmac"]:
+                return {
+                    "valid": False,
+                    "reason": "The certificate's subject no longer matches its signed principal (erased or altered).",
+                }
+            principal_id = str(subject)
+
+        # SEC-10: re-derive the embedded trail against the live ledger — ordering
+        # AND completeness, not just "each hash exists". The certificate's trail
+        # must be a prefix of the ledger's current trail for that principal
+        # (newest-first), so an event that was omitted or reordered after signing
+        # invalidates the certificate. Bounded (P6-12): we read only the rows the
+        # certificate itself names, not the whole ledger.
+        trail = data.get("evidence_trail") or []
+        claimed = [
+            str(entry.get("hash") or "").strip() for entry in trail if isinstance(entry, dict) and entry.get("hash")
+        ]
+        if claimed:
+            # The trail may reach back into archived years (db/32, db/33).
+            ledger = ledger_source()
+            placeholders = ", ".join(["%s"] * len(claimed))
+            rows = db.all(
+                f"SELECT current_log_hash, timestamp FROM {ledger} "
+                f"WHERE current_log_hash IN ({placeholders}) AND fiduciary_id = %s",
+                (*claimed, str(row["fiduciary_id"])),
+            )
+            found = {str(r["current_log_hash"]): r for r in rows}
+            missing = [h for h in claimed if h not in found]
+            if missing:
+                return {
+                    "valid": False,
+                    "reason": "Certificate embeds hashes no longer present in the audit ledger.",
+                    "missing_hashes": missing[:10],
+                }
+            # Ordering: the certificate's newest-first trail must match the
+            # ledger's timestamp order for those same rows.
+            ledger_order = sorted(
+                (str(r["current_log_hash"]) for r in found.values()),
+                key=lambda h: found[h]["timestamp"] or "",
+                reverse=True,
+            )
+            if ledger_order != claimed:
+                return {
+                    "valid": False,
+                    "reason": "Certificate trail is not in the ledger's order — events were reordered after signing.",
+                }
+            # SEC-10 completeness: compare against the principal's ACTUAL trail
+            # in the certificate's time range, not against the certificate's own
+            # hashes. An event of this principal inside the signed range that is
+            # missing from the trail means the trail is incomplete.
+            if principal_id:
+                ledger_trail = [
+                    str(r["current_log_hash"])
+                    for r in db.all(
+                        f"SELECT current_log_hash FROM {ledger} WHERE fiduciary_id = %s AND user_id = %s"
+                        " AND timestamp >= %s AND timestamp <= %s ORDER BY timestamp DESC, id DESC",
+                        (
+                            str(row["fiduciary_id"]),
+                            principal_pseudonym(str(principal_id)),
+                            found[claimed[-1]]["timestamp"],
+                            found[claimed[0]]["timestamp"],
+                        ),
+                    )
+                ]
+                if ledger_trail != claimed:
+                    return {
+                        "valid": False,
+                        "reason": "Certificate trail does not match the principal's ledger for the period it covers — events are missing or extra.",
+                    }
+                # Below the anchor: a trail that does not declare itself
+                # truncated claims the principal's WHOLE history, so no earlier
+                # event of theirs may exist.
+                # Certificates issued before the marker existed carry no key and
+                # may hold a capped trail, so the check applies only when the
+                # signed payload explicitly says the trail is complete.
+                if data.get("trail_truncated") is False and db.one(
+                    f"SELECT 1 FROM {ledger} WHERE fiduciary_id = %s AND user_id = %s AND timestamp < %s LIMIT 1",
+                    (str(row["fiduciary_id"]), principal_pseudonym(str(principal_id)), found[claimed[-1]]["timestamp"]),
+                ):
+                    return {
+                        "valid": False,
+                        "reason": "Certificate trail omits the principal's earlier events without declaring itself truncated.",
+                    }
+        # SEC-10: the chain these hashes anchor to must still verify. P6-12: the
+        # walk is bounded (a window), not an unfiltered 2,000,000-row pull into
+        # the API process. This certificate's OWN rows were just re-derived above;
+        # the windowed global check still catches tampering in the recent ledger.
+        # P7-02: a scoped report that examined ZERO of this tenant's rows (rows
+        # pushed out of the window by other tenants) is not a clean bill of
+        # health — the certificate is refused rather than verified on nothing.
+        # P7-02 / P8-04: anchored on the certificate's oldest trail entry, so the
+        # walk covers every row the certificate rests on; an incomplete walk is
+        # "not verified", never "valid".
+        if claimed:
+            chain = verify_chain(
+                limit=ANCHORED_CHAIN_CHECK_ROWS,
+                fiduciary_id=str(row["fiduciary_id"]),
+                since=found[claimed[-1]]["timestamp"],
+            )
+            refusal = _refuse_reason(chain)
+        else:
+            chain = verify_chain(limit=WINDOWED_CHAIN_CHECK_ROWS, fiduciary_id=str(row["fiduciary_id"]))
+            refusal = (
+                "The ledger window checked contained none of this fiduciary's rows; the certificate cannot be verified against an unexamined chain."
+                if chain.get("unexamined_tenant")
+                else None
+            )
+        if refusal:
+            return {
+                "valid": False,
+                "verified": False,
+                "reason": refusal,
+                "chain_intact": None,
+                "rows_checked": chain.get("rows_checked", 0),
+                "rows_in_scope_total": chain.get("rows_in_scope_total", 0),
+            }
+        if not chain["intact"]:
+            return {
+                "valid": False,
+                "reason": "The audit chain this certificate rests on no longer verifies; treat the certificate and its trail as compromised.",
+                "chain_intact": False,
+                "broken_count": chain.get("broken_count", 0),
+                "foreign_broken_count": chain.get("foreign_broken_count", 0),
+            }
+        log_event(
+            ctx.actor_email or "DPO",
+            ctx.fiduciary_id,
+            "DPO_CONSOLE",
+            None,
+            "EVIDENCE_CERTIFICATE_VERIFIED",
+            {"certificate_id": str(require(ctx.payload.get("id"), "id"))},
+            source_ip=ctx.source_ip,
+        )
+        return {
+            "valid": True,
+            "signature_algorithm": data.get("signature_algorithm"),
+            "signature": expected,
+            "trail_hashes_checked": len(claimed),
+            "chain_intact": chain["intact"],
+            **({"subject_erased": True} if subject_erased else {}),
+        }

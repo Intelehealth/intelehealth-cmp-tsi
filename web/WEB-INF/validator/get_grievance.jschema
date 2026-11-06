@@ -8,10 +8,16 @@
     },
     "grievance_id": {
       "type": "string"
+    },
+    "reference_number": {
+      "type": "string",
+      "description": "GR-05: look up by the reference quoted to the principal."
+    },
+    "fiduciary_id": {
+      "type": "string"
     }
   },
   "required": [
-    "_func",
-    "grievance_id"
+    "_func"
   ]
 }

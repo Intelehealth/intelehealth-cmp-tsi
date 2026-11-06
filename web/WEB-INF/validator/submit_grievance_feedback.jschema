@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "_func",
+    "grievance_id",
+    "rating"
+  ],
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "grievance_id": {
+      "type": "string"
+    },
+    "rating": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "comment": {
+      "type": "string",
+      "maxLength": 2000
+    }
+  }
+}

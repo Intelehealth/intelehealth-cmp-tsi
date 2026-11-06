@@ -10,7 +10,14 @@
       "type": "string"
     },
     "status": {
-      "type": "string"
+      "type": "string",
+      "enum": [
+        "NEW",
+        "IN_PROGRESS",
+        "ESCALATED",
+        "RESOLVED",
+        "CLOSED"
+      ]
     },
     "resolution_details": {
       "type": "string"
@@ -19,7 +26,6 @@
   "required": [
     "_func",
     "grievance_id",
-    "status",
-    "resolution_details"
+    "status"
   ]
 }

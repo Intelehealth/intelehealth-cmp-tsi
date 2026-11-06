@@ -17,6 +17,27 @@
     },
     "fiduciary_id": {
       "type": "string"
+    },
+    "likely_consequences": {
+      "type": "string"
+    },
+    "mitigation_measures": {
+      "type": "string"
+    },
+    "contact_point": {
+      "type": "string"
+    },
+    "circumstances": {
+      "type": "string"
+    },
+    "cause_findings": {
+      "type": "string"
+    },
+    "remedial_measures": {
+      "type": "string"
+    },
+    "submit_detailed_report": {
+      "type": "boolean"
     }
   },
   "required": [

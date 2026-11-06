@@ -11,6 +11,22 @@
     },
     "_func": {
       "type": "string"
+    },
+    "purpose_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "CW-05: purposes to withdraw; omit for all."
+    },
+    "purpose_id": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "policy_id": {
+      "type": "string"
     }
   },
   "required": [

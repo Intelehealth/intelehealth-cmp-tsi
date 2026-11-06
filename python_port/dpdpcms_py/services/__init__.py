@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from .admin import AdminDashService, AdminSetupService, OperatorService
+from .alerts import AlertService
 from .catalog import AppService, FiduciaryService, PolicyService
 from .compliance import BreachService, ComplianceService, GrievanceService
 from .consent import ConsentService, PrincipalService, WalletService
 from .governance import ApiKeyService, AuditService, JobService, LegalService, NotificationService, RopaService
+from .lifecycle import PurposeLifecycleService
+from .pii import PiiService
+from .retention import RetentionService
+from .rights import RightsService
+from .roles import RoleService
 
 SERVICE_REGISTRY = {
     "setup": AdminSetupService,
@@ -25,4 +31,10 @@ SERVICE_REGISTRY = {
     "ropa": RopaService,
     "legal": LegalService,
     "breach": BreachService,
+    "rights": RightsService,
+    "alerts": AlertService,
+    "purpose": PurposeLifecycleService,
+    "retention": RetentionService,
+    "role": RoleService,
+    "pii": PiiService,
 }

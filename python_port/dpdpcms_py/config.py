@@ -22,14 +22,93 @@ if load_dotenv:
     load_dotenv(PY_ROOT / ".env", override=True)
 
 
-def _secret(name: str, minimum: int = 32) -> str:
-    value = (os.getenv(name) or "").strip()
+# P17-06: fragments of the development defaults shipped in docker-compose.yml
+# and .env.example. They are public, so outside TSI_DPDP_CMS_ENV=local a secret
+# carrying one is refused: a staging or production stack started without its
+# own .env must not come up with a known JWT, encryption or bootstrap key.
+PLACEHOLDER_SECRET_MARKERS = (
+    "do-not-use-in-production",
+    "secure_dev_password",
+    "local-dev-",
+    "placeholder",
+    "changeme",
+)
+
+
+def _secret(name: str, minimum: int = 32, fallback: str | None = None) -> str:
+    raw = os.getenv(name)
+    if not (raw or "").strip() and fallback and (os.getenv(fallback) or "").strip():
+        name, raw = fallback, os.getenv(fallback)
+    value = (raw or "").strip()
     if len(value) < minimum or value.startswith("<") or "change-me" in value.lower():
         raise RuntimeError(
             f"{name} must be set to a random value of at least {minimum} characters. "
             "Copy .env.example to .env and generate secrets with: openssl rand -hex 32"
         )
+    if _environment() != "local" and any(marker in value.lower() for marker in PLACEHOLDER_SECRET_MARKERS):
+        raise RuntimeError(
+            f"{name} is a published development default and is refused outside TSI_DPDP_CMS_ENV=local. "
+            "Generate a value with: openssl rand -hex 32"
+        )
     return value
+
+
+ENVIRONMENTS = ("local", "test", "staging", "production")
+
+
+def _environment() -> str:
+    """P14-01: TSI_DPDP_CMS_ENV is one of a fixed set, case-folded.
+
+    Every environment-gated control (the production '*' refusal, /docs, sslmode,
+    DUMMY_OTP) compares against these exact names, so a free-text value such as
+    'Production' or 'prod' would slip past them. Anything else refuses to start.
+    """
+    value = (os.getenv("TSI_DPDP_CMS_ENV") or "local").strip().casefold()
+    if value not in ENVIRONMENTS:
+        raise RuntimeError(f"TSI_DPDP_CMS_ENV must be one of {', '.join(ENVIRONMENTS)}; got {value!r}.")
+    return value
+
+
+def _pii_lookup_key(environment: str) -> str:
+    """P16-04: the key of every principal lookup HMAC, apart from DB_ENCRYPTION_KEY.
+
+    One key for both meant one leaked secret gave decryption and linkability,
+    and encryption could not be rotated without re-keying every lookup. Unset,
+    it falls back to DB_ENCRYPTION_KEY outside production; production refuses
+    to start without a distinct value (scripts/rekey_pii_lookup.py moves an
+    existing database across).
+    """
+    encryption_key = _secret("DB_ENCRYPTION_KEY")
+    if not (os.getenv("PII_LOOKUP_KEY") or "").strip():
+        if environment == "production":
+            raise RuntimeError(
+                "PII_LOOKUP_KEY must be set with TSI_DPDP_CMS_ENV=production (docs/security/KEY_MANAGEMENT.md)."
+            )
+        return encryption_key
+    value = _secret("PII_LOOKUP_KEY")
+    if value == encryption_key:
+        raise RuntimeError("PII_LOOKUP_KEY must differ from DB_ENCRYPTION_KEY.")
+    return value
+
+
+def _outbound_allowed_hosts(environment: str) -> tuple[str, ...]:
+    """Rule 14 / P12-11: an unset allowlist fails closed outside local."""
+    hosts = tuple(
+        h.strip().lower().rstrip(".") for h in os.getenv("OUTBOUND_ALLOWED_HOSTS", "").split(",") if h.strip()
+    )
+    if not hosts and environment != "local":
+        raise RuntimeError(
+            "OUTBOUND_ALLOWED_HOSTS must list the approved outbound destinations (Rule 14) outside "
+            "TSI_DPDP_CMS_ENV=local. Set it to '*' to leave destinations unrestricted deliberately."
+        )
+    # R14 (workbook v11): in production the allowlist must name the approved
+    # destinations; the '*' opt-out is for local, test and staging only.
+    if "*" in hosts and environment == "production":
+        raise RuntimeError(
+            "OUTBOUND_ALLOWED_HOSTS='*' is refused with TSI_DPDP_CMS_ENV=production: list the approved "
+            "destinations (docs/security/OUTBOUND_DESTINATIONS.md)."
+        )
+    return hosts
 
 
 @dataclass(frozen=True)
@@ -42,7 +121,73 @@ class Settings:
     brand_name: str
     environment: str
     export_path: Path
+    bootstrap_token: str
     token_ttl_minutes: int = 480
+    # ── P1 background worker (worker.py) ────────────────────────────────────
+    worker_poll_seconds: int = 30
+    worker_batch_size: int = 50
+    # ── P1 notification delivery adapter (delivery.py) ──────────────────────
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+    sms_gateway_url: str = ""
+    push_gateway_url: str = ""
+    notification_retry_limit: int = 5
+    # ── P1 webhook dispatcher (webhooks.py) ─────────────────────────────────
+    webhook_retry_limit: int = 5
+    # ── P1 worker sweep thresholds ──────────────────────────────────────────
+    alert_escalation_hours: int = 24
+    purge_notice_hours: int = 48  # DPDP Rule 8(2): 48h notice before deletion
+    grievance_escalation_hours: int = 24  # beyond the SLA due_date
+    # Rights-portal DUMMY_OTP mode accepts a fixed code, i.e. no authentication.
+    # Off unless TSI_DPDP_CMS_ENV=local or ALLOW_DUMMY_OTP=true.
+    allow_dummy_otp: bool = False
+    # SA-09: days a purge may stay unconfirmed before the DPO is told.
+    purge_completion_sla_days: int = 30
+    # CC-05: DigiLocker partner verifier for guardian identity (empty = not configured).
+    digilocker_verify_url: str = ""
+    # SA-06: OpenID Connect SSO for operators (all three empty = SSO disabled).
+    sso_issuer: str = ""
+    sso_audience: str = ""
+    sso_jwks_url: str = ""
+    # GR-04: grievance attachment limits.
+    attachment_max_bytes: int = 5 * 1024 * 1024
+    # P5-07: Rule 6(1)(e) log-retention floor for webhook_deliveries (the
+    # channel of record for consent events and OTP dispatch), in days.
+    webhook_delivery_retention_days: int = 365
+    # SA-13: the same floor-bounded retention for notification_deliveries
+    # (recipient address / device + delivery outcome).
+    notification_delivery_retention_days: int = 365
+    # Years of audit_logs kept in the live partitioned table (current year
+    # included); older yearly partitions are detached into archive tables by
+    # jobs.archive_audit_partitions, never deleted. Minimum 1.
+    audit_live_years: int = 3
+    # SA-14: key that signs evidence certificates. Defaults to the DB encryption
+    # key so nothing new needs provisioning; a deployment may set its own
+    # CERTIFICATE_SIGNING_KEY (still a server secret, never a client one).
+    certificate_signing_key: str = ""
+    # P16-04: keys the principal lookup HMACs (<col>_hmac); see _pii_lookup_key.
+    pii_lookup_key: str = ""
+    # P5-02: IPs of reverse proxies in front of the API. X-Forwarded-For is only
+    # honoured when the immediate peer is one of these, so a direct caller cannot
+    # self-declare its identity and every operator behind the proxy no longer
+    # shares one throttle bucket. Empty = no proxy, the socket peer is trusted.
+    trusted_proxy_ips: tuple[str, ...] = ()
+    # Rule 14: the destinations personal data may be sent to. When set, every
+    # outbound webhook, SMS/push gateway and verifier URL - and the SMTP host -
+    # must be one of these hosts or a subdomain of one (".gov.in", "example.in").
+    # P12-11: outside TSI_DPDP_CMS_ENV=local the list is mandatory - the app
+    # refuses to start without it. "*" is the explicit, logged choice to leave
+    # destinations unrestricted. Production deployments should list the
+    # in-India endpoints recorded in docs/security/OUTBOUND_DESTINATIONS.md.
+    outbound_allowed_hosts: tuple[str, ...] = ()
+    # P12-09: /healthz and /healthz/worker report a status only. A request
+    # carrying this token in X-Health-Token also gets the detail (age, failed
+    # sweeps). Empty = detail never served.
+    healthz_token: str = ""
 
     @staticmethod
     def _dsn_from_env() -> str:
@@ -60,7 +205,7 @@ class Settings:
         db = os.getenv("POSTGRES_DB", "tsi_cms")
         user = quote_plus(os.getenv("POSTGRES_USER", "tsi_admin"))
         password = quote_plus(_secret("POSTGRES_PASSWD", minimum=8))
-        sslmode = "prefer" if os.getenv("TSI_DPDP_CMS_ENV", "local") == "local" else "require"
+        sslmode = "prefer" if _environment() == "local" else "require"
         return f"postgresql://{user}:{password}@{host}:{port}/{db}?sslmode={sslmode}"
 
     @classmethod
@@ -70,6 +215,8 @@ class Settings:
             raise RuntimeError("BRAND_NAME must be 12 characters or fewer.")
 
         allowed = tuple(origin.strip() for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip())
+        environment = _environment()
+        dummy_default = "true" if environment == "local" else "false"
         return cls(
             db_dsn=cls._dsn_from_env(),
             db_encryption_key=_secret("DB_ENCRYPTION_KEY"),
@@ -77,8 +224,45 @@ class Settings:
             lookup_salt=_secret("TSI_LOOKUP_SALT"),
             allowed_origins=allowed,
             brand_name=brand,
-            environment=os.getenv("TSI_DPDP_CMS_ENV", "local"),
+            environment=environment,
             export_path=Path(os.getenv("TSI_EXPORT_PATH", str(ROOT / "exports"))),
+            # P17-04: TSI_BOOTSTRAP_TOKEN gates first-run setup; BOOTSTRAP_TOKEN
+            # is still read when it is unset so existing .env files keep working.
+            bootstrap_token=_secret("TSI_BOOTSTRAP_TOKEN", fallback="BOOTSTRAP_TOKEN"),
+            worker_poll_seconds=int(os.getenv("WORKER_POLL_SECONDS", "30")),
+            worker_batch_size=int(os.getenv("WORKER_BATCH_SIZE", "50")),
+            smtp_host=os.getenv("SMTP_HOST", ""),
+            smtp_port=int(os.getenv("SMTP_PORT", "587")),
+            smtp_username=os.getenv("SMTP_USERNAME", ""),
+            smtp_password=os.getenv("SMTP_PASSWORD", ""),
+            smtp_from=os.getenv("SMTP_FROM", ""),
+            smtp_starttls=os.getenv("SMTP_STARTTLS", "true").lower() in {"1", "true", "yes"},
+            sms_gateway_url=os.getenv("SMS_GATEWAY_URL", ""),
+            push_gateway_url=os.getenv("PUSH_GATEWAY_URL", ""),
+            notification_retry_limit=int(os.getenv("NOTIFICATION_RETRY_LIMIT", "5")),
+            webhook_retry_limit=int(os.getenv("WEBHOOK_RETRY_LIMIT", "5")),
+            alert_escalation_hours=int(os.getenv("ALERT_ESCALATION_HOURS", "24")),
+            purge_notice_hours=int(os.getenv("PURGE_NOTICE_HOURS", "48")),
+            grievance_escalation_hours=int(os.getenv("GRIEVANCE_ESCALATION_HOURS", "24")),
+            allow_dummy_otp=os.getenv("ALLOW_DUMMY_OTP", dummy_default).lower() in {"1", "true", "yes"},
+            purge_completion_sla_days=int(os.getenv("PURGE_COMPLETION_SLA_DAYS", "30")),
+            digilocker_verify_url=os.getenv("DIGILOCKER_VERIFY_URL", ""),
+            sso_issuer=os.getenv("SSO_ISSUER", ""),
+            sso_audience=os.getenv("SSO_AUDIENCE", ""),
+            sso_jwks_url=os.getenv("SSO_JWKS_URL", ""),
+            attachment_max_bytes=int(os.getenv("ATTACHMENT_MAX_BYTES", str(5 * 1024 * 1024))),
+            certificate_signing_key=(
+                _secret("CERTIFICATE_SIGNING_KEY", minimum=1)
+                if (os.getenv("CERTIFICATE_SIGNING_KEY") or "").strip()
+                else _secret("DB_ENCRYPTION_KEY")
+            ),
+            pii_lookup_key=_pii_lookup_key(environment),
+            webhook_delivery_retention_days=int(os.getenv("WEBHOOK_DELIVERY_RETENTION_DAYS", "365")),
+            notification_delivery_retention_days=int(os.getenv("NOTIFICATION_DELIVERY_RETENTION_DAYS", "365")),
+            audit_live_years=max(int(os.getenv("AUDIT_LIVE_YEARS", "3")), 1),
+            trusted_proxy_ips=tuple(ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()),
+            outbound_allowed_hosts=_outbound_allowed_hosts(environment),
+            healthz_token=(os.getenv("HEALTHZ_TOKEN") or "").strip(),
         )
 
 

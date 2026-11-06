@@ -25,7 +25,9 @@
       "type": "string"
     },
     "language_selected": {
-      "type": "string"
+      "description": "P13-04: lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
+      "type": "string",
+      "enum": ["en", "as", "bn", "brx", "doi", "gu", "hi", "kn", "ks", "kok", "mai", "ml", "mni", "mr", "ne", "or", "pa", "sa", "sat", "sd", "ta", "te", "ur"]
     },
     "consent_status_general": {
       "type": "string"
@@ -55,6 +57,15 @@
           },
           "timestamp_updated": {
             "type": "string"
+          },
+          "purpose_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
           }
         },
         "required": [
@@ -62,7 +73,8 @@
           "consent_granted",
           "purpose_agreed_to",
           "timestamp_updated"
-        ]
+        ],
+        "additionalProperties": false
       }
     }
   },

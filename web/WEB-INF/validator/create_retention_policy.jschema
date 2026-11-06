@@ -48,16 +48,8 @@
   },
   "required": [
     "_func",
-    "fiduciary_id",
     "name",
-    "description",
-    "applicable_purposes",
-    "applicable_data_categories",
     "retention_duration_value",
-    "retention_duration_unit",
-    "retention_start_event",
-    "action_at_expiry",
-    "legal_reference",
-    "status"
+    "retention_duration_unit"
   ]
 }

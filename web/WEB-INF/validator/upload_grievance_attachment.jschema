@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "_func",
+    "grievance_id",
+    "file_name",
+    "content_type",
+    "content_base64"
+  ],
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "grievance_id": {
+      "type": "string"
+    },
+    "file_name": {
+      "type": "string",
+      "maxLength": 255
+    },
+    "content_type": {
+      "type": "string",
+      "enum": [
+        "application/pdf",
+        "image/png",
+        "image/jpeg",
+        "text/plain"
+      ]
+    },
+    "content_base64": {
+      "type": "string"
+    }
+  }
+}

@@ -121,6 +121,76 @@ async function publicApiCall(path, func, bodyExtra) {
     return await res.json();
 }
 
+/**
+ * Downloads a file-returning call (UD-04 consent history CSV / PDF) as a file.
+ * Returns true when a file was saved.
+ */
+async function apiDownload(path, func, bodyExtra, filename) {
+    const session = getSession();
+    const headers = { 'Content-Type': 'application/json; charset=UTF-8' };
+    if (session) headers['Authorization'] = 'Bearer ' + session.token;
+    try {
+        const res = await fetch(PORTAL_BASE_URL + path, {
+            method: 'POST', headers, body: JSON.stringify({ _func: func, ...bodyExtra })
+        });
+        if (res.status === 401) { clearSession(); window.location.href = 'index.html'; return false; }
+        if (!res.ok) return false;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return true;
+    } catch (e) {
+        console.error('Portal download error:', e);
+        return false;
+    }
+}
+
+/** Purpose ids are case-insensitive machine ids (P10-04): compare them canonically. */
+function purposeKey(id) {
+    // Same canonical form as the server (services/base.py canonical_purpose_id):
+    // trimmed, lower-case, with the 'ALL' whole-account sentinel left as written.
+    const text = String(id == null ? '' : id).trim();
+    return text === 'ALL' ? text : text.toLowerCase();
+}
+
+// P11-10: the purpose a stored consent decision names, resolved in the one
+// order every server reader uses (services/base.py POINT_ID_KEYS):
+// data_point_id, then purpose_id, then id - the first one that is not empty.
+function pointPurposeId(point) {
+    if (!point || typeof point !== 'object') return '';
+    for (const key of ['data_point_id', 'purpose_id', 'id']) {
+        if (point[key] != null && point[key] !== '') return purposeKey(point[key]);
+    }
+    return '';
+}
+
+// P11-10: whether a stored decision is a live grant, as the consent gate reads
+// it (services/consent.py _point_granted): consent_granted when present, else
+// the legacy status alias; a consent_expiry in the past lapses the grant.
+function pointGranted(point) {
+    if (!point || typeof point !== 'object') return false;
+    let granted = point.consent_granted;
+    if (granted == null) {
+        granted = ['granted', 'true', 'consent_given'].includes(String(point.status == null ? '' : point.status).toLowerCase());
+    } else if (Array.isArray(granted)) {
+        granted = granted.length > 0;
+    } else if (typeof granted === 'object') {
+        granted = Object.keys(granted).length > 0;
+    }
+    if (!granted) return false;
+    if (point.consent_expiry) {
+        const expiry = Date.parse(String(point.consent_expiry));
+        if (!Number.isNaN(expiry) && expiry <= Date.now()) return false;
+    }
+    return true;
+}
+
 function esc(s) {
     if (s == null) return '';
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');

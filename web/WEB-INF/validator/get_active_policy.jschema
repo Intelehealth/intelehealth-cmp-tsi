@@ -11,11 +11,13 @@
     },
     "jurisdiction": {
       "type": "string"
+    },
+    "policy_id": {
+      "type": "string"
     }
   },
   "required": [
     "_func",
-    "fiduciary_id",
-    "jurisdiction"
+    "fiduciary_id"
   ]
 }

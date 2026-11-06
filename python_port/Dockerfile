@@ -8,8 +8,9 @@ WORKDIR /app
 
 RUN addgroup --system app && adduser --system --ingroup app app
 
-COPY python_port/requirements.txt /app/python_port/requirements.txt
-RUN pip install --no-cache-dir -r /app/python_port/requirements.txt
+# M-02: install exactly the audited, hash-pinned set (pip-compile output).
+COPY python_port/requirements.lock /app/python_port/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /app/python_port/requirements.lock
 
 COPY python_port /app/python_port
 COPY web /app/web

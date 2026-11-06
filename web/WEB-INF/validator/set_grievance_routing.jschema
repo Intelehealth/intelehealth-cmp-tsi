@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GR-07 grievance category routing rule",
+  "type": "object",
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "grievance_type": {
+      "type": "string"
+    },
+    "department": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "operator_id": {
+      "type": "string"
+    },
+    "remove": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "_func",
+    "grievance_type"
+  ]
+}

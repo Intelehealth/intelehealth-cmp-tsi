@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from typing import Any
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from . import db
 from .config import WEB_ROOT, settings
 from .context import RequestContext
 from .errors import ApiError, error_body
-from .security import api_key_valid, bearer_token, decode_token
+from .security import api_key_valid, bearer_token, decode_token, is_operator_token
 from .services import SERVICE_REGISTRY
+from .services.base import same_principal
+from .services.consent import resolve_wallet_action
+from .services.roles import FUNC_PERMISSIONS, MFA_EXEMPT_FUNCS, READ_PREFIXES, enforce_role_permission
 from .validators import validate_payload
 
 log = logging.getLogger("dpdpcms")
@@ -19,6 +25,8 @@ log = logging.getLogger("dpdpcms")
 ADMIN_NOAUTH_FUNCS = {"reset_password", "login", "verify_recovery_key", "reset_password_via_recovery"}
 BOOTSTRAP_ALLOWED = {("setup", "initial_setup")}
 PUBLIC_ALLOWED_FUNCS = {
+    # SA-06: operator single sign-on (the IdP's id_token is the credential).
+    "sso_login",
     "principal_login",
     "list_active_fiduciaries",
     "list_fiduciary_personas",
@@ -44,6 +52,27 @@ CLIENT_ALLOWED_FUNCS = {
     "mark_notification_read",
     "record_parent_consent",
     "list_active_policies",
+    "sync",
+    "create_nomination",
+    "list_nominations",
+    "revoke_nomination",
+    "submit_correction",
+    "list_corrections",
+    # P1: consent-change alerts for fiduciaries/processors (BRD 4.4.2)
+    "notify_alert",
+    "acknowledge_alert",
+    "list_alerts",
+    # P1: fresh affirmative consent on a material policy change (BRD 4.1.3)
+    "request_reconsent",
+    # P2: principal downloads their own consent history (UD-04)
+    "export_consent_history",
+    # BRD traceability: withdrawal implications, grievance follow-up, purge proof
+    "get_withdrawal_implications",
+    "add_grievance_communication",
+    "submit_grievance_feedback",
+    "upload_grievance_attachment",
+    "get_grievance_attachment",
+    "confirm_purge_status",
 }
 CLIENT_FUNC_SCOPES = {
     "record_consent": "WRITE",
@@ -65,11 +94,62 @@ CLIENT_FUNC_SCOPES = {
     "list_active_policies": "READ",
     "list_purge_requests": "PURGE",
     "update_purge_status": "PURGE",
+    "sync": "READ",
+    "create_nomination": "WRITE",
+    "list_nominations": "READ",
+    "revoke_nomination": "WRITE",
+    "submit_correction": "WRITE",
+    "list_corrections": "READ",
+    # P1: consent-change alerts for fiduciaries/processors (BRD 4.4.2)
+    "notify_alert": "WRITE",
+    "acknowledge_alert": "WRITE",
+    "list_alerts": "READ",
+    # P1: fresh affirmative consent on a material policy change (BRD 4.1.3)
+    "request_reconsent": "WRITE",
+    # P2: principal downloads their own consent history (UD-04)
+    "export_consent_history": "READ",
+    "get_withdrawal_implications": "READ",
+    "add_grievance_communication": "WRITE",
+    "submit_grievance_feedback": "WRITE",
+    "upload_grievance_attachment": "WRITE",
+    "get_grievance_attachment": "READ",
+    "confirm_purge_status": "PURGE",
 }
+# P6-10: functions CLIENT_FUNC_SCOPES marks READ that are GENUINELY side-effect
+# free and therefore safe to call over GET. `validate_consent` is deliberately
+# NOT listed: it is stamped READ for scope-gating but writes a
+# consent_validations row and notifies the principal on denial, so folding it
+# in would re-open SEC-17 (a write over GET with personal data in the query
+# string).
+CLIENT_GET_SAFE_FUNCS = {"sync"}
 
 
 _docs = "/docs" if settings.environment == "local" else None
 app = FastAPI(title="TSI DPDP CMS Python", docs_url=_docs, redoc_url=_docs and "/redoc")
+
+
+CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        # P12-08: every page script is a same-origin file (web/vendor/ holds the
+        # pinned Tailwind, qrcodejs and SheetJS builds), and no page carries an
+        # inline script or handler, so script-src is 'self' alone. Styles keep
+        # 'unsafe-inline': the Tailwind runtime injects a <style> element.
+        "script-src 'self'",
+        "script-src-attr 'none'",
+        # No page loads a third-party stylesheet or font any more.
+        "style-src 'self' 'unsafe-inline'",
+        "font-src 'self' data:",
+        "img-src 'self' data: blob:",
+        # The voice-consent tour page calls the Sarvam text-to-speech API.
+        "connect-src 'self' https://api.sarvam.ai",
+        "media-src 'self' data: blob:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
 
 
 @app.middleware("http")
@@ -89,6 +169,13 @@ async def headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    # M-03: the consoles load scripts only from this origin and the two CDNs
+    # they name; inline handlers still need 'unsafe-inline' until they are
+    # moved into files, but framing, plugins, base-tag and form hijacking and
+    # off-origin XHR are all refused.
+    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     return response
 
 
@@ -100,7 +187,19 @@ class _DbJSONResponse(JSONResponse):
         return json.dumps(content, ensure_ascii=False, allow_nan=False, default=str).encode("utf-8")
 
 
-def _json_response(data: Any, status: int = 200) -> Response:
+# The download name of each function that returns a PDF.
+PDF_FILENAMES = {"download_breach_report": "breach-report.pdf"}
+
+
+def _json_response(data: Any, status: int = 200, func: str = "") -> Response:
+    if isinstance(data, bytes):
+        # Binary exports (UD-04 PDF, the P12-12 breach report) are served as a download.
+        filename = PDF_FILENAMES.get(func, "consent-history.pdf")
+        return Response(
+            data,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     if isinstance(data, str):
         return PlainTextResponse(data)
     return _DbJSONResponse(data if data is not None else {}, status_code=status)
@@ -108,18 +207,172 @@ def _json_response(data: Any, status: int = 200) -> Response:
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok"}
+    tables = (
+        "consent_records",
+        "consent_policies",
+        "data_principal",
+        "fiduciaries",
+        "grievances",
+        "purge_requests",
+        "audit_logs",
+        "ropa_entries",
+        "breach_incidents",
+        "evidence_certificates",
+    )
+    try:
+        with db.connection() as conn, conn.cursor() as cur:
+            for table in tables:
+                cur.execute("SELECT to_regclass(%s) AS table_name", (f"public.{table}",))
+                row = cur.fetchone()
+                if not row or not row.get("table_name"):
+                    return JSONResponse(
+                        {"status": "degraded", "detail": f"database schema is incomplete: missing {table}"},
+                        status_code=503,
+                    )
+        return {"status": "ok"}
+    except Exception:
+        # P12-09: the exception text names hosts, roles and schema; it goes to
+        # the log, never to an unauthenticated caller.
+        log.exception("healthz: database check failed")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+
+
+def _health_detail_allowed(request: Request) -> bool:
+    """P12-09: detail only for a caller presenting HEALTHZ_TOKEN."""
+    token = settings.healthz_token
+    supplied = request.headers.get("x-health-token") or ""
+    return bool(token) and hmac.compare_digest(supplied.encode(), token.encode())
+
+
+@app.get("/healthz/worker")
+async def healthz_worker(request: Request):
+    """R6-d: 503 when the background worker has not completed a cycle within
+    five poll intervals (minimum ten minutes), or a sweep failed last cycle.
+    P12-09: the body is the status alone unless X-Health-Token matches."""
+    try:
+        row = db.one(
+            "SELECT last_cycle_at, poll_seconds, failed_sweeps,"
+            " EXTRACT(EPOCH FROM NOW() - last_cycle_at) AS age_seconds"
+            " FROM worker_heartbeat WHERE worker_name = 'default'"
+        )
+    except Exception:
+        log.exception("healthz/worker: heartbeat read failed")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+    if not row:
+        return JSONResponse({"status": "stale"}, status_code=503)
+    limit = max(600, 5 * int(row["poll_seconds"] or 30))
+    age = float(row["age_seconds"])
+    failed = row["failed_sweeps"] or []
+    status = "stale" if age > limit else ("degraded" if failed else "ok")
+    body: dict[str, Any] = {"status": status}
+    if _health_detail_allowed(request):
+        body.update(
+            last_cycle_at=row["last_cycle_at"].isoformat(),
+            age_seconds=round(age),
+            failed_sweeps=failed,
+        )
+    return JSONResponse(body, status_code=200 if status == "ok" else 503)
 
 
 async def payload_from(request: Request) -> dict:
     if request.method == "GET":
         return dict(request.query_params)
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    # PT-03: a body is parsed as a form only when it says it is one. A malformed
+    # JSON body used to fall through to form parsing and raise (a 500, and a
+    # hard dependency on python-multipart); it is now the caller's 400.
+    if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
+        try:
+            return dict(await request.form())
+        except Exception as exc:
+            raise ApiError(400, "Bad Request", "The form body could not be parsed.") from exc
+    raw = await request.body()
+    if not raw.strip():
+        return {}
     try:
-        body = await request.json()
-        return body if isinstance(body, dict) else {}
-    except Exception:
-        form = await request.form()
-        return dict(form)
+        body = json.loads(raw)
+    except ValueError as exc:
+        raise ApiError(400, "Bad Request", "The request body is not valid JSON.") from exc
+    return body if isinstance(body, dict) else {}
+
+
+def _is_read_classified(service: str, func: str) -> bool:
+    """SEC-17: a function may run over GET only when it is classified as a read.
+
+    The same rule the role gate uses: side-effect-free prefixes, or an explicit
+    `:read` entry in FUNC_PERMISSIONS. Everything else (a write, a
+    `validate_*`, an MFA round-trip, logout) must be a POST. P6-05: the client
+    API-key READ scopes are folded in too, so a genuine client read (`sync`,
+    which is a no-op) is not wrongly refused a GET. P6-10: `validate_consent`
+    is stamped READ in CLIENT_FUNC_SCOPES but WRITES (it inserts a
+    consent_validations row and, on denial, notifies the principal and queues a
+    webhook) — folding it in re-opened part of SEC-17, so it stays POST-only.
+    Folding in a client READ scope therefore requires the function to be
+    genuinely side-effect-free.
+    """
+    if func in MFA_EXEMPT_FUNCS:
+        return False
+    if CLIENT_FUNC_SCOPES.get(func) == "READ" and func in CLIENT_GET_SAFE_FUNCS:
+        return True
+    if func.startswith(READ_PREFIXES):
+        return True
+    permission = FUNC_PERMISSIONS.get((service, func))
+    return bool(permission and permission.endswith(":read"))
+
+
+def client_ip(request: Request) -> str | None:
+    """The caller's IP, used for audit and throttle buckets.
+
+    P5-02: when the API sits behind a reverse proxy, every request arrives from
+    the proxy and `request.client.host` is the proxy's address — so all
+    operators would share one IP throttle bucket. X-Forwarded-For is honoured
+    only when the immediate peer is a configured trusted proxy
+    (TRUSTED_PROXY_IPS); a direct caller can never self-declare its identity.
+    P6-04: the chain is walked RIGHT-to-LEFT, dropping trailing trusted hops, so
+    a caller behind the proxy cannot force a spoofed hop at the front of the
+    header to win — the rightmost non-trusted hop is the real client. Matches
+    support exact IPs and CIDR ranges.
+    """
+    import ipaddress
+
+    if request.client is None:
+        return None
+    peer = request.client.host
+
+    def trusted(ip: str) -> bool:
+        for entry in settings.trusted_proxy_ips or ():
+            try:
+                if "/" in entry and ipaddress.ip_address(ip) in ipaddress.ip_network(entry, strict=False):
+                    return True
+            except ValueError:
+                continue
+            if entry == ip:
+                return True
+        return False
+
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded and trusted(peer):
+        chain = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+        # Rightmost hop was appended by the nearest proxy. Walk right-to-left,
+        # skipping hops that are themselves trusted proxies, and return the first
+        # untrusted hop — that is the true client that entered the proxy fleet.
+        for hop in reversed(chain):
+            if trusted(hop):
+                continue
+            return hop
+        return peer
+    return peer
+
+
+def _bootstrap_authorized(ctx: RequestContext) -> bool:
+    supplied = (
+        ctx.headers.get("x-bootstrap-token")
+        or ctx.headers.get("X-Bootstrap-Token")
+        or ctx.payload.get("bootstrap_token")
+    )
+    if not supplied:
+        return False
+    return hmac.compare_digest(str(supplied), settings.bootstrap_token)
 
 
 def authenticate(ctx: RequestContext) -> None:
@@ -131,15 +384,70 @@ def authenticate(ctx: RequestContext) -> None:
     if ctx.category == "bootstrap":
         if (ctx.service, ctx.func) not in BOOTSTRAP_ALLOWED:
             raise ApiError(403, "Forbidden", "Bootstrap is limited to initial setup.")
+        if not _bootstrap_authorized(ctx):
+            raise ApiError(401, "Unauthorized", "A valid bootstrap token is required.")
         return
     if ctx.category == "admin":
         if func in ADMIN_NOAUTH_FUNCS:
             return
-        raw = bearer_token(ctx.headers) or ctx.payload.get("auth")
+        # SEC-17: a credential never comes from a ?auth= query parameter. The
+        # query string is the only thing GET carries, so dropping the parameter
+        # closes the "re-send a POST as GET to skip auth" vector twice over.
+        raw = bearer_token(ctx.headers)
         token = decode_token(raw)
         if not token:
             raise ApiError(401, "Unauthorized", "Authentication failed.")
-        ctx.auth_token = token
+        # Principal and operator JWTs share a signing key, so the token type must
+        # be checked. P17-02: only typ=operator is an operator session; any other
+        # type (principal, or one added later) is refused, not just principal.
+        if not is_operator_token(token):
+            raise ApiError(401, "Unauthorized", "Authentication failed.")
+        # Every admin call must map to an ACTIVE operator. This also revokes the
+        # tokens of deactivated accounts, and makes the database role (not the
+        # role claim baked into the token) the one that is authorised.
+        operator = db.one(
+            f"""
+            SELECT o.id, o.role, o.fiduciary_id, o.mfa_enabled,
+                   EXTRACT(EPOCH FROM o.tokens_valid_after) AS valid_after,
+                   EXISTS (SELECT 1 FROM revoked_tokens r WHERE r.jti = %s) AS revoked
+            FROM operators o
+            WHERE o.email_hmac = {db.hmac_expr()} AND o.status = 'ACTIVE' LIMIT 1
+            """,
+            (str(token.get("jti") or ""), *db.bind_hmac(token.get("email", ""))),
+        )
+        if not operator:
+            raise ApiError(401, "Unauthorized", "Authentication failed.")
+        # SA-05: logout revokes the one token; deactivation or a password change
+        # revokes every token issued before it, immediately rather than at expiry.
+        if operator.get("revoked") or (
+            operator.get("valid_after") is not None and int(token.get("iat") or 0) < int(operator["valid_after"])
+        ):
+            raise ApiError(401, "Unauthorized", "This session has been revoked. Please sign in again.")
+        # SA-06: an account with MFA enabled must present an mfa-verified token
+        # for ANY function except the MFA round-trip itself and logout.
+        if token.get("mfa") is not True and func not in MFA_EXEMPT_FUNCS and operator["mfa_enabled"]:
+            raise ApiError(
+                403,
+                "Forbidden",
+                "Multi-factor verification is required to continue. Call verify_mfa with the code from your authenticator app.",
+            )
+        ctx.auth_token = {**token, "role": operator["role"]}
+        ctx.operator_id = str(operator["id"])
+        # SEC-18: a non-ADMIN operator with a NULL fiduciary_id defeats every
+        # tenancy check, so the shape is refused at the door — a data migration
+        # (db/22) is not a runtime control and this must not fail OPEN the moment
+        # the shape recurs by restore, direct SQL, or re-activating an account.
+        if str(operator["role"]).upper() != "ADMIN" and not operator.get("fiduciary_id"):
+            raise ApiError(403, "Forbidden", "This operator is not bound to a fiduciary and cannot be authenticated.")
+        # A fiduciary-scoped operator (DPO, OPERATOR, AUDITOR...) is bound to its
+        # own tenant exactly like an API key: never trust a body-supplied
+        # fiduciary_id. Only a global ADMIN selects a tenant via the payload.
+        if operator.get("fiduciary_id") and str(operator["role"]).upper() != "ADMIN":
+            ctx.requested_fiduciary_id = ctx.payload.get("fiduciary_id")
+            ctx.fiduciary_id = str(operator["fiduciary_id"])
+            ctx.payload["fiduciary_id"] = ctx.fiduciary_id
+        # SA-02/SA-03: every admin function is gated by the roles table.
+        enforce_role_permission(ctx)
         return
     if ctx.category == "client":
         if func not in CLIENT_ALLOWED_FUNCS:
@@ -152,12 +460,19 @@ def authenticate(ctx: RequestContext) -> None:
             ctx.fiduciary_id = str(principal_claims.get("fid"))
             ctx.principal_user_id = str(principal_claims.get("sub"))
             ctx.auth_via_principal_jwt = True
-            if ctx.payload.get("user_id") and ctx.payload["user_id"] != ctx.principal_user_id:
+            ctx.session_id = str(principal_claims.get("jti") or "") or None
+            if ctx.payload.get("user_id") and not same_principal(ctx.payload["user_id"], ctx.principal_user_id):
                 raise ApiError(
                     403, "Forbidden", "User ID mismatch: token does not authorize access to the requested principal."
                 )
+            # A principal token is scoped to its own fiduciary: never trust a
+            # fiduciary_id supplied in the request body.
+            ctx.payload["fiduciary_id"] = ctx.fiduciary_id
+            # The token names the principal; bind it so schema validation and the
+            # service see the same user_id the caller is authorised for.
+            ctx.payload["user_id"] = ctx.principal_user_id
             return
-        ok, fid, scopes = api_key_valid(
+        ok, fid, scopes, app_id = api_key_valid(
             ctx.headers.get("x-api-key") or ctx.headers.get("X-API-Key"),
             ctx.headers.get("x-api-secret") or ctx.headers.get("X-API-Secret"),
         )
@@ -165,18 +480,28 @@ def authenticate(ctx: RequestContext) -> None:
             raise ApiError(401, "Unauthorized", "Invalid or inactive API Key/Secret.")
         ctx.fiduciary_id = fid
         ctx.permissions = scopes
+        ctx.app_id = app_id
+        # An API key is bound to one fiduciary: override any tenant id supplied in
+        # the body so a key can never read or write another tenant's records.
+        ctx.payload["fiduciary_id"] = ctx.fiduciary_id
 
 
-async def dispatch(request: Request, category: str, service: str) -> Response:
+async def dispatch(request: Request, category: str, service: str, func: str | None = None) -> Response:
     path = request.url.path
     try:
         if request.method not in {"POST", "GET"}:
             raise ApiError(405, "Method Not Allowed", "Only POST method is supported.")
         payload = await payload_from(request)
-        if request.method == "POST":
-            errors = validate_payload(payload)
-            if errors:
-                raise ApiError(400, "Bad Request", "; ".join(errors))
+        if func and not payload.get("_func"):
+            payload["_func"] = func
+        # P4-02: normalise once so schema lookup, scope resolution and dispatch
+        # all see the same function name.
+        payload["_func"] = str(payload.get("_func") or "").strip().lower()
+        if service == "wallet":
+            # D14: authorise the operation the wallet action runs, not "sync".
+            resolve_wallet_action(payload)
+        if not payload["_func"]:
+            raise ApiError(400, "Bad Request", "_func missing")
         ctx = RequestContext(
             path=path,
             category=category,
@@ -184,16 +509,42 @@ async def dispatch(request: Request, category: str, service: str) -> Response:
             payload=payload,
             headers={k: v for k, v in request.headers.items()},
             method=request.method,
+            source_ip=client_ip(request),
         )
         service_cls = SERVICE_REGISTRY.get(service)
         if not service_cls:
             raise ApiError(404, "Not Found", f"API endpoint not found: {path}")
         authenticate(ctx)
+        # P4-01: validate only once authenticate() has bound the token-derived
+        # fields (fiduciary_id, a principal's user_id); a wallet call is checked
+        # against the schema of the function its action resolved to.
+        # SEC-17: validation runs on GET too. The advisory-lock-free re-send of a
+        # POST as a GET is exactly how a caller skipped every one of the 142
+        # schemas; `payload_from` still loads query parameters, so a GET body is
+        # validated like any other.
+        if request.method == "GET" and not _is_read_classified(service, ctx.func):
+            raise ApiError(405, "Method Not Allowed", f"{ctx.func} is not a read and cannot be called with GET.")
+        errors = validate_payload(ctx.payload)
+        if errors:
+            raise ApiError(400, "Bad Request", "; ".join(errors))
         result = service_cls().handle(ctx)
-        status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_")) else 200
-        return _json_response(result, status=status)
+        status = 201 if ctx.func.startswith(("create_", "generate_", "record_", "report_", "submit_")) else 200
+        return _json_response(result, status=status, func=ctx.func)
     except ApiError as exc:
         return JSONResponse(error_body(exc.status, exc.error, exc.message, path), status_code=exc.status)
+    except psycopg.errors.DataError:
+        # PT-01: a malformed id, an over-long value or a bad date reaching SQL is
+        # the caller's error. It used to surface as a 500.
+        log.info("Data error on %s", path)
+        return JSONResponse(
+            error_body(400, "Bad Request", "A value is malformed, out of range or too long.", path), status_code=400
+        )
+    except psycopg.errors.UniqueViolation:
+        # P12-06: a duplicate is the caller's conflict, not a server fault.
+        log.info("Unique violation on %s", path)
+        return JSONResponse(
+            error_body(409, "Conflict", "A record with these identifiers already exists.", path), status_code=409
+        )
     except Exception:
         log.exception("Unhandled error on %s", path)
         return JSONResponse(
@@ -213,8 +564,22 @@ async def categorized_api(request: Request, category: str, service: str):
     return await dispatch(request, category, service)
 
 
+@app.api_route("/api/v1/{category}/{service}/{func}", methods=["POST", "GET", "OPTIONS"])
+async def categorized_api_func(request: Request, category: str, service: str, func: str):
+    if category not in {"admin", "client", "public", "bootstrap"}:
+        return await dispatch(request, "admin", category, func)
+    return await dispatch(request, category, service, func)
+
+
 @app.get("/{full_path:path}")
 async def static_or_index(full_path: str):
+    # CF-01: WEB-INF (validator schemas, server config) is never served, matching
+    # the servlet container the Java original ran in. Checked per path segment,
+    # case-insensitively and ignoring trailing dots (WEB-INF. resolves to WEB-INF on Windows).
+    if any(
+        part.strip().rstrip(". ").lower() in {"web-inf", "meta-inf"} for part in full_path.replace("\\", "/").split("/")
+    ):
+        return JSONResponse(error_body(404, "Not Found", "Not Found", f"/{full_path}"), status_code=404)
     rel = full_path or "index.html"
     path = (WEB_ROOT / rel).resolve()
     # A directory request (/rights, /console/dpo) serves that directory's own

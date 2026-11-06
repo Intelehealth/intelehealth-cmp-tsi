@@ -9,6 +9,10 @@
     "user_id": {
       "type": "string"
     },
+    "user_ref": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "fiduciary_id": {
       "type": "string"
     },
@@ -17,10 +21,33 @@
     },
     "limit": {
       "type": "number"
+    },
+    "purpose_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "start_date": {
+      "type": "string"
+    },
+    "end_date": {
+      "type": "string"
     }
   },
   "required": [
-    "_func",
-    "user_id"
+    "_func"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "user_id"
+      ]
+    },
+    {
+      "required": [
+        "user_ref"
+      ]
+    }
   ]
 }

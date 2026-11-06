@@ -1,0 +1,64 @@
+# Settings for the Ubuntu installer. Copy to install.conf next to this file
+# (or point INSTALL_CONF at another path) and edit before running install.sh.
+# Secrets are NOT set here: the installer generates them once into
+# $CONF_DIR/tsi-cms.env and never overwrites them.
+
+# --- Public endpoint ---
+# Host name (or IP address) people open in the browser.
+DOMAIN=cms.example.in
+# letsencrypt : nginx + certificate from Let's Encrypt (DOMAIN must resolve here, port 80 reachable)
+# selfsigned  : nginx + self-signed certificate (testing / internal networks)
+# external    : your own nginx outside this host/container already terminates TLS
+#               for https://$DOMAIN and proxies to APP_BIND_HOST:APP_PORT. No nginx,
+#               certbot or certificate here. Set APP_BIND_HOST and EXTRA_TRUSTED_PROXY_IPS.
+# none        : no nginx; the app listens on 127.0.0.1:$APP_PORT only (an external
+#               load balancer or tunnel must terminate TLS; see EXTRA_TRUSTED_PROXY_IPS)
+TLS_MODE=letsencrypt
+# Only for TLS_MODE=letsencrypt.
+LETSENCRYPT_EMAIL=
+# Console origins allowed by CORS. Empty = https://$DOMAIN
+ALLOWED_ORIGINS=
+# Comma-separated IPs/CIDRs of proxies in front of the app (for example a cloud
+# load balancer's subnets). 127.0.0.1 (local nginx) is always added.
+# TLS_MODE=external: the address your nginx connects FROM as seen inside this
+# container (usually the host's bridge IP, e.g. 10.0.3.1 for lxcbr0, 172.17.0.1
+# for docker0). It is trusted for X-Forwarded-For and, with ENABLE_UFW=yes, is the
+# only source allowed to reach APP_PORT.
+EXTRA_TRUSTED_PROXY_IPS=
+# Address uvicorn listens on. Keep 127.0.0.1 unless the proxy is outside this
+# host/container (TLS_MODE=external): then use this container's IP or 0.0.0.0.
+APP_BIND_HOST=127.0.0.1
+
+# --- Application ---
+# local | test | staging | production. Anything but local hides /docs, requires
+# SSL to Postgres and requires OUTBOUND_ALLOWED_HOSTS.
+APP_ENV=production
+# Rule 14: comma-separated hosts personal data may be sent to (webhooks, SMS/push
+# gateways, DigiLocker verifier, SMTP relay). Required unless APP_ENV=local.
+# '*' is refused in production. See docs/security/OUTBOUND_DESTINATIONS.md.
+OUTBOUND_ALLOWED_HOSTS=
+# Optional UI label, max 12 characters.
+BRAND_NAME=
+# uvicorn worker processes for the API.
+UVICORN_WORKERS=2
+APP_PORT=8080
+
+# --- Database ---
+PG_VERSION=15
+DB_NAME=tsi_cms
+DB_USER=tsi_admin
+
+# --- Paths and service account ---
+APP_USER=tsi
+INSTALL_DIR=/opt/tsi-cms
+DATA_DIR=/var/lib/tsi-cms
+CONF_DIR=/etc/tsi-cms
+BACKUP_DIR=/var/backups/tsi-cms
+
+# --- Backups (daily pg_dump + exports archive via systemd timer) ---
+BACKUP_TIME=02:30
+BACKUP_KEEP_DAYS=35
+
+# --- Host firewall (ufw) ---
+ENABLE_UFW=yes
+SSH_PORT=22

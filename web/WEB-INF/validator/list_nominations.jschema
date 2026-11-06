@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "List Nominations",
+  "type": "object",
+  "properties": {
+    "_func":                    { "type": "string" },
+    "fiduciary_id":             { "type": "string" },
+    "nominating_principal_id":  { "type": "string" },
+    "status":                   { "type": "string" },
+    "limit":                    { "type": "integer" }
+  },
+  "required": ["_func"]
+}

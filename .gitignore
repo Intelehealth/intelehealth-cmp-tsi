@@ -18,7 +18,15 @@ htmlcov/
 
 # App runtime
 exports/
+backups/
 *.log
+
+# Local BRD / analysis artifacts (not for the repo)
+DPDP_Python_Port_Findings.docx
+# P5-05: a workbook describing open security findings must never be committed;
+# security workbooks live outside the repository.
+*.xlsx
+*.xlsm
 
 # Editors and OS
 .idea/
@@ -28,3 +36,6 @@ exports/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Automated pen-test report (CI artifact)
+python_port/pentest-report.xml

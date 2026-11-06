@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import logging
+import re
+import smtplib
+from email.message import EmailMessage
+
+from . import db, pii
+from .audit import log_event
+from .config import settings
+from .defaults import (
+    DEFAULT_NOTIFICATION_MESSAGES,
+    OUT_OF_BAND_PLACEHOLDER,
+    PLAIN_NOTIFICATION_MESSAGES,
+    SENSITIVE_CONTEXT_KEYS,
+)
+from .netutil import post_json
+
+log = logging.getLogger("dpdpcms.delivery")
+
+CHANNELS = ("IN_APP", "EMAIL", "SMS", "PUSH")
+
+
+def render_message(
+    fiduciary_id: str,
+    notification_type: str,
+    recipient_type: str,
+    context: dict | None = None,
+    language: str | None = None,
+    channel: str = "IN_APP",
+) -> tuple[str, str]:
+    """Return (subject, body) for a notification type.
+
+    Uses the DPO-configured template (notification_message_templates), falling
+    back to the built-in English defaults. Message lookup is live — editing the
+    template changes how newly delivered notifications read. NT-03: the
+    template's text in `language` (an Eighth Schedule code the principal chose)
+    is used when the DPO has written one, else English. P7-05: `{field}`
+    placeholders are filled from the notification's own context (a grievance
+    reference, say).
+
+    P10-10: a placeholder the context cannot fill never reaches the recipient -
+    the type's plain wording is used instead, or the placeholder is dropped.
+    P10-07: outside the app (any channel but IN_APP) free-text context such as
+    a grievance resolution summary is replaced by a pointer to the app, since
+    SMS and push gateways are third parties and the text is often clinical.
+    """
+    defaults = DEFAULT_NOTIFICATION_MESSAGES.get(notification_type, {})
+    body = (language and defaults.get(language)) or defaults.get("en") or _humanise(notification_type)
+    template = db.one(
+        "SELECT messages FROM notification_message_templates WHERE fiduciary_id = %s AND notification_type = %s",
+        (fiduciary_id, notification_type),
+    )
+    if template:
+        messages = template.get("messages") or {}
+        if isinstance(messages, dict):
+            # NT-03: the DPO's text in the principal's language, else the
+            # built-in text in that language, else the DPO's English.
+            chosen = (
+                (language and messages.get(language)) or (language and defaults.get(language)) or messages.get("en")
+            )
+            if chosen:
+                body = str(chosen)
+    values = dict(context) if isinstance(context, dict) else {}
+    if str(channel or "IN_APP").upper() != "IN_APP":
+        pointer = (language and OUT_OF_BAND_PLACEHOLDER.get(language)) or OUT_OF_BAND_PLACEHOLDER["en"]
+        for key in SENSITIVE_CONTEXT_KEYS:
+            if key in values or "{" + key + "}" in body:
+                values[key] = pointer
+    filled = fill_placeholders(body, values)
+    if _UNFILLED.search(filled):
+        plain = PLAIN_NOTIFICATION_MESSAGES.get(notification_type) or {}
+        fallback = (language and plain.get(language)) or plain.get("en")
+        filled = fallback if fallback else " ".join(_UNFILLED.sub("", filled).split())
+    return f"TSI DPDP CMS — {notification_type}", filled
+
+
+_UNFILLED = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _humanise(notification_type: str) -> str:
+    """Last-resort body for a type with no template: words, never the enum."""
+    words = str(notification_type or "notification").replace("_", " ").strip().lower()
+    return f"You have a new notice: {words}."
+
+
+def principal_language(fiduciary_id: str, user_id: str) -> str | None:
+    """NT-03: the language the principal last chose when giving consent."""
+    if not fiduciary_id or not user_id:
+        return None
+    row = db.one(
+        f"SELECT language_selected FROM consent_records WHERE fiduciary_id = %s AND {pii.match_sql('user_id')}"
+        " ORDER BY created_at DESC LIMIT 1",
+        (fiduciary_id, *pii.hmac_params(user_id)),
+    )
+    return str(row["language_selected"]) if row and row.get("language_selected") else None
+
+
+class _KeepMissing(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def fill_placeholders(text: str, context: dict | None) -> str:
+    if not context or not isinstance(context, dict) or "{" not in text:
+        return text
+    try:
+        return text.format_map(_KeepMissing({k: str(v) for k, v in context.items()}))
+    except Exception:  # noqa: BLE001 - a malformed DPO template must not halt delivery
+        return text
+
+
+def delivery_retention_days() -> int:
+    """SA-13: notification delivery retention, never below the Rule 6(1)(e) floor."""
+    from .jobs import RULE_6_1_E_MIN_RETENTION_DAYS
+
+    return max(int(settings.notification_delivery_retention_days), RULE_6_1_E_MIN_RETENTION_DAYS)
+
+
+def _enqueue(notification_id: str, channel: str, recipient: str | None, status: str = "PENDING") -> None:
+    db.execute(
+        f"""
+        INSERT INTO notification_deliveries (notification_id, channel, recipient_enc, recipient_hmac, status, created_at)
+        VALUES (%s, %s, {pii.PID_VALUES}, %s, NOW())
+        """,
+        (notification_id, channel, *pii.pid_params(recipient), status),
+    )
+
+
+def _recipient_email(recipient_type: str, recipient_id: str) -> str | None:
+    """Resolve a delivery address for a non-principal recipient from encrypted columns."""
+    tables = ("operators",) if recipient_type in {"DPO", "ADMIN", "OPERATOR"} else ("fiduciaries", "apps")
+    for table in tables:
+        # A bad recipient id (not a UUID, say) must never abort the delivery
+        # sweep — it just has no resolvable address.
+        try:
+            row = db.one(
+                f"SELECT {db.decrypt_col('email_enc')} AS email FROM {table} WHERE id = %s AND email_enc IS NOT NULL",
+                (*db.bind_key(), recipient_id),
+            )
+        except Exception:
+            log.warning("Could not resolve email for %s recipient %s", recipient_type, recipient_id, exc_info=True)
+            continue
+        if row and row.get("email"):
+            return str(row["email"])
+    return None
+
+
+def _backfill_deliveries(limit: int) -> int:
+    """Create delivery rows for notifications that do not have any yet.
+
+    In-app delivery is an immediate success (the notifications row is the in-app
+    artifact). EMAIL / SMS / PUSH rows are created only when the corresponding
+    channel is configured, so an unconfigured channel never silently claims a
+    notification was delivered.
+    """
+    rows = db.all(
+        f"""
+        SELECT n.id, n.recipient_type, {pii.dec_sql("n.recipient_id_enc")} AS recipient_id, n.fiduciary_id,
+               n.notification_type
+        FROM notifications n
+        LEFT JOIN notification_deliveries d ON d.notification_id = n.id
+        WHERE d.id IS NULL
+          AND n.created_at > NOW() - make_interval(days => %s)
+        ORDER BY n.created_at
+        LIMIT %s
+        """,
+        # SA-13: a notification older than the delivery retention has had its
+        # delivery rows pruned on purpose; it must not be dispatched again.
+        (*db.bind_key(), delivery_retention_days(), limit),
+    )
+    count = 0
+    for row in rows:
+        nid = str(row["id"])
+        recipient_type = str(row["recipient_type"] or "").upper()
+        recipient_id = str(row["recipient_id"] or "")
+        _enqueue(nid, "IN_APP", recipient_id, status="SENT")
+        count += 1
+        # LG-03: the in-app notice is delivered the moment it is enqueued, so
+        # that is when its dispatch is audited (other channels on send).
+        log_event(
+            recipient_id or "SYSTEM",
+            str(row["fiduciary_id"]) if row.get("fiduciary_id") else None,
+            "NOTIFICATION",
+            nid,
+            "NOTIFICATION_DISPATCHED",
+            {"channel": "IN_APP", "notification_type": row["notification_type"], "status": "SENT"},
+            initiator="SYSTEM",
+        )
+        if settings.smtp_host and recipient_type not in {"PRINCIPAL"}:
+            email = _recipient_email(recipient_type, recipient_id)
+            if email:
+                _enqueue(nid, "EMAIL", email)
+                count += 1
+        if settings.sms_gateway_url and recipient_type == "PRINCIPAL":
+            _enqueue(nid, "SMS", recipient_id)
+            count += 1
+        if settings.push_gateway_url:
+            _enqueue(nid, "PUSH", recipient_id)
+            count += 1
+    return count
+
+
+def _deliver_email(delivery_id: str, recipient: str, subject: str, body: str) -> tuple[str | None, str | None]:
+    """Send via SMTP. Returns (error, sent_at note)."""
+    if not settings.smtp_host:
+        return "SMTP not configured", None
+    from .netutil import outbound_host_allowed
+
+    if not outbound_host_allowed(settings.smtp_host):
+        # Rule 14: the mail relay is an outbound destination like any other.
+        return "SMTP host is not an approved outbound destination (OUTBOUND_ALLOWED_HOSTS)", None
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.smtp_from or settings.smtp_username
+    message["To"] = recipient
+    message.set_content(body)
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as server:
+            if settings.smtp_starttls:
+                server.starttls()
+            if settings.smtp_username:
+                server.login(settings.smtp_username, settings.smtp_password)
+            server.send_message(message)
+        return None, None
+    except Exception as exc:  # noqa: BLE001 - any SMTP failure is a delivery failure
+        log.warning("Email delivery %s failed: %s", delivery_id, exc)
+        return str(exc), None
+
+
+def _deliver_gateway(channel: str, recipient_id: str, body: str) -> tuple[str | None, str | None]:
+    url = settings.sms_gateway_url if channel == "SMS" else settings.push_gateway_url
+    if not url:
+        return f"{channel} gateway not configured", None
+    try:
+        status, response = post_json(
+            url, {"channel": channel, "recipient_id": recipient_id, "message": body}, timeout=20
+        )
+        if status is None:
+            return f"{channel} gateway unreachable: {response}", None
+        if status >= 400:
+            return f"{channel} gateway HTTP {status}: {response[:200]}", None
+        return None, None
+    except Exception as exc:  # noqa: BLE001
+        return f"{channel} gateway error: {exc}", None
+
+
+def _reclaim_stale_processing() -> None:
+    db.execute(
+        """
+        UPDATE notification_deliveries
+        SET status = 'PENDING'
+        WHERE status = 'PROCESSING'
+          AND last_attempt_at IS NOT NULL
+          AND last_attempt_at < NOW() - INTERVAL '30 minutes'
+        """
+    )
+
+
+def _claim_delivery(delivery_id: str) -> bool:
+    return (
+        db.execute(
+            """
+            UPDATE notification_deliveries
+            SET status = 'PROCESSING', last_attempt_at = NOW()
+            WHERE id = %s AND status = 'PENDING'
+            """,
+            (delivery_id,),
+        )
+        == 1
+    )
+
+
+def _deliver_pending(limit: int) -> dict[str, int]:
+    _reclaim_stale_processing()
+    # The recipient address and id are decrypted only here, at send time.
+    rows = db.all(
+        f"""
+        SELECT d.id, d.notification_id, d.channel, {pii.dec_sql("d.recipient_enc")} AS recipient, d.attempt_count,
+               n.fiduciary_id, n.notification_type, n.recipient_type,
+               {pii.dec_sql("n.recipient_id_enc")} AS recipient_id, n.context
+        FROM notification_deliveries d
+        JOIN notifications n ON n.id = d.notification_id
+        WHERE d.status = 'PENDING'
+        ORDER BY d.created_at
+        LIMIT %s
+        """,
+        (*db.bind_key(), *db.bind_key(), limit),
+    )
+    sent = failed = skipped = 0
+    for row in rows:
+        delivery_id = str(row["id"])
+        if not _claim_delivery(delivery_id):
+            continue
+        channel = str(row["channel"] or "").upper()
+        attempt = int(row["attempt_count"] or 0) + 1
+        fid = str(row["fiduciary_id"]) if row.get("fiduciary_id") else ""
+        # GR-03: a notice about a grievance carries the language it was filed
+        # in; otherwise a principal hears in the language of their last consent.
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        language = context.get("language") or (
+            principal_language(fid, str(row.get("recipient_id") or ""))
+            if str(row["recipient_type"] or "").upper() == "PRINCIPAL"
+            else None
+        )
+        subject, body = render_message(
+            fid, row["notification_type"], row["recipient_type"], row.get("context"), language=language, channel=channel
+        )
+        error: str | None
+        if channel == "IN_APP":
+            error, _ = None, None
+            status = "SENT" if error is None else "FAILED"
+            db.execute(
+                "UPDATE notification_deliveries SET status = %s, attempt_count = %s, last_attempt_at = NOW(), sent_at = NOW(), last_error = NULL WHERE id = %s",
+                (status, attempt, delivery_id),
+            )
+            sent += 1
+            continue
+        if channel == "EMAIL":
+            error, _ = _deliver_email(delivery_id, row["recipient"] or "", subject, body)
+        elif channel in {"SMS", "PUSH"}:
+            error, _ = _deliver_gateway(channel, row["recipient"] or row["recipient_id"] or "", body)
+        else:
+            error = f"Unknown channel {channel}"
+        if error is None:
+            db.execute(
+                "UPDATE notification_deliveries SET status = 'SENT', attempt_count = %s, last_attempt_at = NOW(), sent_at = NOW(), last_error = NULL WHERE id = %s",
+                (attempt, delivery_id),
+            )
+            sent += 1
+            # LG-03: every dispatch (attempt and outcome) is audited so the trail
+            # shows what was notified, through which channel, and when.
+            log_event(
+                row.get("recipient_id") or "SYSTEM",
+                fid,
+                "NOTIFICATION",
+                delivery_id,
+                "NOTIFICATION_DISPATCHED",
+                {"channel": channel, "notification_type": row["notification_type"], "status": "SENT"},
+                purpose_id=None,
+                consent_status=None,
+                initiator="SYSTEM",
+            )
+        elif channel not in {"EMAIL", "SMS", "PUSH"}:
+            db.execute(
+                "UPDATE notification_deliveries SET status = 'SKIPPED', attempt_count = %s, last_attempt_at = NOW(), last_error = %s WHERE id = %s",
+                (attempt, error, delivery_id),
+            )
+            skipped += 1
+        elif attempt >= settings.notification_retry_limit:
+            db.execute(
+                "UPDATE notification_deliveries SET status = 'FAILED', attempt_count = %s, last_attempt_at = NOW(), last_error = %s WHERE id = %s",
+                (attempt, error, delivery_id),
+            )
+            failed += 1
+        else:
+            db.execute(
+                "UPDATE notification_deliveries SET status = 'PENDING', attempt_count = %s, last_attempt_at = NOW(), last_error = %s WHERE id = %s",
+                (attempt, error, delivery_id),
+            )
+            failed += 1
+    return {"sent": sent, "failed": failed, "skipped": skipped}
+
+
+def process_pending_notifications(limit: int | None = None) -> dict[str, int]:
+    """Backfill and deliver pending notifications. Called by the worker."""
+    limit = limit or settings.worker_batch_size
+    enqueued = _backfill_deliveries(limit)
+    counts = _deliver_pending(limit)
+    counts["enqueued"] = enqueued
+    return counts

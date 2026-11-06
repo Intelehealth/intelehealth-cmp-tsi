@@ -18,10 +18,15 @@ def _validator(func: str) -> Draft7Validator | None:
 
 
 def validate_payload(payload: dict) -> list[str]:
-    func = payload.get("_func")
+    func = str(payload.get("_func") or "").strip().lower()
     if not func:
         return ["_func missing"]
-    validator = _validator(str(func))
+    # P4-02: function names map to lower-case schema files; reject anything that
+    # is not a plain identifier so it can never escape VALIDATOR_ROOT.
+    if not func.replace("_", "").isalnum() or not func.isascii():
+        return [f"Unsupported function: {func}"]
+    validator = _validator(func)
     if validator is None:
-        return []
+        # Fail closed: a function without a schema is never dispatched unvalidated.
+        return [f"Unsupported function: {func}"]
     return [error.message for error in validator.iter_errors(payload)]

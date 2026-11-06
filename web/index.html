@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TSI DPDP CMS - Console Login</title>
     <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="vendor/tailwindcss-3.4.16.js"></script>
     <style>
         :root {
             --tsi-primary: #006A67; /* Primary Dark Teal Color */
@@ -89,7 +89,7 @@
     </div>
 
     <!-- Login Form -->
-    <form onsubmit="handleLogin(event)">
+    <form id="login-form">
         <div class="space-y-5">
             <!-- Email/Username Input -->
             <div>
@@ -110,6 +110,14 @@
                        placeholder="••••••••••••">
             </div>
 
+            <!-- MFA Code Input (two-step login) -->
+            <div id="mfa-field" class="hidden">
+                <label for="mfa-code" class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Authenticator Code</label>
+                <input type="text" id="mfa-code" name="mfa-code" inputmode="numeric" autocomplete="one-time-code"
+                       class="input-style w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-2 focus:ring-primary-text focus:border-primary-text outline-none transition-all text-sm"
+                       placeholder="000000">
+            </div>
+
             <!-- Submit Button -->
             <button type="submit"
                     class="animated-button w-full h-11 inline-flex items-center justify-center rounded-md font-bold text-sm uppercase tracking-widest shadow-lg hover:bg-opacity-90 transition-all">
@@ -125,79 +133,6 @@
 
 </div>
 
-<script>
-/**
- * Function to handle the admin login process via API authentication using the Fetch API.
- */
-async function handleLogin(event) {
-    const API_LOGIN_URL = 'api/v1/admin/operator';
-    const ADMIN_DASHBOARD_URL = 'console/admin/dashboard.html';
-    const DPO_DASHBOARD_URL = 'console/dpo/dashboard.html';
-
-    event.preventDefault();
-    const email = document.getElementById('email').value;
-    const password = document.getElementById('password').value;
-    const messageArea = document.getElementById('login-message');
-
-    // Reset UI
-    messageArea.textContent = '';
-    messageArea.classList.add('hidden');
-    messageArea.classList.remove('text-red-500', 'text-teal-600', 'text-blue-500');
-
-    // Complexity Validation
-    if (password.length < 12) {
-        messageArea.textContent = "Error: Password must be at least 12 characters long.";
-        messageArea.classList.remove('hidden');
-        messageArea.classList.add('text-red-500');
-        return;
-    }
-
-    messageArea.textContent = "Verifying session with Consent Management System...";
-    messageArea.classList.remove('hidden');
-    messageArea.classList.add('text-blue-500');
-
-    try {
-        const payload = { _func: "login", identifier: email, password: password };
-
-        const response = await fetch(API_LOGIN_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        const responseData = await response.json();
-
-        if (response.ok && responseData.success === true) {
-            // Persist context for management console
-            localStorage.setItem('authToken', responseData.token);
-            localStorage.setItem('username', responseData.username);
-            localStorage.setItem('role', responseData.role);
-            localStorage.setItem('fiduciary_id', responseData.fiduciary_id);
-            localStorage.setItem('fiduciary_name', responseData.fiduciary_name);
-
-            messageArea.textContent = "Login successful. Redirecting to vault...";
-            messageArea.classList.replace('text-blue-500', 'text-teal-600');
-
-            setTimeout(() => {
-                if(responseData.role === 'ADMIN'){
-                    window.location.href = ADMIN_DASHBOARD_URL;
-                } else {
-                    window.location.href = DPO_DASHBOARD_URL;
-                }
-            }, 800);
-
-        } else {
-            const errorText = responseData.message || "Invalid credentials. Please verify your login ID and password.";
-            messageArea.textContent = errorText;
-            messageArea.classList.replace('text-blue-500', 'text-red-500');
-        }
-
-    } catch (error) {
-        messageArea.textContent = 'Network Error: Cannot reach the Consent Management System.';
-        messageArea.classList.replace('text-blue-500', 'text-red-500');
-        console.error('Connection error:', error);
-    }
-}
-</script>
+<script src="index.js"></script>
 </body>
 </html>

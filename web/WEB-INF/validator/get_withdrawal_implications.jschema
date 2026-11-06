@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "_func",
+    "user_id"
+  ],
+  "properties": {
+    "_func": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "fiduciary_id": {
+      "type": "string"
+    },
+    "purpose_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "CW-05: purposes to withdraw; omit for all."
+    },
+    "language": {
+      "type": "string"
+    },
+    "policy_id": {
+      "type": "string"
+    }
+  }
+}

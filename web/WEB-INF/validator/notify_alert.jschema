@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Generated schema for Root",
+  "type": "object",
+  "properties": {
+    "_func": { "type": "string" },
+    "recipient_type": { "type": "string", "enum": ["FIDUCIARY", "PROCESSOR", "PRINCIPAL"] },
+    "recipient_id": { "type": "string" },
+    "alert_type": { "type": "string" },
+    "event_ref_id": { "type": "string" },
+    "payload": { "type": "object" },
+    "requires_action": { "type": "boolean" }
+  },
+  "required": ["_func", "recipient_type", "alert_type"]
+}

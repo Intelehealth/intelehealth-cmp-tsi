@@ -13,7 +13,14 @@
       "type": "string"
     },
     "verification_mechanism": {
-      "type": "string"
+      "type": "string",
+      "enum": [
+        "EXISTING_ACCOUNT",
+        "DIGILOCKER",
+        "AADHAAR_VC",
+        "KYC_PROVIDER",
+        "OTP_LINKING"
+      ]
     },
     "provider_name": {
       "type": "string"
@@ -23,15 +30,15 @@
     },
     "proof_metadata": {
       "type": "object"
+    },
+    "fiduciary_id": {
+      "type": "string"
     }
   },
   "required": [
     "_func",
     "child_principal_id",
     "guardian_principal_id",
-    "verification_mechanism",
-    "provider_name",
-    "verification_ref_id",
-    "proof_metadata"
+    "verification_mechanism"
   ]
 }
