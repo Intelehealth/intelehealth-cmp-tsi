@@ -14,11 +14,15 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
+_MISSING = object()
+
 
 class ModuleGroup:
     def __init__(self, name: str, *modules: str):
         object.__setattr__(self, "_name", name)
         object.__setattr__(self, "_modules", tuple(import_module(m) for m in modules))
+        # attr -> [(module, value before the first patch, or _MISSING)]
+        object.__setattr__(self, "_originals", {})
 
     def __repr__(self) -> str:
         return f"<ModuleGroup {self._name}: {len(self._modules)} modules>"
@@ -31,13 +35,22 @@ class ModuleGroup:
 
     def __setattr__(self, attr: str, value: Any) -> None:
         holders = [m for m in self._modules if attr in vars(m)] or [self._modules[0]]
+        saved = self._originals.setdefault(attr, [(m, vars(m).get(attr, _MISSING)) for m in holders])
         for module in holders:
             setattr(module, attr, value)
+        # Setting every module back to what it held is an undo, not a patch.
+        if all(original is value for _module, original in saved):
+            del self._originals[attr]
 
     def __delattr__(self, attr: str) -> None:
-        for module in self._modules:
-            if attr in vars(module):
-                delattr(module, attr)
+        """Undo a patch. pytest's monkeypatch undoes one either by setting the old
+        value back or by deleting the attribute, depending on its version; a
+        delete must put every module's own value back, never remove it."""
+        for module, original in self._originals.pop(attr, ()):
+            if original is _MISSING:
+                vars(module).pop(attr, None)
+            else:
+                setattr(module, attr, original)
 
 
 jobs = ModuleGroup(
