@@ -20,7 +20,7 @@ Regenerate after adding, removing or renaming a service function, changing a val
 ## View
 
 - Import either JSON file into any OpenAPI viewer (Swagger UI, Swagger Editor, Redoc, Postman).
-- Or run the app with `TSI_DPDP_CMS_ENV=local` and open `/docs`. It shows the internal spec.
+- Or run the app with `TSI_DPDP_CMS_ENV=local` and load `/openapi.json` into a viewer; it is the internal spec. The app's own `/docs` page does not render yet: the Content-Security-Policy header blocks the Swagger UI scripts it loads from a CDN.
 
 ## What the documents contain
 
@@ -44,7 +44,7 @@ A production deployment does not publish a spec or Swagger UI, by design. These 
 
 - Outside the local environment the app turns `/docs` and `/redoc` off, and nothing in this change alters that.
 - nginx answers 404 for `/docs`, `/redoc` and `/openapi.json`. That block is what keeps `/openapi.json` off the network: the app itself still answers it on its own port. Outside local that is FastAPI's derived schema (the three catch-all routes, no function detail).
-- `TSI_DPDP_CMS_ENV` defaults to `local` when unset, and a local app serves the full internal spec at `/docs` and `/openapi.json` without a credential. Set `TSI_DPDP_CMS_ENV` explicitly on every deployed host.
+- `TSI_DPDP_CMS_ENV` defaults to `local` when unset, and a local app serves the full internal spec at `/openapi.json` without a credential. Set `TSI_DPDP_CMS_ENV` explicitly on every deployed host.
 
 ## Limits of the public document
 

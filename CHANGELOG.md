@@ -6,7 +6,7 @@ All notable changes in this branch are documented here for reviewers and operato
 
 ### Added (API documentation)
 
-- **OpenAPI specs** `docs/api/openapi-public.json` (client and public API, for integrators) and `docs/api/openapi-internal.json` (every function, with its role permission) are generated from the service registry, the validator schemas and the permission tables by `python -m dpdpcms_py.openapi_gen`. A test fails when they are stale. In the local environment `/docs` shows the internal spec; production still serves no spec. See [docs/api/README.md](docs/api/README.md).
+- **OpenAPI specs** `docs/api/openapi-public.json` (client and public API, for integrators) and `docs/api/openapi-internal.json` (every function, with its role permission) are generated from the service registry, the validator schemas and the permission tables by `python -m dpdpcms_py.openapi_gen`. A test fails when they are stale. In the local environment `/openapi.json` is the internal spec; production still serves no spec. See [docs/api/README.md](docs/api/README.md).
 
 ### Fixed (P17 — security review)
 
