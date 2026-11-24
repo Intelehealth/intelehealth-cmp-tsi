@@ -4,6 +4,10 @@ All notable changes in this branch are documented here for reviewers and operato
 
 ## [Unreleased] — P1/P2 Python port (branch `p1_changes`)
 
+### Added (API documentation)
+
+- **OpenAPI specs** `docs/api/openapi-public.json` (client and public API, for integrators) and `docs/api/openapi-internal.json` (every function, with its role permission) are generated from the service registry, the validator schemas and the permission tables by `python -m dpdpcms_py.openapi_gen`. A test fails when they are stale. In the local environment `/docs` shows the internal spec; production still serves no spec. See [docs/api/README.md](docs/api/README.md).
+
 ### Fixed (P17 — security review)
 
 - **P17-02** The admin API accepts operator tokens only. Every token now carries `typ` (`operator` or `principal`), and an admin call needs `typ=operator`; any other type is refused with 401 before the operator lookup, not just `principal`. Untyped tokens are honoured only if issued before the process started, so sessions from before the upgrade keep working until they expire (at most `token_ttl_minutes`).

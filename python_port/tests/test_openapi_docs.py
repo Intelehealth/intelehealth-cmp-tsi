@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from dpdpcms_py import main
 from dpdpcms_py import openapi_gen as gen
 from dpdpcms_py.config import VALIDATOR_ROOT
@@ -179,3 +180,34 @@ def test_error_schema_matches_error_body():
 def test_build_is_deterministic():
     first = json.dumps(gen.build_spec("internal"), sort_keys=True)
     assert first == json.dumps(gen.build_spec("internal"), sort_keys=True)
+
+
+# ── committed files ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("audience", ["public", "internal"])
+def test_committed_spec_is_current(audience):
+    path = gen.OUTPUT_DIR / gen.OUTPUTS[audience]
+    assert path.exists(), "run: python -m dpdpcms_py.openapi_gen"
+    assert path.read_text(encoding="utf-8") == gen.render(audience), (
+        "API changed; regenerate with: python -m dpdpcms_py.openapi_gen"
+    )
+
+
+def test_write_all_targets_the_given_directory(tmp_path):
+    written = gen.write_all(tmp_path)
+    assert sorted(p.name for p in written) == sorted(gen.OUTPUTS.values())
+    assert (tmp_path / "openapi-public.json").read_text(encoding="utf-8") == gen.render("public")
+
+
+def test_output_dir_does_not_depend_on_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert gen.OUTPUT_DIR.is_absolute() and gen.OUTPUT_DIR.parts[-2:] == ("docs", "api")
+
+
+def test_check_mode_reports_a_stale_file(tmp_path, monkeypatch):
+    gen.write_all(tmp_path)
+    (tmp_path / "openapi-public.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(gen, "OUTPUT_DIR", tmp_path)
+    assert gen.main(["--check"]) == 1
+    assert (tmp_path / "openapi-public.json").read_text(encoding="utf-8") == "{}\n"

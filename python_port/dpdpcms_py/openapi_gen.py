@@ -12,9 +12,12 @@ services/roles.py. It reads tables and files only: no database, no network.
 
 from __future__ import annotations
 
+import argparse
 import inspect
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import main as app_main
@@ -363,3 +366,46 @@ def build_spec(audience: str) -> dict:
     if audience == "internal":
         spec["x-unrouted"] = unrouted()
     return spec
+
+
+# ── files ───────────────────────────────────────────────────────────────────
+
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "docs" / "api"
+OUTPUTS = {"public": "openapi-public.json", "internal": "openapi-internal.json"}
+
+
+def render(audience: str) -> str:
+    return json.dumps(build_spec(audience), indent=2, sort_keys=True) + "\n"
+
+
+def write_all(directory: Path | None = None) -> list[Path]:
+    target = directory or OUTPUT_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    written = []
+    for audience, name in OUTPUTS.items():
+        path = target / name
+        path.write_text(render(audience), encoding="utf-8", newline="\n")
+        written.append(path)
+    return written
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m dpdpcms_py.openapi_gen", description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="write nothing; exit 1 if a committed spec is stale")
+    args = parser.parse_args(argv)
+    if not args.check:
+        for path in write_all():
+            print(path)
+        return 0
+    stale = [
+        OUTPUT_DIR / name
+        for audience, name in OUTPUTS.items()
+        if not (OUTPUT_DIR / name).exists() or (OUTPUT_DIR / name).read_text(encoding="utf-8") != render(audience)
+    ]
+    for path in stale:
+        print(f"stale: {path} (regenerate with: python -m dpdpcms_py.openapi_gen)", file=sys.stderr)
+    return 1 if stale else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

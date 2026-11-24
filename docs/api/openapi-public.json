@@ -1,0 +1,5284 @@
+{
+  "components": {
+    "responses": {
+      "Error400": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Bad Request"
+      },
+      "Error401": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Unauthorized"
+      },
+      "Error403": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Forbidden"
+      },
+      "Error404": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Not Found"
+      },
+      "Error405": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Method Not Allowed"
+      },
+      "Error409": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Conflict"
+      },
+      "Error500": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Internal Server Error"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "status",
+          "error",
+          "message",
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "apiKey": {
+        "description": "Application API key. Always sent together with X-API-Secret.",
+        "in": "header",
+        "name": "X-API-Key",
+        "type": "apiKey"
+      },
+      "apiSecret": {
+        "description": "Secret for the API key in X-API-Key.",
+        "in": "header",
+        "name": "X-API-Secret",
+        "type": "apiKey"
+      },
+      "principalBearer": {
+        "bearerFormat": "JWT",
+        "description": "Data principal token returned by `principal_login`. Not accepted for PURGE-scope functions.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Every function is called as `POST /api/v1/{category}/{service}/{func}` with a JSON body. The function name may instead be sent as `_func` in the body to `/api/v1/{category}/{service}`.\n\nThe body is validated against the function's schema before it runs; a failure is a 400 whose `message` lists what is wrong.\n\n**Tenancy.** `fiduciary_id` is taken from the credential. A value sent in the body is overridden, so a key or token can never read or write another fiduciary's records. With a principal token, `user_id` is bound to the token's principal in the same way.\n\n**GET.** A function may be called with GET only when it is a read; parameters then travel in the query string. Everything else is POST-only (405 otherwise). A credential is never read from the query string.\n\n**Errors.** Every error has the same body: `timestamp`, `status`, `error`, `message`, `path`.\n\n**Authentication (client API).** Either an application API key (`X-API-Key` and `X-API-Secret` headers, together) or a data principal's bearer token. An API key carries scopes (READ, WRITE, PURGE); each function states the scope it needs. PURGE functions do not accept a principal token. Functions under `/api/v1/public/` need no credential.",
+    "title": "TSI DPDP CMS API",
+    "version": "1"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/api/v1/client/alerts/acknowledge_alert": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_alerts_acknowledge_alert",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "acknowledged_by": {
+                    "type": "string"
+                  },
+                  "alert_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "alert_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "acknowledge_alert",
+        "tags": [
+          "alerts"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/alerts/list_alerts": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_alerts_list_alerts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "alert_type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "recipient_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "PENDING",
+                "ACKNOWLEDGED",
+                "ESCALATED"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_alerts",
+        "tags": [
+          "alerts"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_alerts_list_alerts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "alert_type": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "recipient_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "PENDING",
+                      "ACKNOWLEDGED",
+                      "ESCALATED"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_alerts",
+        "tags": [
+          "alerts"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/alerts/notify_alert": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_alerts_notify_alert",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "alert_type": {
+                    "type": "string"
+                  },
+                  "event_ref_id": {
+                    "type": "string"
+                  },
+                  "payload": {
+                    "type": "object"
+                  },
+                  "recipient_id": {
+                    "type": "string"
+                  },
+                  "recipient_type": {
+                    "enum": [
+                      "FIDUCIARY",
+                      "PROCESSOR",
+                      "PRINCIPAL"
+                    ],
+                    "type": "string"
+                  },
+                  "requires_action": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "recipient_type",
+                  "alert_type"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "notify_alert",
+        "tags": [
+          "alerts"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/compliance/confirm_purge_status": {
+      "post": {
+        "description": "SA-09: the processor that executed a purge confirms it with evidence\n(records affected, who confirmed, any error), so completion is recorded\nas verified rather than assumed.\n\nSEC-04: the confirmation is bound to the authenticated caller. An API\nkey must belong to the app assigned to the purge request, and the\nconfirming identity is taken from the credential, never from the free\n`confirmed_by_entity_id` payload text.\n\nRequires API key scope PURGE.",
+        "operationId": "client_compliance_confirm_purge_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "confirmed_by_entity_id": {
+                    "type": "string"
+                  },
+                  "details": {
+                    "type": "string"
+                  },
+                  "error_message": {},
+                  "purge_request_id": {
+                    "type": "string"
+                  },
+                  "records_affected_count": {
+                    "type": "number"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "purge_request_id",
+                  "status",
+                  "records_affected_count",
+                  "details",
+                  "error_message",
+                  "confirmed_by_entity_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          }
+        ],
+        "summary": "confirm_purge_status",
+        "tags": [
+          "compliance"
+        ],
+        "x-required-scope": "PURGE"
+      }
+    },
+    "/api/v1/client/compliance/list_purge_requests": {
+      "get": {
+        "description": "Requires API key scope PURGE.",
+        "operationId": "client_compliance_list_purge_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trigger_event",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          }
+        ],
+        "summary": "list_purge_requests",
+        "tags": [
+          "compliance"
+        ],
+        "x-required-scope": "PURGE"
+      },
+      "post": {
+        "description": "Requires API key scope PURGE.",
+        "operationId": "client_compliance_list_purge_requests",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "number"
+                  },
+                  "page": {
+                    "type": "number"
+                  },
+                  "search": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "trigger_event": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          }
+        ],
+        "summary": "list_purge_requests",
+        "tags": [
+          "compliance"
+        ],
+        "x-required-scope": "PURGE"
+      }
+    },
+    "/api/v1/client/compliance/update_purge_status": {
+      "post": {
+        "description": "Requires API key scope PURGE.",
+        "operationId": "client_compliance_update_purge_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "details": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "PENDING",
+                      "IN_PROGRESS",
+                      "FAILED",
+                      "UNDER_LEGAL_HOLD",
+                      "PURGE_IN_PROGRESS",
+                      "PURGE_FAILED",
+                      "LEGAL_HOLD_APPLIED"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "details",
+                  "id",
+                  "status"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          }
+        ],
+        "summary": "update_purge_status",
+        "tags": [
+          "compliance"
+        ],
+        "x-required-scope": "PURGE"
+      }
+    },
+    "/api/v1/client/consent/erasure_request": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_consent_erasure_request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "purpose_id": {
+                    "type": "string"
+                  },
+                  "purpose_ids": {
+                    "description": "CW-05: purposes to withdraw; omit for all.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "erasure_request",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/consent/export_consent_history": {
+      "get": {
+        "description": "UD-04: a principal downloads their consent history as CSV or PDF (format=pdf).\n\nA principal token is held to its own history. An integrator key may export\nany principal of its own fiduciary \u2014 it acts for that fiduciary, which\nanswers a principal's access request \u2014 but never another tenant's.\n\nRequires API key scope READ.",
+        "operationId": "client_consent_export_consent_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "enum": [
+                "csv",
+                "pdf",
+                "CSV",
+                "PDF"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "description": "UD-04: policy language block used for purpose names in the PDF; defaults to the language of each record.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "export_consent_history",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "UD-04: a principal downloads their consent history as CSV or PDF (format=pdf).\n\nA principal token is held to its own history. An integrator key may export\nany principal of its own fiduciary \u2014 it acts for that fiduciary, which\nanswers a principal's access request \u2014 but never another tenant's.\n\nRequires API key scope READ.",
+        "operationId": "client_consent_export_consent_history",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "format": {
+                    "enum": [
+                      "csv",
+                      "pdf",
+                      "CSV",
+                      "PDF"
+                    ],
+                    "type": "string"
+                  },
+                  "language": {
+                    "description": "UD-04: policy language block used for purpose names in the PDF; defaults to the language of each record.",
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "title": "Export Consent History",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "export_consent_history",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/consent/get_active_consent": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_get_active_consent_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_active_consent",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_get_active_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_active_consent",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/consent/get_consent_record_details": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_get_consent_record_details_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "policy_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "record_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_consent_record_details",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_get_consent_record_details",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "x-conditional-rule": "{\"if\": {\"properties\": {\"policy_id\": {\"minLength\": 1}}, \"required\": [\"policy_id\"]}, \"then\": {\"required\": [\"user_id\"]}}"
+                  }
+                ],
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "record_id": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_consent_record_details",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/consent/get_withdrawal_implications": {
+      "get": {
+        "description": "CW-04: what withdrawing each consented purpose means, shown before the\nprincipal confirms \u2014 the service impact, and whether the law requires the\ndata to be kept anyway.\n\nRequires API key scope READ.",
+        "operationId": "client_consent_get_withdrawal_implications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "policy_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "purpose_ids",
+            "required": false,
+            "schema": {
+              "description": "CW-05: purposes to withdraw; omit for all.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_withdrawal_implications",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "CW-04: what withdrawing each consented purpose means, shown before the\nprincipal confirms \u2014 the service impact, and whether the law requires the\ndata to be kept anyway.\n\nRequires API key scope READ.",
+        "operationId": "client_consent_get_withdrawal_implications",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "purpose_ids": {
+                    "description": "CW-05: purposes to withdraw; omit for all.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_withdrawal_implications",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/consent/link_user": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_consent_link_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "anonymous_user_id": {
+                    "type": "string"
+                  },
+                  "authenticated_user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "anonymous_user_id",
+                  "authenticated_user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "link_user",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/consent/list_consent_history": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_list_consent_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "purpose_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_ref",
+            "required": false,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_consent_history",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_list_consent_history",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "user_id"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "user_ref"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "end_date": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "number"
+                  },
+                  "page": {
+                    "type": "number"
+                  },
+                  "purpose_id": {
+                    "type": "string"
+                  },
+                  "start_date": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  },
+                  "user_ref": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_consent_history",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/consent/record_consent": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_consent_record_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "consent_mechanism": {
+                    "type": "string"
+                  },
+                  "consent_status_general": {
+                    "type": "string"
+                  },
+                  "data_point_consents": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "consent_granted": {
+                          "type": "boolean"
+                        },
+                        "data_point_id": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "purpose_agreed_to": {
+                          "type": "string"
+                        },
+                        "purpose_id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "timestamp_updated": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "data_point_id",
+                        "consent_granted",
+                        "purpose_agreed_to",
+                        "timestamp_updated"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "ip_address": {
+                    "type": "string"
+                  },
+                  "jurisdiction": {
+                    "type": "string"
+                  },
+                  "language_selected": {
+                    "description": "P13-04: lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
+                    "enum": [
+                      "en",
+                      "as",
+                      "bn",
+                      "brx",
+                      "doi",
+                      "gu",
+                      "hi",
+                      "kn",
+                      "ks",
+                      "kok",
+                      "mai",
+                      "ml",
+                      "mni",
+                      "mr",
+                      "ne",
+                      "or",
+                      "pa",
+                      "sa",
+                      "sat",
+                      "sd",
+                      "ta",
+                      "te",
+                      "ur"
+                    ],
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "policy_version": {
+                    "type": "string"
+                  },
+                  "timestamp": {
+                    "type": "string"
+                  },
+                  "user_agent": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id",
+                  "policy_id",
+                  "data_point_consents"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "record_consent",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/consent/record_parent_consent": {
+      "post": {
+        "description": "CC-05: record a guardian verification, verifying it where the CMS can.\n\nEXISTING_ACCOUNT is verified here: the guardian must already be a known\nADULT principal of this fiduciary. DIGILOCKER is verified by the\nconfigured verifier (DIGILOCKER_VERIFY_URL), which must confirm the\nreference and that the guardian is an adult. Anything else is stored as\nan unverified assertion and cannot back a minor's consent.\n\nRequires API key scope WRITE.",
+        "operationId": "client_consent_record_parent_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "child_principal_id": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "guardian_principal_id": {
+                    "type": "string"
+                  },
+                  "proof_metadata": {
+                    "type": "object"
+                  },
+                  "provider_name": {
+                    "type": "string"
+                  },
+                  "verification_mechanism": {
+                    "enum": [
+                      "EXISTING_ACCOUNT",
+                      "DIGILOCKER",
+                      "AADHAAR_VC",
+                      "KYC_PROVIDER",
+                      "OTP_LINKING"
+                    ],
+                    "type": "string"
+                  },
+                  "verification_ref_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "child_principal_id",
+                  "guardian_principal_id",
+                  "verification_mechanism"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "record_parent_consent",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/consent/validate_consent": {
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_consent_validate_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "required_purpose_id": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id",
+                  "required_purpose_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "validate_consent",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/consent/withdraw_consent": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_consent_withdraw_consent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "purpose_id": {
+                    "type": "string"
+                  },
+                  "purpose_ids": {
+                    "description": "CW-05: purposes to withdraw; omit for all.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "withdraw_consent",
+        "tags": [
+          "consent"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/grievance/add_grievance_communication": {
+      "post": {
+        "description": "GR-13: append a threaded entry (a message, a note, an action taken) to the\ngrievance's action log without changing its status. A principal may add to\ntheir own grievance; the console and integrators to any in their tenant.\n\nRequires API key scope WRITE.",
+        "operationId": "client_grievance_add_grievance_communication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "channel": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "grievance_id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "sender": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grievance_id",
+                  "message"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "add_grievance_communication",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/grievance/get_grievance": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_grievance_get_grievance_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grievance_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reference_number",
+            "required": false,
+            "schema": {
+              "description": "GR-05: look up by the reference quoted to the principal.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_grievance",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_grievance_get_grievance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "grievance_id": {
+                    "type": "string"
+                  },
+                  "reference_number": {
+                    "description": "GR-05: look up by the reference quoted to the principal.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_grievance",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/grievance/get_grievance_attachment": {
+      "get": {
+        "description": "GR-04: read back an attachment, with the same ownership rules as upload.\n\nRequires API key scope READ.",
+        "operationId": "client_grievance_get_grievance_attachment_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "attachment_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_grievance_attachment",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "GR-04: read back an attachment, with the same ownership rules as upload.\n\nRequires API key scope READ.",
+        "operationId": "client_grievance_get_grievance_attachment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "attachment_id": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "attachment_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_grievance_attachment",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/grievance/list_user_grievances": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_grievance_list_user_grievances_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_user_grievances",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_grievance_list_user_grievances",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_user_grievances",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/grievance/submit_grievance": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_grievance_submit_grievance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "attachments": {
+                    "items": {},
+                    "type": "array"
+                  },
+                  "channel": {
+                    "enum": [
+                      "PORTAL",
+                      "EMAIL",
+                      "PHONE",
+                      "LETTER",
+                      "IN_PERSON",
+                      "OTHER"
+                    ],
+                    "type": "string"
+                  },
+                  "consent_record_id": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "reference_number": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": [
+                      "GENERAL_COMPLAINT",
+                      "ERASURE_REQUEST",
+                      "DATA_ACCESS_REQUEST",
+                      "CORRECTION_REQUEST",
+                      "CONSENT_COMPLAINT",
+                      "DATA_HANDLING_COMPLAINT"
+                    ],
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id",
+                  "type",
+                  "subject",
+                  "description"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "submit_grievance",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/grievance/submit_grievance_feedback": {
+      "post": {
+        "description": "GR-12: the principal rates how their resolved grievance was handled.\n\nRequires API key scope WRITE.",
+        "operationId": "client_grievance_submit_grievance_feedback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "comment": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "grievance_id": {
+                    "type": "string"
+                  },
+                  "rating": {
+                    "maximum": 5,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grievance_id",
+                  "rating"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "submit_grievance_feedback",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/grievance/upload_grievance_attachment": {
+      "post": {
+        "description": "GR-04: attach supporting evidence to a grievance.\n\nThe file arrives base64-encoded in the JSON body, is checked against an\nallow-list of types and the ATTACHMENT_MAX_BYTES limit, and is stored\nunder the export path by its SHA-256, never by the caller's file name.\n\nRequires API key scope WRITE.",
+        "operationId": "client_grievance_upload_grievance_attachment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "content_base64": {
+                    "type": "string"
+                  },
+                  "content_type": {
+                    "enum": [
+                      "application/pdf",
+                      "image/png",
+                      "image/jpeg",
+                      "text/plain"
+                    ],
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "file_name": {
+                    "maxLength": 255,
+                    "type": "string"
+                  },
+                  "grievance_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "grievance_id",
+                  "file_name",
+                  "content_type",
+                  "content_base64"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "upload_grievance_attachment",
+        "tags": [
+          "grievance"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/notification/list_notifications": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_notification_list_notifications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "recipient_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "recipient_type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "unread_only",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_notifications",
+        "tags": [
+          "notification"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_notification_list_notifications",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "number"
+                  },
+                  "page": {
+                    "type": "number"
+                  },
+                  "recipient_id": {
+                    "type": "string"
+                  },
+                  "recipient_type": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "unread_only": {
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_notifications",
+        "tags": [
+          "notification"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/notification/mark_notification_read": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_notification_mark_notification_read",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "id"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "notification_id"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "notification_id": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "mark_notification_read",
+        "tags": [
+          "notification"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/policy/get_active_policy": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_policy_get_active_policy_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jurisdiction",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "policy_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_active_policy",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_policy_get_active_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "jurisdiction": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fiduciary_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_active_policy",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/policy/get_policy": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_policy_get_policy_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "policy_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_policy",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_policy_get_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "get_policy",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/policy/list_active_policies": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_policy_list_active_policies_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_active_policies",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_policy_list_active_policies",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_active_policies",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/policy/request_reconsent": {
+      "post": {
+        "description": "CU-03: a principal confirms fresh affirmative consent on the new policy version.\n\nRequires API key scope WRITE.",
+        "operationId": "client_policy_request_reconsent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "data_point_consents": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "consent_granted": {
+                          "type": "boolean"
+                        },
+                        "data_point_id": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "purpose_agreed_to": {
+                          "type": "string"
+                        },
+                        "purpose_id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "timestamp_updated": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "jurisdiction": {
+                    "type": "string"
+                  },
+                  "language_selected": {
+                    "description": "P13-04: lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
+                    "enum": [
+                      "en",
+                      "as",
+                      "bn",
+                      "brx",
+                      "doi",
+                      "gu",
+                      "hi",
+                      "kn",
+                      "ks",
+                      "kok",
+                      "mai",
+                      "ml",
+                      "mni",
+                      "mr",
+                      "ne",
+                      "or",
+                      "pa",
+                      "sa",
+                      "sat",
+                      "sd",
+                      "ta",
+                      "te",
+                      "ur"
+                    ],
+                    "type": "string"
+                  },
+                  "policy_id": {
+                    "type": "string"
+                  },
+                  "policy_version": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "policy_id",
+                  "user_id",
+                  "data_point_consents"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "request_reconsent",
+        "tags": [
+          "policy"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/rights/create_nomination": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_rights_create_nomination",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "nominated_principal_id": {
+                    "type": "string"
+                  },
+                  "nominating_principal_id": {
+                    "type": "string"
+                  },
+                  "relationship": {
+                    "type": "string"
+                  },
+                  "valid_from": {
+                    "type": "string"
+                  },
+                  "valid_until": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "nominating_principal_id",
+                  "nominated_principal_id"
+                ],
+                "title": "Create Nomination",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "create_nomination",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/rights/list_corrections": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_rights_list_corrections_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_corrections",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_rights_list_corrections",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "title": "List Corrections",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_corrections",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/rights/list_nominations": {
+      "get": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_rights_list_nominations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nominating_principal_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_nominations",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "Requires API key scope READ.",
+        "operationId": "client_rights_list_nominations",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "nominating_principal_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                },
+                "title": "List Nominations",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "list_nominations",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/client/rights/revoke_nomination": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_rights_revoke_nomination",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "nomination_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "nomination_id"
+                ],
+                "title": "Revoke Nomination",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "revoke_nomination",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/rights/submit_correction": {
+      "post": {
+        "description": "Requires API key scope WRITE.",
+        "operationId": "client_rights_submit_correction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "current_value": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "field_name": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "requested_value": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "user_id",
+                  "field_name",
+                  "requested_value"
+                ],
+                "title": "Submit Correction",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "submit_correction",
+        "tags": [
+          "rights"
+        ],
+        "x-required-scope": "WRITE"
+      }
+    },
+    "/api/v1/client/wallet/sync": {
+      "get": {
+        "description": "The `action` field selects the function that runs and whose schema and scope apply: `GET_CONSENT_DETAILS` runs `get_consent_record_details`; `GET_POLICY_PURPOSES` runs `get_active_policy`; `GLOBAL_ERASURE` runs `erasure_request`; `GRANT_CONSENT` runs `record_consent`; `REVOKE_PURPOSE` runs `erasure_request`.\n\nRequires API key scope READ.",
+        "operationId": "client_wallet_sync_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "sync",
+        "tags": [
+          "wallet"
+        ],
+        "x-required-scope": "READ"
+      },
+      "post": {
+        "description": "The `action` field selects the function that runs and whose schema and scope apply: `GET_CONSENT_DETAILS` runs `get_consent_record_details`; `GET_POLICY_PURPOSES` runs `get_active_policy`; `GLOBAL_ERASURE` runs `erasure_request`; `GRANT_CONSENT` runs `record_consent`; `REVOKE_PURPOSE` runs `erasure_request`.\n\nRequires API key scope READ.",
+        "operationId": "client_wallet_sync",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [
+          {
+            "apiKey": [],
+            "apiSecret": []
+          },
+          {
+            "principalBearer": []
+          }
+        ],
+        "summary": "sync",
+        "tags": [
+          "wallet"
+        ],
+        "x-required-scope": "READ"
+      }
+    },
+    "/api/v1/public/operator/sso_login": {
+      "post": {
+        "description": "SA-06: single sign-on through the organisation's OpenID Connect provider.\n\nThe console completes the provider's login and posts the id_token here.\nIt is verified against the provider's published keys (SSO_JWKS_URL), its\nissuer (SSO_ISSUER) and this CMS as audience (SSO_AUDIENCE); its email\nmust belong to an ACTIVE operator. When the provider attests MFA (amr\nclaim) the session is MFA-verified; otherwise an account with TOTP\nenrolled must still pass verify_mfa.",
+        "operationId": "public_operator_sso_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "id_token": {
+                    "type": "string"
+                  },
+                  "nonce": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id_token",
+                  "nonce"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "sso_login",
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/v1/public/principal/list_active_fiduciaries": {
+      "get": {
+        "operationId": "public_principal_list_active_fiduciaries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "list_active_fiduciaries",
+        "tags": [
+          "principal"
+        ]
+      },
+      "post": {
+        "operationId": "public_principal_list_active_fiduciaries",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "list_active_fiduciaries",
+        "tags": [
+          "principal"
+        ]
+      }
+    },
+    "/api/v1/public/principal/list_fiduciary_personas": {
+      "get": {
+        "description": "Personas a principal can declare pre-login (Customer, Employee, Vendor...).\n\nSourced from the data_subject_categories of the fiduciary's active ROPA\nentries. This is a public, unauthenticated endpoint -- it must never expose\ndata_principal rows or any other personal data.",
+        "operationId": "public_principal_list_fiduciary_personas_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fiduciary_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "list_fiduciary_personas",
+        "tags": [
+          "principal"
+        ]
+      },
+      "post": {
+        "description": "Personas a principal can declare pre-login (Customer, Employee, Vendor...).\n\nSourced from the data_subject_categories of the fiduciary's active ROPA\nentries. This is a public, unauthenticated endpoint -- it must never expose\ndata_principal rows or any other personal data.",
+        "operationId": "public_principal_list_fiduciary_personas",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fiduciary_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "list_fiduciary_personas",
+        "tags": [
+          "principal"
+        ]
+      }
+    },
+    "/api/v1/public/principal/principal_login": {
+      "post": {
+        "operationId": "public_principal_principal_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "otp": {
+                    "type": "string"
+                  },
+                  "persona": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fiduciary_id",
+                  "user_id",
+                  "otp"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "principal_login",
+        "tags": [
+          "principal"
+        ]
+      }
+    },
+    "/api/v1/public/principal/request_principal_otp": {
+      "post": {
+        "description": "Issue a one-time login code and send it to the principal out of band.\n\nThe code is never returned in the response. Only its HMAC is stored, with\nan expiry; principal_login consumes it exactly once.",
+        "operationId": "public_principal_request_principal_otp",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "_func": {
+                    "type": "string"
+                  },
+                  "fiduciary_id": {
+                    "type": "string"
+                  },
+                  "user_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "fiduciary_id",
+                  "user_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        },
+        "security": [],
+        "summary": "request_principal_otp",
+        "tags": [
+          "principal"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "alerts"
+    },
+    {
+      "name": "compliance"
+    },
+    {
+      "name": "consent"
+    },
+    {
+      "name": "grievance"
+    },
+    {
+      "name": "notification"
+    },
+    {
+      "name": "operator"
+    },
+    {
+      "name": "policy"
+    },
+    {
+      "name": "principal"
+    },
+    {
+      "name": "rights"
+    },
+    {
+      "name": "wallet"
+    }
+  ]
+}

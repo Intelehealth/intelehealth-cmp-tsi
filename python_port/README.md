@@ -57,6 +57,10 @@ cd python_port && pytest -q
 
 Tests are unit-level only (no Postgres in CI): SSRF URL validation, webhook signing, purpose lifecycle validation, principal scoping helpers, TOTP, role permissions, retention floor rules.
 
+## API reference
+
+Generated OpenAPI specs live in [`docs/api/`](../docs/api/README.md). Regenerate with `python -m dpdpcms_py.openapi_gen` after changing a function, a validator schema or a permission.
+
 ## Notes
 
 - API routing mirrors the original servlet filter: `/api/v1/admin/{service}`, `/api/v1/client/{service}`, `/api/v1/public/{service}`, `/api/v1/bootstrap/setup`, and legacy `/api/v1/{service}`.
