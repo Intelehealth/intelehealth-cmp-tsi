@@ -1,0 +1,27 @@
+{
+  "name": "tsi-dpdp-cms-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Developer portal for the TSI DPDP CMS API (Docusaurus). API pages are generated from ../docs/api/*.json.",
+  "scripts": {
+    "gen": "node scripts/prepare-specs.mjs && docusaurus clean-api-docs all && docusaurus gen-api-docs all",
+    "start": "npm run gen && docusaurus start",
+    "build": "npm run gen && docusaurus build",
+    "serve": "docusaurus serve"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/faster": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@mdx-js/react": "3.1.1",
+    "clsx": "2.1.1",
+    "docusaurus-plugin-openapi-docs": "5.2.0",
+    "docusaurus-theme-openapi-docs": "5.2.0",
+    "prism-react-renderer": "2.4.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}
