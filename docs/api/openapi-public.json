@@ -61,6 +61,16 @@
         },
         "description": "Conflict"
       },
+      "Error429": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Too Many Requests"
+      },
       "Error500": {
         "content": {
           "application/json": {
@@ -124,7 +134,7 @@
     }
   },
   "info": {
-    "description": "Every function is called as `POST /api/v1/{category}/{service}/{func}` with a JSON body. The function name may instead be sent as `_func` in the body to `/api/v1/{category}/{service}`.\n\nThe body is validated against the function's schema before it runs; a failure is a 400 whose `message` lists what is wrong.\n\n**Tenancy.** `fiduciary_id` is taken from the credential. A value sent in the body is overridden, so a key or token can never read or write another fiduciary's records. With a principal token, `user_id` is bound to the token's principal in the same way.\n\n**GET.** A function may be called with GET only when it is a read; parameters then travel in the query string. Everything else is POST-only (405 otherwise). A credential is never read from the query string.\n\n**Errors.** Every error has the same body: `timestamp`, `status`, `error`, `message`, `path`.\n\n**Authentication (client API).** Either an application API key (`X-API-Key` and `X-API-Secret` headers, together) or a data principal's bearer token. An API key carries scopes (READ, WRITE, PURGE); each function states the scope it needs. PURGE functions do not accept a principal token. Functions under `/api/v1/public/` need no credential.",
+    "description": "Every function is called as `POST /api/v1/{category}/{service}/{func}` with a JSON body. The function name may instead be sent as `_func` in the body to `/api/v1/{category}/{service}`; when both are given, the body's `_func` is the one that runs.\n\nThe body is validated against the function's schema before it runs; a failure is a 400 whose `message` lists what is wrong.\n\n**Tenancy.** On the client API, `fiduciary_id` is taken from the credential. A value sent in the body is overridden, so a key or token can never read or write another fiduciary's records. With a principal token, `user_id` is taken from the token too; a `user_id` in the body that does not match it is refused with 403. A function under `/api/v1/public/` has no credential and takes `fiduciary_id` from the body.\n\n**GET.** A function may be called with GET only when it is a read; parameters then travel in the query string. Query values are strings and are validated like a body, so GET is documented only where every required parameter accepts a string, and only those parameters are listed. Everything else is POST-only (405 otherwise). A credential is never read from the query string.\n\n**Errors.** Every error has the same body: `timestamp`, `status`, `error`, `message`, `path`.\n\n**Authentication (client API).** Either an application API key (`X-API-Key` and `X-API-Secret` headers, together) or a data principal's bearer token. An API key carries scopes (READ, WRITE, PURGE); each function states the scope it needs, and a key without the scope gets 401. PURGE functions do not accept a principal token. Functions under `/api/v1/public/` need no credential.",
     "title": "TSI DPDP CMS API",
     "version": "1"
   },
@@ -188,6 +198,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -219,14 +232,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer"
             }
           },
           {
@@ -280,6 +285,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -364,6 +372,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -461,6 +472,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -483,7 +497,7 @@
     },
     "/api/v1/client/compliance/confirm_purge_status": {
       "post": {
-        "description": "SA-09: the processor that executed a purge confirms it with evidence\n(records affected, who confirmed, any error), so completion is recorded\nas verified rather than assumed.\n\nSEC-04: the confirmation is bound to the authenticated caller. An API\nkey must belong to the app assigned to the purge request, and the\nconfirming identity is taken from the credential, never from the free\n`confirmed_by_entity_id` payload text.\n\nRequires API key scope PURGE.",
+        "description": "The processor that executed a purge confirms it with evidence (records affected, who confirmed, any error), so completion is recorded as verified rather than assumed.\n\nRequires API key scope PURGE.",
         "operationId": "client_compliance_confirm_purge_status",
         "requestBody": {
           "content": {
@@ -554,6 +568,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -582,22 +599,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "number"
-            }
-          },
-          {
-            "in": "query",
-            "name": "page",
-            "required": false,
-            "schema": {
-              "type": "number"
             }
           },
           {
@@ -654,6 +655,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -736,6 +740,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -829,6 +836,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -868,7 +878,7 @@
                     "type": "string"
                   },
                   "purpose_ids": {
-                    "description": "CW-05: purposes to withdraw; omit for all.",
+                    "description": "Purposes to withdraw; omit for all.",
                     "items": {
                       "type": "string"
                     },
@@ -920,6 +930,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -942,7 +955,7 @@
     },
     "/api/v1/client/consent/export_consent_history": {
       "get": {
-        "description": "UD-04: a principal downloads their consent history as CSV or PDF (format=pdf).\n\nA principal token is held to its own history. An integrator key may export\nany principal of its own fiduciary \u2014 it acts for that fiduciary, which\nanswers a principal's access request \u2014 but never another tenant's.\n\nRequires API key scope READ.",
+        "description": "A principal downloads their consent history as CSV or PDF (format=pdf).\n\nRequires API key scope READ.",
         "operationId": "client_consent_export_consent_history_get",
         "parameters": [
           {
@@ -964,7 +977,7 @@
             "name": "language",
             "required": false,
             "schema": {
-              "description": "UD-04: policy language block used for purpose names in the PDF; defaults to the language of each record.",
+              "description": "Policy language block used for purpose names in the PDF; defaults to the language of each record.",
               "type": "string"
             }
           },
@@ -980,10 +993,15 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "application/pdf": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             },
@@ -1006,6 +1024,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -1027,7 +1048,7 @@
         "x-required-scope": "READ"
       },
       "post": {
-        "description": "UD-04: a principal downloads their consent history as CSV or PDF (format=pdf).\n\nA principal token is held to its own history. An integrator key may export\nany principal of its own fiduciary \u2014 it acts for that fiduciary, which\nanswers a principal's access request \u2014 but never another tenant's.\n\nRequires API key scope READ.",
+        "description": "A principal downloads their consent history as CSV or PDF (format=pdf).\n\nRequires API key scope READ.",
         "operationId": "client_consent_export_consent_history",
         "requestBody": {
           "content": {
@@ -1047,7 +1068,7 @@
                     "type": "string"
                   },
                   "language": {
-                    "description": "UD-04: policy language block used for purpose names in the PDF; defaults to the language of each record.",
+                    "description": "Policy language block used for purpose names in the PDF; defaults to the language of each record.",
                     "type": "string"
                   },
                   "user_id": {
@@ -1064,10 +1085,15 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
+              "application/pdf": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             },
@@ -1090,6 +1116,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -1154,6 +1183,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -1227,6 +1259,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -1316,6 +1351,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -1400,6 +1438,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -1422,7 +1463,7 @@
     },
     "/api/v1/client/consent/get_withdrawal_implications": {
       "get": {
-        "description": "CW-04: what withdrawing each consented purpose means, shown before the\nprincipal confirms \u2014 the service impact, and whether the law requires the\ndata to be kept anyway.\n\nRequires API key scope READ.",
+        "description": "What withdrawing each consented purpose means, shown before the principal confirms \u2014 the service impact, and whether the law requires the data to be kept anyway.\n\nRequires API key scope READ.",
         "operationId": "client_consent_get_withdrawal_implications_get",
         "parameters": [
           {
@@ -1447,18 +1488,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "purpose_ids",
-            "required": false,
-            "schema": {
-              "description": "CW-05: purposes to withdraw; omit for all.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             }
           },
           {
@@ -1500,6 +1529,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -1520,7 +1552,7 @@
         "x-required-scope": "READ"
       },
       "post": {
-        "description": "CW-04: what withdrawing each consented purpose means, shown before the\nprincipal confirms \u2014 the service impact, and whether the law requires the\ndata to be kept anyway.\n\nRequires API key scope READ.",
+        "description": "What withdrawing each consented purpose means, shown before the principal confirms \u2014 the service impact, and whether the law requires the data to be kept anyway.\n\nRequires API key scope READ.",
         "operationId": "client_consent_get_withdrawal_implications",
         "requestBody": {
           "content": {
@@ -1540,7 +1572,7 @@
                     "type": "string"
                   },
                   "purpose_ids": {
-                    "description": "CW-05: purposes to withdraw; omit for all.",
+                    "description": "Purposes to withdraw; omit for all.",
                     "items": {
                       "type": "string"
                     },
@@ -1588,6 +1620,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -1668,6 +1703,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -1707,22 +1745,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "number"
-            }
-          },
-          {
-            "in": "query",
-            "name": "page",
-            "required": false,
-            "schema": {
-              "type": "number"
             }
           },
           {
@@ -1796,6 +1818,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -1904,6 +1929,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -1988,7 +2016,7 @@
                     "type": "string"
                   },
                   "language_selected": {
-                    "description": "P13-04: lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
+                    "description": "Lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
                     "enum": [
                       "en",
                       "as",
@@ -2073,6 +2101,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -2095,7 +2126,7 @@
     },
     "/api/v1/client/consent/record_parent_consent": {
       "post": {
-        "description": "CC-05: record a guardian verification, verifying it where the CMS can.\n\nEXISTING_ACCOUNT is verified here: the guardian must already be a known\nADULT principal of this fiduciary. DIGILOCKER is verified by the\nconfigured verifier (DIGILOCKER_VERIFY_URL), which must confirm the\nreference and that the guardian is an adult. Anything else is stored as\nan unverified assertion and cannot back a minor's consent.\n\nRequires API key scope WRITE.",
+        "description": "Record a guardian verification, verifying it where the CMS can.\n\nRequires API key scope WRITE.",
         "operationId": "client_consent_record_parent_consent",
         "requestBody": {
           "content": {
@@ -2174,6 +2205,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -2254,6 +2288,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -2296,7 +2333,7 @@
                     "type": "string"
                   },
                   "purpose_ids": {
-                    "description": "CW-05: purposes to withdraw; omit for all.",
+                    "description": "Purposes to withdraw; omit for all.",
                     "items": {
                       "type": "string"
                     },
@@ -2348,6 +2385,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -2370,7 +2410,7 @@
     },
     "/api/v1/client/grievance/add_grievance_communication": {
       "post": {
-        "description": "GR-13: append a threaded entry (a message, a note, an action taken) to the\ngrievance's action log without changing its status. A principal may add to\ntheir own grievance; the console and integrators to any in their tenant.\n\nRequires API key scope WRITE.",
+        "description": "Append a threaded entry (a message, a note, an action taken) to the grievance's action log without changing its status. A principal may add to their own grievance; the console and integrators to any in their tenant.\n\nRequires API key scope WRITE.",
         "operationId": "client_grievance_add_grievance_communication",
         "requestBody": {
           "content": {
@@ -2439,6 +2479,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -2485,7 +2528,7 @@
             "name": "reference_number",
             "required": false,
             "schema": {
-              "description": "GR-05: look up by the reference quoted to the principal.",
+              "description": "Look up by the reference quoted to the principal.",
               "type": "string"
             }
           }
@@ -2519,6 +2562,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -2557,7 +2603,7 @@
                     "type": "string"
                   },
                   "reference_number": {
-                    "description": "GR-05: look up by the reference quoted to the principal.",
+                    "description": "Look up by the reference quoted to the principal.",
                     "type": "string"
                   }
                 },
@@ -2597,6 +2643,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -2619,7 +2668,7 @@
     },
     "/api/v1/client/grievance/get_grievance_attachment": {
       "get": {
-        "description": "GR-04: read back an attachment, with the same ownership rules as upload.\n\nRequires API key scope READ.",
+        "description": "Read back an attachment, with the same ownership rules as upload.\n\nRequires API key scope READ.",
         "operationId": "client_grievance_get_grievance_attachment_get",
         "parameters": [
           {
@@ -2669,6 +2718,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -2689,7 +2741,7 @@
         "x-required-scope": "READ"
       },
       "post": {
-        "description": "GR-04: read back an attachment, with the same ownership rules as upload.\n\nRequires API key scope READ.",
+        "description": "Read back an attachment, with the same ownership rules as upload.\n\nRequires API key scope READ.",
         "operationId": "client_grievance_get_grievance_attachment",
         "requestBody": {
           "content": {
@@ -2744,6 +2796,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -2808,6 +2863,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -2881,6 +2939,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -3004,6 +3065,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3026,7 +3090,7 @@
     },
     "/api/v1/client/grievance/submit_grievance_feedback": {
       "post": {
-        "description": "GR-12: the principal rates how their resolved grievance was handled.\n\nRequires API key scope WRITE.",
+        "description": "The principal rates how their resolved grievance was handled.\n\nRequires API key scope WRITE.",
         "operationId": "client_grievance_submit_grievance_feedback",
         "requestBody": {
           "content": {
@@ -3095,6 +3159,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3117,7 +3184,7 @@
     },
     "/api/v1/client/grievance/upload_grievance_attachment": {
       "post": {
-        "description": "GR-04: attach supporting evidence to a grievance.\n\nThe file arrives base64-encoded in the JSON body, is checked against an\nallow-list of types and the ATTACHMENT_MAX_BYTES limit, and is stored\nunder the export path by its SHA-256, never by the caller's file name.\n\nRequires API key scope WRITE.",
+        "description": "Attach supporting evidence to a grievance.\n\nRequires API key scope WRITE.",
         "operationId": "client_grievance_upload_grievance_attachment",
         "requestBody": {
           "content": {
@@ -3192,6 +3259,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3227,22 +3297,6 @@
           },
           {
             "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "number"
-            }
-          },
-          {
-            "in": "query",
-            "name": "page",
-            "required": false,
-            "schema": {
-              "type": "number"
-            }
-          },
-          {
-            "in": "query",
             "name": "recipient_id",
             "required": false,
             "schema": {
@@ -3263,14 +3317,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "unread_only",
-            "required": false,
-            "schema": {
-              "type": "boolean"
             }
           }
         ],
@@ -3303,6 +3349,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -3391,6 +3440,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -3482,6 +3534,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3562,6 +3617,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3641,6 +3699,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3704,6 +3765,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -3778,6 +3842,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3841,6 +3908,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -3912,6 +3982,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -3934,7 +4007,7 @@
     },
     "/api/v1/client/policy/request_reconsent": {
       "post": {
-        "description": "CU-03: a principal confirms fresh affirmative consent on the new policy version.\n\nRequires API key scope WRITE.",
+        "description": "A principal confirms fresh affirmative consent on the new policy version.\n\nRequires API key scope WRITE.",
         "operationId": "client_policy_request_reconsent",
         "requestBody": {
           "content": {
@@ -3978,7 +4051,7 @@
                     "type": "string"
                   },
                   "language_selected": {
-                    "description": "P13-04: lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
+                    "description": "Lower-case ISO 639 code - en or one of the 22 Eighth Schedule languages. BCP-47 tags (en-IN) and names (english) are refused.",
                     "enum": [
                       "en",
                       "as",
@@ -4059,6 +4132,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -4152,6 +4228,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -4183,14 +4262,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer"
             }
           },
           {
@@ -4239,6 +4310,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -4320,6 +4394,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -4351,14 +4428,6 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer"
             }
           },
           {
@@ -4407,6 +4476,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -4488,6 +4560,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -4563,6 +4638,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -4657,6 +4735,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -4737,6 +4818,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -4813,6 +4897,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -4833,73 +4920,6 @@
         "x-required-scope": "READ"
       }
     },
-    "/api/v1/public/operator/sso_login": {
-      "post": {
-        "description": "SA-06: single sign-on through the organisation's OpenID Connect provider.\n\nThe console completes the provider's login and posts the id_token here.\nIt is verified against the provider's published keys (SSO_JWKS_URL), its\nissuer (SSO_ISSUER) and this CMS as audience (SSO_AUDIENCE); its email\nmust belong to an ACTIVE operator. When the provider attests MFA (amr\nclaim) the session is MFA-verified; otherwise an account with TOTP\nenrolled must still pass verify_mfa.",
-        "operationId": "public_operator_sso_login",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "_func": {
-                    "type": "string"
-                  },
-                  "id_token": {
-                    "type": "string"
-                  },
-                  "nonce": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "id_token",
-                  "nonce"
-                ],
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "400": {
-            "$ref": "#/components/responses/Error400"
-          },
-          "403": {
-            "$ref": "#/components/responses/Error403"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error404"
-          },
-          "405": {
-            "$ref": "#/components/responses/Error405"
-          },
-          "409": {
-            "$ref": "#/components/responses/Error409"
-          },
-          "500": {
-            "$ref": "#/components/responses/Error500"
-          }
-        },
-        "security": [],
-        "summary": "sso_login",
-        "tags": [
-          "operator"
-        ]
-      }
-    },
     "/api/v1/public/principal/list_active_fiduciaries": {
       "get": {
         "operationId": "public_principal_list_active_fiduciaries_get",
@@ -4918,6 +4938,9 @@
           "400": {
             "$ref": "#/components/responses/Error400"
           },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
           "403": {
             "$ref": "#/components/responses/Error403"
           },
@@ -4929,6 +4952,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -4972,6 +4998,9 @@
           "400": {
             "$ref": "#/components/responses/Error400"
           },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
           "403": {
             "$ref": "#/components/responses/Error403"
           },
@@ -4983,6 +5012,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -4997,7 +5029,7 @@
     },
     "/api/v1/public/principal/list_fiduciary_personas": {
       "get": {
-        "description": "Personas a principal can declare pre-login (Customer, Employee, Vendor...).\n\nSourced from the data_subject_categories of the fiduciary's active ROPA\nentries. This is a public, unauthenticated endpoint -- it must never expose\ndata_principal rows or any other personal data.",
+        "description": "Personas a principal can declare pre-login (Customer, Employee, Vendor...).",
         "operationId": "public_principal_list_fiduciary_personas_get",
         "parameters": [
           {
@@ -5024,6 +5056,9 @@
           "400": {
             "$ref": "#/components/responses/Error400"
           },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
           "403": {
             "$ref": "#/components/responses/Error403"
           },
@@ -5036,6 +5071,9 @@
           "409": {
             "$ref": "#/components/responses/Error409"
           },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
           "500": {
             "$ref": "#/components/responses/Error500"
           }
@@ -5047,7 +5085,7 @@
         ]
       },
       "post": {
-        "description": "Personas a principal can declare pre-login (Customer, Employee, Vendor...).\n\nSourced from the data_subject_categories of the fiduciary's active ROPA\nentries. This is a public, unauthenticated endpoint -- it must never expose\ndata_principal rows or any other personal data.",
+        "description": "Personas a principal can declare pre-login (Customer, Employee, Vendor...).",
         "operationId": "public_principal_list_fiduciary_personas",
         "requestBody": {
           "content": {
@@ -5085,6 +5123,9 @@
           "400": {
             "$ref": "#/components/responses/Error400"
           },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
           "403": {
             "$ref": "#/components/responses/Error403"
           },
@@ -5096,6 +5137,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -5158,6 +5202,9 @@
           "400": {
             "$ref": "#/components/responses/Error400"
           },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
           "403": {
             "$ref": "#/components/responses/Error403"
           },
@@ -5169,6 +5216,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -5183,7 +5233,7 @@
     },
     "/api/v1/public/principal/request_principal_otp": {
       "post": {
-        "description": "Issue a one-time login code and send it to the principal out of band.\n\nThe code is never returned in the response. Only its HMAC is stored, with\nan expiry; principal_login consumes it exactly once.",
+        "description": "Issue a one-time login code and send it to the principal out of band.",
         "operationId": "public_principal_request_principal_otp",
         "requestBody": {
           "content": {
@@ -5225,6 +5275,9 @@
           "400": {
             "$ref": "#/components/responses/Error400"
           },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
           "403": {
             "$ref": "#/components/responses/Error403"
           },
@@ -5236,6 +5289,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
           },
           "500": {
             "$ref": "#/components/responses/Error500"
@@ -5264,9 +5320,6 @@
     },
     {
       "name": "notification"
-    },
-    {
-      "name": "operator"
     },
     {
       "name": "policy"

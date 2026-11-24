@@ -1,6 +1,7 @@
 """The generated OpenAPI specs (docs/api/) describe what the dispatcher accepts."""
 
 import json
+import re
 
 import pytest
 from dpdpcms_py import main
@@ -50,7 +51,9 @@ def test_purge_scope_excludes_principal_tokens():
 
 def test_get_only_where_the_dispatcher_allows_it():
     for o in gen.operations():
-        assert ("get" in o.methods) == main._is_read_classified(o.service, o.func)
+        if "get" in o.methods:
+            assert main._is_read_classified(o.service, o.func)
+    assert "get" in _op("admin", "admindash", "get_admin_metrics").methods
     assert _op("client", "consent", "validate_consent").methods == ("post",)
 
 
@@ -159,11 +162,123 @@ def test_api_key_requirement_needs_both_headers():
     assert "operatorBearer" not in spec["components"]["securitySchemes"]
 
 
-def test_public_operations_have_no_security_and_no_401():
+def test_public_operations_have_no_security():
     spec = gen.build_spec("public")
     for path, item in spec["paths"].items():
         if path.startswith("/api/v1/public/"):
-            assert item["post"]["security"] == [] and "401" not in item["post"]["responses"]
+            assert item["post"]["security"] == []
+
+
+def test_every_operation_declares_401_and_429():
+    # A login with no credential still answers 401 (bad password, bad OTP) and
+    # the throttle answers 429.
+    for audience in ("public", "internal"):
+        for item in gen.build_spec(audience)["paths"].values():
+            for method, op in item.items():
+                if method in HTTP:
+                    assert {"400", "401", "429", "500"} <= set(op["responses"])
+
+
+# ── final review fixes ──────────────────────────────────────────────────────
+
+
+def _descriptions(node):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "description" and isinstance(v, str):
+                yield v
+            else:
+                yield from _descriptions(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _descriptions(v)
+
+
+def test_operator_sso_is_internal_only():
+    assert "/api/v1/public/operator/sso_login" in gen.build_spec("internal")["paths"]
+    assert "/api/v1/public/operator/sso_login" not in gen.build_spec("public")["paths"]
+
+
+def test_public_spec_carries_no_internal_notes():
+    spec = gen.build_spec("public")
+    text = json.dumps(spec)
+    for internal in ("SSO_", "DIGILOCKER_VERIFY_URL", "ATTACHMENT_MAX_BYTES", "SHA-256", "HMAC", "x-unrouted"):
+        assert internal not in text
+    ticket = re.compile(r"^[A-Z]{1,4}\d{0,2}-\d+[a-z]?:")
+    assert not [d for d in _descriptions(spec["paths"]) if ticket.match(d)]
+    purge = spec["paths"]["/api/v1/client/compliance/confirm_purge_status"]["post"]["description"]
+    assert purge.startswith("The processor that executed a purge confirms it with evidence")
+    assert "SEC-04" not in purge and "Requires API key scope PURGE." in purge
+
+
+def test_internal_spec_keeps_full_docstrings():
+    purge = gen.build_spec("internal")["paths"]["/api/v1/client/compliance/confirm_purge_status"]["post"]
+    assert "SEC-04" in purge["description"]
+
+
+def _accepts_string(schema):
+    return schema.get("type") == "string" or any(_accepts_string(s) for s in schema.get("anyOf", []))
+
+
+def test_get_is_documented_only_with_parameters_the_server_accepts():
+    # Query values arrive as strings and are validated against the same schema.
+    for o in gen.operations():
+        schema = gen.request_schema(o.func)
+        required = [schema["properties"][name] for name in schema.get("required", [])]
+        if "get" in o.methods:
+            assert all(_accepts_string(sub) for sub in required), o.func
+    assert _op("admin", "admindash", "list_pending_grievances").methods == ("post",)
+    for item in gen.build_spec("internal")["paths"].values():
+        for parameter in item.get("get", {}).get("parameters", []):
+            assert _accepts_string(parameter["schema"]), parameter["name"]
+
+
+def test_documented_get_passes_the_runtime_validator():
+    from dpdpcms_py.validators import validate_payload
+
+    for path, item in gen.build_spec("internal")["paths"].items():
+        if "get" in item:
+            func = path.rsplit("/", 1)[1]
+            payload = {"_func": func} | {p["name"]: "1" for p in item["get"].get("parameters", []) if p["required"]}
+            assert not [e for e in validate_payload(payload) if "is not of type" in e], func
+
+
+def test_file_downloads_are_not_documented_as_json():
+    paths = gen.build_spec("internal")["paths"]
+    report = paths["/api/v1/admin/breach/download_breach_report"]["post"]["responses"]["200"]["content"]
+    assert set(report) == {"application/pdf"}
+    history = paths["/api/v1/client/consent/export_consent_history"]["post"]["responses"]["200"]["content"]
+    assert set(history) == {"text/plain", "application/pdf"}
+    ropa = paths["/api/v1/admin/ropa/export_ropa"]["post"]["responses"]["200"]["content"]
+    assert set(ropa) == {"text/plain"}
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"const": 1},
+        {"type": ["null"]},
+        {"properties": {"a": {"dependencies": {}}}},
+        {"items": [{"type": "string"}]},
+        {"exclusiveMinimum": 3},
+    ],
+)
+def test_a_keyword_openapi_3_0_cannot_express_stops_generation(schema):
+    with pytest.raises(ValueError, match="OpenAPI 3.0"):
+        gen._convert(schema)
+
+
+def test_every_validator_schema_converts():
+    for path in VALIDATOR_ROOT.glob("*.jschema"):
+        gen.request_schema(path.stem)
+
+
+def test_introduction_states_the_binding_rules_as_the_code_enforces_them():
+    intro = gen.build_spec("public")["info"]["description"]
+    assert "403" in intro and "does not match" in intro  # a mismatching user_id is refused, not overridden
+    assert "`/api/v1/public/`" in intro and "takes `fiduciary_id` from the body" in intro
+    assert "a key without the scope gets 401" in intro
+    assert "Query values are strings" in intro
 
 
 def test_same_function_in_two_categories_is_documented_twice():

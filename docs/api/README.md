@@ -32,11 +32,23 @@ Regenerate after adding, removing or renaming a service function, changing a val
 
 ## What they do not contain
 
-- Response bodies. Success responses are documented as a free-form JSON object; per-function response schemas are not specified yet.
+- Response bodies. Success responses are documented as a free-form JSON object (or as text or PDF for the export and download functions); per-function response schemas are not specified yet.
+- Every status a function can return. 400, 401, 403, 404, 405, 409, 429 and 500 are declared on every operation; a few functions also answer 410 or 413.
 - The legacy routes as separate operations. `/api/v1/{category}/{service}` with `_func` in the body is the same call and is described once in each document's introduction.
 
 `x-unrouted` in the internal document lists validator schemas that no service implements, and allowed functions that have no schema.
 
 ## Production
 
-A production deployment does not serve a spec or Swagger UI, by design: `/docs` and `/redoc` are disabled outside the local environment, and nginx answers 404 for `/docs`, `/redoc` and `/openapi.json`. These files are the way to share the reference.
+A production deployment does not publish a spec or Swagger UI, by design. These files are the way to share the reference.
+
+- Outside the local environment the app turns `/docs` and `/redoc` off, and nothing in this change alters that.
+- nginx answers 404 for `/docs`, `/redoc` and `/openapi.json`. That block is what keeps `/openapi.json` off the network: the app itself still answers it on its own port. Outside local that is FastAPI's derived schema (the three catch-all routes, no function detail).
+- `TSI_DPDP_CMS_ENV` defaults to `local` when unset, and a local app serves the full internal spec at `/docs` and `/openapi.json` without a credential. Set `TSI_DPDP_CMS_ENV` explicitly on every deployed host.
+
+## Limits of the public document
+
+- Descriptions in the public file are the first paragraph of each docstring, with the leading ticket reference removed. The rest of a docstring (review findings, environment variables, storage details) stays in the internal file. Write a docstring's first paragraph for an outside reader.
+- `/api/v1/public/operator/sso_login` needs no credential but is the console's sign-on, so it is in the internal file only.
+- GET is listed only where it can succeed. Query values are strings and are validated like a body, so a read whose required parameter is a number is documented as POST only.
+- The wallet endpoint is documented as `/api/v1/client/wallet/sync` with its actions; calling the wallet with a target function name directly also works and is not listed separately.
