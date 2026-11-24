@@ -128,6 +128,33 @@ _docs = "/docs" if settings.environment == "local" else None
 app = FastAPI(title="TSI DPDP CMS Python", docs_url=_docs, redoc_url=_docs and "/redoc")
 
 
+def _install_local_openapi(application: FastAPI, environment: str) -> bool:
+    """Make /docs show the real functions, in the local environment only.
+
+    The routes below are three catch-alls that dispatch on `_func`, so the
+    schema FastAPI derives from them is empty of detail. Locally, the schema is
+    replaced with the generated internal spec (docs/api/README.md). Any other
+    environment is left exactly as it was, and the generator is not imported.
+    """
+    if environment != "local":
+        return False
+    cache: dict = {}
+
+    def local_openapi() -> dict:
+        if not cache:
+            # Imported here: openapi_gen imports this module.
+            from .openapi_gen import build_spec
+
+            cache.update(build_spec("internal"))
+        return cache
+
+    application.openapi = local_openapi
+    return True
+
+
+_install_local_openapi(app, settings.environment)
+
+
 CONTENT_SECURITY_POLICY = "; ".join(
     (
         "default-src 'self'",

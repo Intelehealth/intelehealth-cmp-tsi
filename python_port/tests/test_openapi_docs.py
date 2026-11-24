@@ -9,6 +9,7 @@ from dpdpcms_py.config import VALIDATOR_ROOT
 from dpdpcms_py.errors import error_body
 from dpdpcms_py.services.consent import WALLET_ACTIONS
 from dpdpcms_py.services.roles import required_permission
+from fastapi import FastAPI
 
 
 def _op(category, service, func):
@@ -211,3 +212,21 @@ def test_check_mode_reports_a_stale_file(tmp_path, monkeypatch):
     monkeypatch.setattr(gen, "OUTPUT_DIR", tmp_path)
     assert gen.main(["--check"]) == 1
     assert (tmp_path / "openapi-public.json").read_text(encoding="utf-8") == "{}\n"
+
+
+# ── local /docs ─────────────────────────────────────────────────────────────
+
+
+def test_local_environment_serves_the_internal_spec():
+    probe = FastAPI()
+    assert main._install_local_openapi(probe, "local") is True
+    assert probe.openapi() == gen.build_spec("internal")
+    assert probe.openapi() is probe.openapi()
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", "", "LOCAL "])
+def test_other_environments_are_untouched(environment):
+    probe = FastAPI()
+    original = probe.openapi
+    assert main._install_local_openapi(probe, environment) is False
+    assert probe.openapi == original
