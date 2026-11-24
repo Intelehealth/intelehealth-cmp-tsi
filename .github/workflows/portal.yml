@@ -1,15 +1,24 @@
 name: Developer portal
 
 # Builds the Docusaurus portal (portal/) from the generated OpenAPI specs
-# (docs/api/*.json) and publishes it to GitHub Pages.
+# (docs/api/*.json) and publishes it to the GitHub Pages site of a separate
+# documentation repository, so the docs have their own address and history.
 #
-# One-time repository setting: Settings > Pages > Source = "GitHub Actions".
-# A pull request builds the site but does not publish it.
+# One-time setup (see portal/README.md, "Publishing"):
+#   1. Create the documentation repository and enable Pages on it:
+#      Settings > Pages > Source = "Deploy from a branch", branch gh-pages, / (root).
+#   2. In THIS repository, Settings > Secrets and variables > Actions:
+#        variable PORTAL_DOCS_REPO   = owner/name of the documentation repository
+#        secret   PORTAL_DEPLOY_KEY  = private half of an SSH deploy key whose public
+#                                      half is added to the documentation repository
+#                                      with write access
+# Until both exist the site is built and checked but not published.
+# A pull request builds the site but never publishes it.
 
 on:
   workflow_dispatch: {}
   push:
-    branches: [main]
+    branches: [ih-cmp-suite]
     paths:
       - "portal/**"
       - "docs/api/**"
@@ -24,13 +33,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: pages
+  group: portal-publish
   cancel-in-progress: false
+
+env:
+  PORTAL_DOCS_REPO: ${{ vars.PORTAL_DOCS_REPO }}
 
 jobs:
   build:
     name: Build
     runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.target.outputs.publish }}
     defaults:
       run:
         working-directory: portal
@@ -41,27 +55,70 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: portal/package-lock.json
+      # A project Pages site lives at https://<owner>.github.io/<repo>/, so the
+      # site's own links are built for that address.
+      - name: Work out where the site will live
+        id: target
+        env:
+          HAS_KEY: ${{ secrets.PORTAL_DEPLOY_KEY != '' }}
+        run: |
+          if [ -n "$PORTAL_DOCS_REPO" ]; then
+            owner="$(printf '%s' "${PORTAL_DOCS_REPO%%/*}" | tr '[:upper:]' '[:lower:]')"
+            echo "PORTAL_URL=https://${owner}.github.io" >> "$GITHUB_ENV"
+            echo "PORTAL_BASE_URL=/${PORTAL_DOCS_REPO##*/}/" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$PORTAL_DOCS_REPO" ] && [ "$HAS_KEY" = "true" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Built only. Publishing needs the PORTAL_DOCS_REPO variable and the PORTAL_DEPLOY_KEY secret, and never runs on a pull request."
+          fi
       - name: Install (locked)
         run: npm ci
       - name: Build
         run: npm run build
-      - name: Upload site
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
+      - name: Keep the built site for the publish job
+        if: steps.target.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
         with:
+          name: portal-site
           path: portal/build
+          retention-days: 7
 
-  deploy:
-    name: Deploy to GitHub Pages
-    if: github.event_name != 'pull_request'
+  publish:
+    name: Publish to the documentation repository
+    if: needs.build.outputs.publish == 'true'
     needs: build
     runs-on: ubuntu-24.04
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: portal-site
+          path: site
+      # The key reaches only this job, is written to a file only this user can
+      # read, and can write to the documentation repository and nothing else.
+      - name: Push the site to gh-pages
+        env:
+          DEPLOY_KEY: ${{ secrets.PORTAL_DEPLOY_KEY }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/portal_deploy
+          chmod 600 ~/.ssh/portal_deploy
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/portal_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          cd site
+          # Pages must serve the files as they are (folders starting with "_" included).
+          touch .nojekyll
+          git init -q -b gh-pages
+          git config user.name "portal-publish"
+          git config user.email "portal-publish@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Publish portal from ${SOURCE_REPO}@${SOURCE_SHA}"
+          # The branch holds only the latest build; the source of truth is this repository.
+          git push -q --force "git@github.com:${PORTAL_DOCS_REPO}.git" gh-pages
+          rm -f ~/.ssh/portal_deploy
+          owner="$(printf '%s' "${PORTAL_DOCS_REPO%%/*}" | tr '[:upper:]' '[:lower:]')"
+          echo "Published to https://${owner}.github.io/${PORTAL_DOCS_REPO##*/}/" >> "$GITHUB_STEP_SUMMARY"

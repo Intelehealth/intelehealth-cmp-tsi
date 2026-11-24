@@ -5,6 +5,11 @@ import { themes as prismThemes } from "prism-react-renderer";
 
 const REPO = "https://github.com/Intelehealth/intelehealth-cmp-tsi";
 
+// Where the built site is served from. The publish workflow sets both for the
+// documentation repository's GitHub Pages address; the defaults suit a local run.
+const SITE_URL = process.env.PORTAL_URL || "https://intelehealth.github.io";
+const SITE_BASE_URL = process.env.PORTAL_BASE_URL || "/intelehealth-cmp-tsi/";
+
 const config: Config = {
   // The OpenAPI plugin and theme (5.x) are built for the Rspack/SWC toolchain.
   future: {
@@ -21,8 +26,8 @@ const config: Config = {
   },
   title: "TSI DPDP CMS Developer Portal",
   tagline: "Consent management API for the Digital Personal Data Protection Act",
-  url: "https://intelehealth.github.io",
-  baseUrl: "/intelehealth-cmp-tsi/",
+  url: SITE_URL,
+  baseUrl: SITE_BASE_URL,
   organizationName: "Intelehealth",
   projectName: "intelehealth-cmp-tsi",
   trailingSlash: false,

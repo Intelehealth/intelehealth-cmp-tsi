@@ -31,9 +31,24 @@ npm run serve    # serve build/ at http://localhost:3000/intelehealth-cmp-tsi/
 
 ## Publishing
 
-`.github/workflows/portal.yml` builds on every pull request that touches `portal/` or `docs/api/`, and publishes to GitHub Pages on a push to `main`. It needs one repository setting: **Settings > Pages > Source = GitHub Actions**.
+`.github/workflows/portal.yml` builds the site on every pull request that touches `portal/` or `docs/api/`, and on a push to `ih-cmp-suite` it also publishes it. The site is not published from this repository's own Pages. It is pushed to the `gh-pages` branch of a separate documentation repository, so the docs have their own address: `https://<owner>.github.io/<docs-repo>/`.
 
-The site is configured for `https://intelehealth.github.io/intelehealth-cmp-tsi/`. To host it elsewhere, change `url` and `baseUrl` in `docusaurus.config.ts`.
+One-time setup:
+
+1. Create the documentation repository (for example `Intelehealth/ih-cmp-suite-docs`). It needs no content.
+2. Make a deploy key: `ssh-keygen -t ed25519 -N "" -C portal-publish -f portal_deploy`.
+3. In the documentation repository, **Settings > Deploy keys > Add deploy key**: paste `portal_deploy.pub` and tick **Allow write access**.
+4. In this repository, **Settings > Secrets and variables > Actions**:
+   - variable `PORTAL_DOCS_REPO` = `owner/name` of the documentation repository
+   - secret `PORTAL_DEPLOY_KEY` = the contents of `portal_deploy` (the private half). Delete both key files afterwards.
+5. Run the workflow once (**Actions > Developer portal > Run workflow**, branch `ih-cmp-suite`). It creates `gh-pages`.
+6. In the documentation repository, **Settings > Pages**: Source = **Deploy from a branch**, branch `gh-pages`, folder `/ (root)`.
+
+Until the variable and the secret exist, the workflow builds the site and stops; nothing is published and the run stays green.
+
+The whole portal is published, the Internal API reference included. A Pages site is public unless the organisation's plan allows private Pages and the documentation repository is set to use it.
+
+The site's address comes from two environment variables read by `docusaurus.config.ts`: `PORTAL_URL` and `PORTAL_BASE_URL`. The workflow derives them from `PORTAL_DOCS_REPO`. To host the site somewhere else, set them to that address when you build.
 
 ## Notes
 
