@@ -7,7 +7,18 @@ const REPO = "https://github.com/Intelehealth/intelehealth-cmp-tsi";
 
 const config: Config = {
   // The OpenAPI plugin and theme (5.x) are built for the Rspack/SWC toolchain.
-  future: { faster: true, v4: true },
+  future: {
+    faster: true,
+    // CSS cascade layers are left off: with them, page-level CSS modules lose
+    // to the base theme's rules and the landing page styling does not apply.
+    v4: {
+      removeLegacyPostBuildHeadAttribute: true,
+      useCssCascadeLayers: false,
+      siteStorageNamespacing: true,
+      fasterByDefault: true,
+      mdx1CompatDisabledByDefault: true,
+    },
+  },
   title: "TSI DPDP CMS Developer Portal",
   tagline: "Consent management API for the Digital Personal Data Protection Act",
   url: "https://intelehealth.github.io",
@@ -58,7 +69,7 @@ const config: Config = {
   themes: ["docusaurus-theme-openapi-docs"],
 
   themeConfig: {
-    colorMode: { respectPrefersColorScheme: true },
+    colorMode: { defaultMode: "light", respectPrefersColorScheme: true },
     navbar: {
       title: "TSI DPDP CMS",
       items: [
@@ -75,7 +86,7 @@ const config: Config = {
         {
           title: "Docs",
           items: [
-            { label: "Get started", to: "/" },
+            { label: "Get started", to: "/get-started" },
             { label: "Authentication", to: "/authentication" },
             { label: "Errors", to: "/errors" },
           ],
@@ -99,8 +110,8 @@ const config: Config = {
       ],
     },
     prism: {
-      theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      theme: prismThemes.oneLight,
+      darkTheme: prismThemes.nightOwl,
       additionalLanguages: ["bash", "json", "python"],
     },
     languageTabs: [

@@ -45,8 +45,6 @@ function groupByCategory(spec) {
     for (const method of HTTP_METHODS) {
       const operation = item[method];
       if (!operation) continue;
-      // A read has a GET and a POST page; tell them apart in the sidebar.
-      if (method === "get") operation.summary = `${operation.summary} (GET)`;
       const tag = `${category} / ${operation.tags[0]}`;
       operation.tags = [tag];
       if (!groups.has(category)) groups.set(category, new Set());

@@ -1,6 +1,6 @@
 ---
 id: intro
-slug: /
+slug: /get-started
 title: Get started
 sidebar_position: 1
 ---

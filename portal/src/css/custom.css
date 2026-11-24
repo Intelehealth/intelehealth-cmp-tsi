@@ -1,20 +1,355 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* ── tokens ─────────────────────────────────────────────────────────────── */
+
 :root {
-  --ifm-color-primary: #1b5e9b;
-  --ifm-color-primary-dark: #18558c;
-  --ifm-color-primary-darker: #175084;
-  --ifm-color-primary-darkest: #13426d;
-  --ifm-color-primary-light: #1e67aa;
-  --ifm-color-primary-lighter: #1f6cb2;
-  --ifm-color-primary-lightest: #277cc9;
-  --ifm-code-font-size: 92%;
+  --ifm-color-primary: #2456e6;
+  --ifm-color-primary-dark: #1a4bd8;
+  --ifm-color-primary-darker: #1847cc;
+  --ifm-color-primary-darkest: #143aa8;
+  --ifm-color-primary-light: #3d69e9;
+  --ifm-color-primary-lighter: #4a73ea;
+  --ifm-color-primary-lightest: #7393ef;
+
+  --ifm-font-family-base: "Inter Variable", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --ifm-font-family-monospace: "JetBrains Mono Variable", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --ifm-font-size-base: 16px;
+  --ifm-line-height-base: 1.7;
+  --ifm-heading-font-weight: 680;
+  --ifm-code-font-size: 88%;
+
+  --ifm-background-color: #ffffff;
+  --ifm-background-surface-color: #ffffff;
+  --ifm-color-content: #1c2333;
+  --ifm-heading-color: #0d1321;
+  --ifm-toc-border-color: #e7eaf1;
+  --ifm-color-emphasis-200: #eceff5;
+  --ifm-color-emphasis-300: #dfe3ec;
+
+  --ifm-navbar-height: 3.75rem;
+  --doc-sidebar-width: 340px !important;
+  --ifm-navbar-shadow: none;
+  --ifm-global-radius: 10px;
+  --ifm-code-border-radius: 6px;
+  --ifm-pre-border-radius: 12px;
+  --ifm-table-border-color: #e3e7ef;
+  --ifm-table-stripe-background: #f8f9fc;
+  --ifm-menu-color: #465066;
+  --ifm-menu-color-background-active: #eef3ff;
+  --ifm-menu-color-background-hover: #f4f6fa;
+  --ifm-link-hover-decoration: none;
+  --docusaurus-highlighted-code-line-bg: rgba(36, 86, 230, 0.12);
+
+  --portal-surface: #f6f8fc;
+  --portal-border: #e3e7ef;
+  --portal-muted: #5c6780;
+  --portal-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.06);
+  --portal-hero: radial-gradient(1200px 500px at 15% -10%, #dfe8ff 0%, transparent 60%),
+    radial-gradient(900px 420px at 95% 0%, #dff5f1 0%, transparent 55%), #ffffff;
 }
 
-[data-theme="dark"] {
-  --ifm-color-primary: #6db3ee;
-  --ifm-color-primary-dark: #51a4ea;
-  --ifm-color-primary-darker: #439de9;
-  --ifm-color-primary-darkest: #1b84dc;
-  --ifm-color-primary-light: #89c2f2;
-  --ifm-color-primary-lighter: #97c9f3;
-  --ifm-color-primary-lightest: #c1dff8;
+html[data-theme="dark"] {
+  --ifm-navbar-background-color: #0b0f1a;
+  --ifm-footer-background-color: #0f1422;
+  --ifm-color-primary: #86a7ff;
+  --ifm-color-primary-dark: #6790ff;
+  --ifm-color-primary-darker: #5885ff;
+  --ifm-color-primary-darkest: #2962ff;
+  --ifm-color-primary-light: #a5beff;
+  --ifm-color-primary-lighter: #b4c9ff;
+  --ifm-color-primary-lightest: #e2eaff;
+
+  --ifm-background-color: #0b0f1a;
+  --ifm-background-surface-color: #0f1422;
+  --ifm-color-content: #d4daea;
+  --ifm-heading-color: #f3f5fb;
+  --ifm-toc-border-color: #1f2638;
+  --ifm-color-emphasis-200: #1b2233;
+  --ifm-color-emphasis-300: #252d42;
+  --ifm-table-border-color: #232b3f;
+  --ifm-table-stripe-background: #111727;
+  --ifm-menu-color: #a7b0c6;
+  --ifm-menu-color-background-active: #18233f;
+  --ifm-menu-color-background-hover: #141b2c;
+  --docusaurus-highlighted-code-line-bg: rgba(134, 167, 255, 0.16);
+
+  --portal-surface: #111727;
+  --portal-border: #232b3f;
+  --portal-muted: #97a1b8;
+  --portal-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.35);
+  --portal-hero: radial-gradient(1200px 500px at 15% -10%, #1a2a5c 0%, transparent 60%),
+    radial-gradient(900px 420px at 95% 0%, #123a3a 0%, transparent 55%), #0b0f1a;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* ── navbar ─────────────────────────────────────────────────────────────── */
+
+.navbar {
+  border-bottom: 1px solid var(--portal-border);
+  background: color-mix(in srgb, var(--ifm-background-color) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(14px);
+}
+
+.navbar__title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.navbar__brand::before {
+  content: "";
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-right: 0.6rem;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #2456e6 0%, #19b8a6 100%);
+}
+
+.navbar__link {
+  font-size: 0.92rem;
+  font-weight: 550;
+  color: var(--portal-muted);
+}
+
+.navbar__link:hover,
+.navbar__link--active {
+  color: var(--ifm-color-primary);
+}
+
+/* ── sidebar ────────────────────────────────────────────────────────────── */
+
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--portal-border) !important;
+}
+
+.menu {
+  padding: 1rem 0.75rem !important;
+  font-size: 0.9rem;
+}
+
+.menu__link {
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.menu__link--active:not(.menu__link--sublist) {
+  font-weight: 620;
+  color: var(--ifm-color-primary);
+}
+
+.theme-doc-sidebar-item-category-level-1 > .menu__list-item-collapsible > .menu__link {
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--portal-muted);
+}
+
+/* HTTP method badge before each API operation */
+.api-method > .menu__link {
+  align-items: center;
+  justify-content: start;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.76rem;
+  letter-spacing: -0.02em;
+  padding-left: 0.5rem;
+  padding-right: 0.25rem;
+}
+
+.api-method > .menu__link::before {
+  width: 36px;
+  height: 18px;
+  margin-right: 0.5rem;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  font-family: var(--ifm-font-family-base);
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.api-method.get > .menu__link::before {
+  content: "GET";
+  color: #0a7a52;
+  background: #dcf5ea;
+}
+
+.api-method.post > .menu__link::before {
+  content: "POST";
+  color: #1d4fd8;
+  background: #e2eaff;
+}
+
+[data-theme="dark"] .api-method.get > .menu__link::before {
+  color: #6fe0b3;
+  background: #0f3327;
+}
+
+[data-theme="dark"] .api-method.post > .menu__link::before {
+  color: #a5beff;
+  background: #18264d;
+}
+
+/* ── content ────────────────────────────────────────────────────────────── */
+
+.markdown {
+  --ifm-h1-font-size: 2.25rem;
+  --ifm-h2-font-size: 1.5rem;
+  --ifm-h3-font-size: 1.15rem;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  letter-spacing: -0.02em;
+}
+
+/* Guide headings only: API pages use h2 for the endpoint URL and tab titles. */
+.markdown h2:not([class*="openapi"]) {
+  margin-top: 2.75rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid var(--portal-border);
+}
+
+.markdown > p:first-of-type {
+  font-size: 1.08rem;
+  color: var(--portal-muted);
+}
+
+.markdown code {
+  padding: 0.12rem 0.38rem;
+  border: 1px solid var(--portal-border);
+  background: var(--portal-surface);
+}
+
+.markdown a {
+  font-weight: 550;
+}
+
+.theme-code-block,
+.prism-code {
+  border-radius: var(--ifm-pre-border-radius) !important;
+}
+
+.theme-code-block {
+  border: 1px solid var(--portal-border);
+  box-shadow: none !important;
+}
+
+.markdown table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--portal-border);
+  border-radius: 12px;
+  overflow: hidden;
+  font-size: 0.93rem;
+}
+
+.markdown table th {
+  text-align: left;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--portal-muted);
+  background: var(--portal-surface);
+}
+
+.markdown table th,
+.markdown table td {
+  padding: 0.7rem 1rem;
+  border: 0;
+  border-bottom: 1px solid var(--portal-border);
+}
+
+.markdown table tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown table tr:nth-child(2n) {
+  background: transparent;
+}
+
+.theme-admonition {
+  border: 1px solid var(--portal-border);
+  border-left-width: 4px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.breadcrumbs__link {
+  font-size: 0.8rem;
+  border-radius: 999px;
+}
+
+.table-of-contents {
+  font-size: 0.82rem;
+}
+
+.table-of-contents__link--active {
+  font-weight: 650;
+}
+
+.pagination-nav__link {
+  border-radius: 12px;
+  border-color: var(--portal-border);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.pagination-nav__link:hover {
+  border-color: var(--ifm-color-primary);
+  box-shadow: var(--portal-shadow);
+}
+
+/* ── API reference pages ────────────────────────────────────────────────── */
+
+.openapi__heading {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 1.9rem !important;
+  letter-spacing: -0.03em;
+}
+
+.openapi-tabs__heading {
+  margin-top: 2rem;
+}
+
+.openapi-explorer__request-form,
+.openapi-explorer__response-container,
+.openapi-explorer__code-block-container,
+.openapi-security__details {
+  border: 1px solid var(--portal-border) !important;
+  border-radius: 14px !important;
+  background: var(--portal-surface) !important;
+  box-shadow: none !important;
+}
+
+.openapi-schema__required {
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+}
+
+/* ── footer ─────────────────────────────────────────────────────────────── */
+
+.footer {
+  border-top: 1px solid var(--portal-border);
+  background: var(--portal-surface);
+  --ifm-footer-title-color: var(--ifm-heading-color);
+  --ifm-footer-link-color: var(--portal-muted);
+  --ifm-footer-color: var(--portal-muted);
+  font-size: 0.9rem;
+}
+
+.footer__title {
+  font-size: 0.74rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
 }
