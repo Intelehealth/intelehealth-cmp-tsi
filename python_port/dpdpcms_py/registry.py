@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dpdpcms_py.extensions.breach.manifest import MODULE as breach
 from dpdpcms_py.extensions.certificates.manifest import MODULE as certificates
-from dpdpcms_py.extensions.exports.manifest import MODULE as exports
+from dpdpcms_py.extensions.reports.manifest import MODULE as reports
 from dpdpcms_py.extensions.ropa.manifest import MODULE as ropa
 from dpdpcms_py.kernel.registry import Module, Sweep
 from dpdpcms_py.modules.administration.manifest import MODULE as administration
@@ -32,7 +32,7 @@ BRD_MODULES: tuple[Module, ...] = (
     audit_logging,
 )
 # Required by the DPDP Act and Rules, or by operations, but not named in the BRD.
-EXTENSIONS: tuple[Module, ...] = (breach, ropa, certificates, exports)
+EXTENSIONS: tuple[Module, ...] = (breach, ropa, certificates, reports)
 MODULES: tuple[Module, ...] = BRD_MODULES + EXTENSIONS
 
 SERVICE_ORDER = (

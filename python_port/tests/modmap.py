@@ -43,7 +43,7 @@ class ModuleGroup:
 jobs = ModuleGroup(
     "jobs",
     "dpdpcms_py.extensions.breach.sweeps",
-    "dpdpcms_py.extensions.exports.sweeps",
+    "dpdpcms_py.extensions.reports.sweeps",
     "dpdpcms_py.modules.administration.sweeps",
     "dpdpcms_py.modules.audit_logging.archive",
     "dpdpcms_py.modules.consent_lifecycle.sweeps",
@@ -93,7 +93,7 @@ consent = ModuleGroup(
 governance = ModuleGroup(
     "governance",
     "dpdpcms_py.extensions.certificates.service",
-    "dpdpcms_py.extensions.exports.service",
+    "dpdpcms_py.extensions.reports.service",
     "dpdpcms_py.extensions.ropa.service",
     "dpdpcms_py.modules.administration.api_keys",
     "dpdpcms_py.modules.audit_logging.service",

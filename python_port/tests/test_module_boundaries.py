@@ -172,3 +172,31 @@ def test_every_service_and_sweep_belongs_to_one_module():
     assert set(registry.SERVICE_REGISTRY) == set(registry.SERVICE_ORDER)
     assert list(registry.SWEEPS) == list(registry.SWEEP_ORDER)
     assert set(registry.SERVICE_MODULE) == set(registry.SERVICE_REGISTRY)
+
+
+def test_no_source_file_is_hidden_by_gitignore():
+    """A package named like an ignored runtime folder (`exports/`, `backups/`) is
+    silently left out of every commit, and the app then fails to import in CI."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("git") or not (REPO / ".git").exists():
+        pytest.skip("not a git checkout")
+    ignored = subprocess.run(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "--", "python_port/dpdpcms_py"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert [p for p in ignored if p.endswith(".py")] == []
+
+
+def test_no_package_is_left_out_of_the_docker_image():
+    patterns = {
+        line.strip().strip("/")
+        for line in (REPO / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+    packages = {p.name for p in PACKAGE.rglob("*") if p.is_dir() and p.name != "__pycache__"}
+    assert packages & patterns == set()

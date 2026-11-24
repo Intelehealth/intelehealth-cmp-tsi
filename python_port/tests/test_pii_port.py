@@ -845,7 +845,7 @@ def test_export_job_writes_masked_principal_ids(tx, tmp_path, monkeypatch):
     import csv
     import dataclasses
 
-    from dpdpcms_py.extensions.exports.service import JobService
+    from dpdpcms_py.extensions.reports.service import JobService
     from dpdpcms_py.kernel import pii
     from dpdpcms_py.kernel.config import settings
     from dpdpcms_py.modules.grievance.service import GrievanceService
@@ -877,7 +877,7 @@ def test_export_job_writes_masked_principal_ids(tx, tmp_path, monkeypatch):
 def test_job_input_payload_has_no_raw_principal_id(tx):
     import json
 
-    from dpdpcms_py.extensions.exports.service import JobService
+    from dpdpcms_py.extensions.reports.service import JobService
     from dpdpcms_py.kernel import pii
     from dpdpcms_py.kernel.errors import ApiError
 

@@ -10,7 +10,7 @@ This repository does **not** include the original Java servlet sources.
 | --- | --- |
 | `python_port/` | FastAPI application |
 | `python_port/dpdpcms_py/modules/` | One package per BRD module: `consent_lifecycle`, `cookie_consent`, `user_dashboard`, `notifications`, `grievance`, `administration`, `audit_logging` |
-| `python_port/dpdpcms_py/extensions/` | Required by the DPDP Act but not named in the BRD: `breach`, `ropa`, `certificates`, `exports` |
+| `python_port/dpdpcms_py/extensions/` | Required by the DPDP Act but not named in the BRD: `breach`, `ropa`, `certificates`, `reports` |
 | `python_port/dpdpcms_py/kernel/` | Shared plumbing: config, db, security, PII crypto, outbound guard, throttle, validators |
 | `web/` | Static UI and JSON Schema validators |
 | `db/` | PostgreSQL init scripts (applied on first database start) |
