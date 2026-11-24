@@ -23,7 +23,7 @@ needs_db = pytest.mark.skipif(not _DB_READY, reason="no live Postgres configured
 
 def _admin_ctx(payload):
     """A global ADMIN: no tenant of its own, so it must name one."""
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     return RequestContext(
         path="/api/v1/admin/policy",
@@ -58,7 +58,7 @@ def _same_id_in_two_tenants(cur):
 
 @needs_db
 def test_admin_get_policy_returns_the_named_tenants_row(tx):
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid_a, fid_b, pol = _same_id_in_two_tenants(cur)
@@ -69,7 +69,7 @@ def test_admin_get_policy_returns_the_named_tenants_row(tx):
 
 @needs_db
 def test_admin_delete_policy_archives_only_the_named_tenants_policy(tx):
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid_a, fid_b, pol = _same_id_in_two_tenants(cur)
@@ -82,7 +82,7 @@ def test_admin_delete_policy_archives_only_the_named_tenants_policy(tx):
 
 @needs_db
 def test_admin_update_and_publish_policy_touch_only_the_named_tenant(tx):
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid_a, fid_b, pol = _same_id_in_two_tenants(cur)
@@ -122,8 +122,8 @@ def test_admin_update_and_publish_policy_touch_only_the_named_tenant(tx):
 @needs_db
 @pytest.mark.parametrize("func", ["get_policy", "update_policy", "publish_policy", "delete_policy"])
 def test_admin_policy_operation_without_a_tenant_is_refused(tx, func):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         _, _, pol = _same_id_in_two_tenants(cur)
@@ -144,8 +144,8 @@ def test_admin_policy_operation_without_a_tenant_is_refused(tx, func):
 
 @needs_db
 def test_tenant_bound_caller_cannot_reach_another_tenants_policy_by_naming_it(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid_a, fid_b, pol = _same_id_in_two_tenants(cur)
@@ -170,7 +170,7 @@ def test_console_names_the_tenant_on_every_policy_write():
 
 @needs_db
 def test_asserted_time_cannot_turn_a_late_intimation_on_time(tx):
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
     from tests.test_p12_remediation import _report
 
     with tx.cursor() as cur:
@@ -188,7 +188,7 @@ def test_asserted_time_cannot_turn_a_late_intimation_on_time(tx):
 
 @needs_db
 def test_on_time_intimation_is_not_late(tx):
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
     from tests.test_p12_remediation import _report
 
     with tx.cursor() as cur:
@@ -199,7 +199,7 @@ def test_on_time_intimation_is_not_late(tx):
 
 
 def test_breach_pdf_judges_late_on_the_recorded_time():
-    from dpdpcms_py.services.compliance import breach_report_lines
+    from dpdpcms_py.extensions.breach.service import breach_report_lines
 
     deadline = datetime(2026, 10, 1, tzinfo=UTC)
     lines = breach_report_lines(
@@ -275,7 +275,7 @@ def test_db30_is_registered_everywhere_migrations_are_listed():
 def test_language_enum_in_schema_matches_the_server_list(func):
     import json
 
-    from dpdpcms_py.defaults import NOTIFICATION_LANGUAGES
+    from dpdpcms_py.modules.notifications.defaults import NOTIFICATION_LANGUAGES
 
     schema = json.loads((REPO / "web" / "WEB-INF" / "validator" / f"{func}.jschema").read_text(encoding="utf-8"))
     assert schema["properties"]["language_selected"]["enum"] == list(NOTIFICATION_LANGUAGES)
@@ -285,7 +285,7 @@ def test_language_enum_in_schema_matches_the_server_list(func):
     ("language", "ok"), [("en", True), ("hi", True), ("sat", True), ("en-IN", False), ("english", False), ("EN", False)]
 )
 def test_record_consent_schema_refuses_non_codes(language, ok):
-    from dpdpcms_py.validators import validate_payload
+    from dpdpcms_py.kernel.validators import validate_payload
 
     payload = {"_func": "record_consent", "user_id": "u", "policy_id": "p", "language_selected": language}
     errors = [e for e in validate_payload(payload) if "is not one of" in e]
@@ -368,7 +368,7 @@ def test_ci_runs_the_vendor_audit():
 
 
 def test_wildcard_allowlist_is_refused_in_production(monkeypatch):
-    from dpdpcms_py import config
+    from dpdpcms_py.kernel import config
 
     monkeypatch.setenv("OUTBOUND_ALLOWED_HOSTS", "*")
     with pytest.raises(RuntimeError, match="production"):
@@ -398,7 +398,7 @@ def test_wildcard_allowlist_is_refused_in_production(monkeypatch):
     ],
 )
 def test_environment_is_case_folded(monkeypatch, raw, expected):
-    from dpdpcms_py import config
+    from dpdpcms_py.kernel import config
 
     if raw is None:
         monkeypatch.delenv("TSI_DPDP_CMS_ENV", raising=False)
@@ -409,7 +409,7 @@ def test_environment_is_case_folded(monkeypatch, raw, expected):
 
 @pytest.mark.parametrize("raw", ["prod", "live", "dev", "production-in", "loc al"])
 def test_unknown_environment_refuses_to_start(monkeypatch, raw):
-    from dpdpcms_py import config
+    from dpdpcms_py.kernel import config
 
     monkeypatch.setenv("TSI_DPDP_CMS_ENV", raw)
     with pytest.raises(RuntimeError, match="TSI_DPDP_CMS_ENV must be one of"):
@@ -417,7 +417,7 @@ def test_unknown_environment_refuses_to_start(monkeypatch, raw):
 
 
 def test_capitalised_production_still_refuses_wildcard(monkeypatch):
-    from dpdpcms_py import config
+    from dpdpcms_py.kernel import config
 
     monkeypatch.setenv("TSI_DPDP_CMS_ENV", "Production")
     monkeypatch.setenv("OUTBOUND_ALLOWED_HOSTS", "*")

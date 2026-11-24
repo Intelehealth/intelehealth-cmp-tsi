@@ -40,7 +40,7 @@ def _seed_ropa(cur, fid, pol, purpose="care"):
 )
 def test_maintenance_guard_reads_granted_as_the_gate_does(tx, forged):
     """P11-01: every truthy spelling validate_consent honours is refused."""
-    from dpdpcms_py.services.consent import _point_granted
+    from dpdpcms_py.modules.consent_lifecycle.common import _point_granted
 
     assert _point_granted(forged)
     with tx.cursor() as cur:
@@ -85,10 +85,10 @@ def test_maintenance_guard_rejects_a_non_array_payload(tx, value):
 def test_activating_a_version_retires_the_one_it_supersedes(tx):
     """P11-03 / CU-05: two ACTIVE versions let consent rest on a superseded
     notice, for a purpose the current notice had dropped."""
-    from dpdpcms_py import pii
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.catalog import PolicyService
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -139,7 +139,7 @@ def test_activating_a_version_retires_the_one_it_supersedes(tx):
 
 def test_a_newer_version_closes_the_older_reconsent_demand(tx):
     """P11-03: one principal accumulated a PENDING demand per published version."""
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -160,7 +160,7 @@ def test_a_newer_version_closes_the_older_reconsent_demand(tx):
 
 def test_future_dated_version_supersedes_only_once_in_effect(tx):
     """P11-03: a future-dated ACTIVE version leaves the current one served."""
-    from dpdpcms_py.services.catalog import retire_all_superseded_versions, served_policy_version
+    from dpdpcms_py.modules.consent_lifecycle.policy_store import retire_all_superseded_versions, served_policy_version
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -193,7 +193,7 @@ def test_future_dated_version_supersedes_only_once_in_effect(tx):
 
 def test_whole_account_erasure_is_found_by_the_audit_purpose_filter(tx):
     """P11-04 / LG-05: 'ALL' was lower-cased away and found by no spelling."""
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -208,7 +208,7 @@ def test_whole_account_erasure_is_found_by_the_audit_purpose_filter(tx):
 
 def test_withdrawal_reaches_only_registered_processors(tx):
     """P11-05 / CW-08: every ACTIVE app was treated as a processor."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -246,9 +246,9 @@ def test_withdrawal_reaches_only_registered_processors(tx):
 
 def test_erasure_scrubs_the_identifier_from_fiduciary_and_processor_alerts(tx):
     """P11-06: only PRINCIPAL alerts were scrubbed."""
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.compliance import erase_cms_copy
-    from dpdpcms_py.services.lifecycle import record_alert
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
+    from dpdpcms_py.modules.notifications.alert_store import record_alert
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -269,7 +269,7 @@ def test_erasure_scrubs_the_identifier_from_fiduciary_and_processor_alerts(tx):
 
 def test_active_consent_without_a_policy_returns_every_active_record(tx):
     """P11-07: one of several active records was returned as the whole answer."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol_a = _seed_tenant(cur)
@@ -296,7 +296,7 @@ def test_active_consent_without_a_policy_returns_every_active_record(tx):
 
 def test_closure_finds_a_lifecycle_row_that_was_never_canonicalised(tx):
     """P11-08: a pre-26 ' Marketing' row was skipped by an exact-match lookup."""
-    from dpdpcms_py.services.lifecycle import close_purpose_exec
+    from dpdpcms_py.modules.consent_lifecycle.purpose_lifecycle import close_purpose_exec
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur, purposes=("marketing",))
@@ -316,7 +316,7 @@ def test_closure_finds_a_lifecycle_row_that_was_never_canonicalised(tx):
 
 def test_a_failed_time_bound_closure_is_reported_as_an_error(tx, monkeypatch):
     """P11-08: a swallowed failure read as 'closed: 0'."""
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur, purposes=("marketing",))

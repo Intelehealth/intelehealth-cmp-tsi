@@ -8,8 +8,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from dpdpcms_py import pii
-from dpdpcms_py.config import settings
+from dpdpcms_py.kernel import pii
+from dpdpcms_py.kernel.config import settings
 from tests.test_integration_db import (
     _DB_READY,
     REPO,
@@ -22,7 +22,7 @@ needs_db = pytest.mark.skipif(not _DB_READY, reason="no live Postgres configured
 
 
 def _report(fid, **extra):
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
 
     return BreachService().report_breach(
         _ctx(
@@ -60,7 +60,7 @@ def test_reporting_a_breach_notifies_the_principals_it_names(tx):
 
 @needs_db
 def test_breach_under_a_purpose_notifies_its_holders_once(tx):
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -77,9 +77,9 @@ def test_breach_under_a_purpose_notifies_its_holders_once(tx):
 
 @needs_db
 def test_board_intimation_is_recorded_once_and_stops_the_clock(tx):
-    from dpdpcms_py import jobs
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
+    from dpdpcms_py.kernel.errors import ApiError
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -111,8 +111,8 @@ def test_board_intimation_is_recorded_once_and_stops_the_clock(tx):
 
 @needs_db
 def test_another_tenant_cannot_record_an_intimation(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
+    from dpdpcms_py.kernel.errors import ApiError
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -181,7 +181,7 @@ def test_tenant_reader_role_sees_only_its_own_tenant(tx):
 
 
 def test_outbound_allowlist_matches_hosts_and_subdomains():
-    from dpdpcms_py.netutil import outbound_host_allowed
+    from dpdpcms_py.kernel.netutil import outbound_host_allowed
 
     assert outbound_host_allowed("anything.example.com", ())
     allowed = ("hooks.example.in", ".gov.in")
@@ -193,7 +193,7 @@ def test_outbound_allowlist_matches_hosts_and_subdomains():
 
 
 def test_webhook_url_outside_the_allowlist_is_refused(monkeypatch):
-    from dpdpcms_py import netutil
+    from dpdpcms_py.kernel import netutil
 
     monkeypatch.setattr(netutil, "resolve_public", lambda host: "203.0.113.10")
     monkeypatch.setattr(

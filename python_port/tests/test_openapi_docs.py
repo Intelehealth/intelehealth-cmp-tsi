@@ -6,10 +6,10 @@ import re
 import pytest
 from dpdpcms_py import main
 from dpdpcms_py import openapi_gen as gen
-from dpdpcms_py.config import VALIDATOR_ROOT
-from dpdpcms_py.errors import error_body
-from dpdpcms_py.services.consent import WALLET_ACTIONS
-from dpdpcms_py.services.roles import required_permission
+from dpdpcms_py.kernel.config import VALIDATOR_ROOT
+from dpdpcms_py.kernel.errors import error_body
+from dpdpcms_py.modules.administration.roles import required_permission
+from dpdpcms_py.modules.consent_lifecycle.wallet import WALLET_ACTIONS
 from fastapi import FastAPI
 
 
@@ -234,7 +234,7 @@ def test_get_is_documented_only_with_parameters_the_server_accepts():
 
 
 def test_documented_get_passes_the_runtime_validator():
-    from dpdpcms_py.validators import validate_payload
+    from dpdpcms_py.kernel.validators import validate_payload
 
     for path, item in gen.build_spec("internal")["paths"].items():
         if "get" in item:

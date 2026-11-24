@@ -9,16 +9,21 @@ import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import db
-from .config import WEB_ROOT, settings
-from .context import RequestContext
-from .errors import ApiError, error_body
-from .security import api_key_valid, bearer_token, decode_token, is_operator_token
-from .services import SERVICE_REGISTRY
-from .services.base import same_principal
-from .services.consent import resolve_wallet_action
-from .services.roles import FUNC_PERMISSIONS, MFA_EXEMPT_FUNCS, READ_PREFIXES, enforce_role_permission
-from .validators import validate_payload
+from dpdpcms_py.kernel import db
+from dpdpcms_py.kernel.config import WEB_ROOT, settings
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError, error_body
+from dpdpcms_py.kernel.security import api_key_valid, bearer_token, decode_token, is_operator_token
+from dpdpcms_py.kernel.service import same_principal
+from dpdpcms_py.kernel.validators import validate_payload
+from dpdpcms_py.modules.administration.roles import (
+    FUNC_PERMISSIONS,
+    MFA_EXEMPT_FUNCS,
+    READ_PREFIXES,
+    enforce_role_permission,
+)
+from dpdpcms_py.modules.consent_lifecycle.wallet import resolve_wallet_action
+from dpdpcms_py.registry import SERVICE_REGISTRY
 
 log = logging.getLogger("dpdpcms")
 
@@ -143,7 +148,7 @@ def _install_local_openapi(application: FastAPI, environment: str) -> bool:
     def local_openapi() -> dict:
         if not cache:
             # Imported here: openapi_gen imports this module.
-            from .openapi_gen import build_spec
+            from dpdpcms_py.openapi_gen import build_spec
 
             cache.update(build_spec("internal"))
         return cache

@@ -8,17 +8,17 @@ is covered by the manual test script referenced in dpdpcms_py/../README.md.
 import socket
 
 import pytest
-from dpdpcms_py import netutil
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services.base import (
+from dpdpcms_py.kernel import netutil
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.kernel.service import (
     bind_principal_field,
     ensure_principal_owns,
     principal_list_filter,
     reject_principal,
 )
-from dpdpcms_py.services.lifecycle import extract_purposes, validate_duration_flags
-from dpdpcms_py.webhooks import _sign
+from dpdpcms_py.modules.consent_lifecycle.purpose_lifecycle import extract_purposes, validate_duration_flags
+from dpdpcms_py.modules.notifications.webhooks import _sign
 
 
 # ── SSRF guard (netutil.validate_outbound_url) ────────────────────────

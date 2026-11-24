@@ -20,7 +20,7 @@ FID = "11111111-1111-1111-1111-111111111111"
 
 def _capture_submit(monkeypatch, ctx):
     """Run submit_grievance with the DB stubbed; return the channel it inserted."""
-    from dpdpcms_py.services import compliance as compliance_mod
+    from tests.modmap import compliance as compliance_mod
 
     inserted = []
 
@@ -44,7 +44,7 @@ def _payload(**extra):
 
 
 def test_grievance_channel_defaults_to_portal_for_principal_and_api_callers(monkeypatch):
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     def ctx(**extra):
         return RequestContext(
@@ -63,7 +63,7 @@ def test_grievance_channel_defaults_to_portal_for_principal_and_api_callers(monk
 
 
 def test_dpo_can_log_offline_grievance_with_channel(monkeypatch):
-    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.kernel.errors import ApiError
 
     ctx = _ctx(FID, _payload(channel="PHONE"), operator_id="op-1")
     assert _capture_submit(monkeypatch, ctx) == "PHONE"
@@ -92,7 +92,7 @@ def test_grievance_channel_column_defaults_portal(tx):
 
 
 def test_operator_logged_grievance_is_audited_as_the_operator(monkeypatch):
-    from dpdpcms_py.services import compliance as compliance_mod
+    from tests.modmap import compliance as compliance_mod
 
     events = []
     _capture_submit(monkeypatch, _ctx(FID, _payload(), operator_id="op-1"))  # installs the DB stubs
@@ -110,7 +110,7 @@ def _log_at(monkeypatch, when, action="TEST_EVENT", fid=None):
     """log_event with the audit clock pinned to `when` (naive UTC)."""
     from datetime import UTC
 
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     monkeypatch.setattr(audit, "_now", lambda: when.replace(tzinfo=UTC))
     audit.log_event("asha", fid, "SYSTEM", None, action, {"t": when.isoformat()})
@@ -158,7 +158,7 @@ def test_default_partition_catches_unplanned_year(tx, monkeypatch):
 @needs_db
 def test_append_only_triggers_apply_to_partitions(tx):
     import psycopg
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     audit.log_event("asha", None, "SYSTEM", None, "TEST_EVENT", {})
     with tx.cursor() as cur:
@@ -177,7 +177,8 @@ def test_archive_sweep_detaches_old_years_and_chain_still_verifies(tx, monkeypat
     from datetime import UTC, datetime
 
     import psycopg
-    from dpdpcms_py import audit, jobs
+    from dpdpcms_py.modules.audit_logging import ledger as audit
+    from tests.modmap import jobs
 
     monkeypatch.setattr(jobs, "settings", dataclasses.replace(jobs.settings, audit_live_years=3))
     with tx.cursor() as cur:
@@ -225,7 +226,7 @@ def test_archive_sweep_detaches_old_years_and_chain_still_verifies(tx, monkeypat
 
 
 def test_ledger_source_rejects_unexpected_registry_names(monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     monkeypatch.setattr(
         audit.db,
@@ -249,7 +250,7 @@ def _archive_everything(monkeypatch):
     import dataclasses
     from datetime import UTC, datetime
 
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     monkeypatch.setattr(jobs, "settings", dataclasses.replace(jobs.settings, audit_live_years=1))
     return jobs.archive_audit_partitions(datetime(2200, 6, 1, tzinfo=UTC))
@@ -259,7 +260,7 @@ def _archive_everything(monkeypatch):
 def test_chain_continues_from_archive_when_live_ledger_is_empty(tx, monkeypatch):
     from datetime import datetime
 
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         year = _live_partition_years(cur)[0]
@@ -284,7 +285,7 @@ def test_chain_continues_from_archive_when_live_ledger_is_empty(tx, monkeypatch)
 def test_archive_tables_keep_tenant_isolation(tx, monkeypatch):
     from datetime import datetime
 
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         year = _live_partition_years(cur)[0]
@@ -326,13 +327,13 @@ def test_archive_tables_keep_tenant_isolation(tx, monkeypatch):
 
 
 def test_pid_hmac_trims_but_keeps_case():
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     assert pii.hmac_hex(" ABC ") == pii.hmac_hex("ABC") != pii.hmac_hex("abc")
 
 
 def test_normalize_strips_spaces_only_like_sql_trim():
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     assert pii.normalize("  a b  ") == "a b"
     assert pii.normalize("\tx\n") == "\tx\n"
@@ -340,7 +341,7 @@ def test_normalize_strips_spaces_only_like_sql_trim():
 
 
 def test_mask_email_phone_other():
-    from dpdpcms_py.pii import mask
+    from dpdpcms_py.kernel.pii import mask
 
     assert mask("satish@test.com") == "s***@t***.com"
     assert mask("+919876543210") == "+91********10"
@@ -351,8 +352,8 @@ def test_mask_email_phone_other():
 
 
 def test_principal_view_masks_only_for_operators():
-    from dpdpcms_py.context import RequestContext
-    from dpdpcms_py.pii import principal_view
+    from dpdpcms_py.kernel.context import RequestContext
+    from dpdpcms_py.kernel.pii import principal_view
 
     def ctx(**kw):
         return RequestContext(path="/p", category="admin", service="s", payload={}, headers={}, **kw)
@@ -363,8 +364,8 @@ def test_principal_view_masks_only_for_operators():
 
 
 def test_params_normalise_and_append_key():
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
 
     assert pii.hmac_params(" a ") == ("a", settings.pii_lookup_key)
     assert pii.enc_params(None) == (None, settings.db_encryption_key)
@@ -373,8 +374,8 @@ def test_params_normalise_and_append_key():
 
 @needs_db
 def test_python_and_sql_hmac_agree(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
 
     # Postgres trim() strips spaces only; the tab/newline value proves Python agrees.
     for value in (" x@y.z ", "\t x@y.z\n ", "ABC"):
@@ -473,8 +474,8 @@ def test_hmac_keys_replace_plaintext_keys(tx):
 
 
 def _enc_hmac(cur, value):
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
 
     key = settings.db_encryption_key
     cur.execute(f"SELECT {pii.ENC_SQL} AS e, {pii.HMAC_SQL} AS h", (value, key, value, settings.pii_lookup_key))
@@ -554,7 +555,7 @@ def test_delivery_floor_allows_only_encrypted_erasure_of_recipient(tx):
 
 def _api_ctx(fid, payload):
     """An integrator API-key caller of `fid` (no operator, no principal token)."""
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     return RequestContext(
         path="/api/v1/consent",
@@ -569,7 +570,7 @@ def _api_ctx(fid, payload):
 
 
 def _grant(fid, pol, user, purpose="care"):
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     return ConsentService().record_consent(
         _api_ctx(
@@ -581,9 +582,9 @@ def _grant(fid, pol, user, purpose="care"):
 
 @needs_db
 def test_record_list_withdraw_consent_round_trip_encrypted(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     pid = "satish@test.com"
     with tx.cursor() as cur:
@@ -624,8 +625,8 @@ def test_record_list_withdraw_consent_round_trip_encrypted(tx):
 
 @needs_db
 def test_principal_ids_with_spaces_resolve_and_case_stays_distinct(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -652,7 +653,7 @@ def test_principal_ids_with_spaces_resolve_and_case_stays_distinct(tx):
 
 def _processor_ctx(fid, payload):
     """A PURGE-scope processor API key of `fid` (app bound, no operator)."""
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     return RequestContext(
         path="/api/v1/compliance",
@@ -674,9 +675,10 @@ def _no_plaintext(cur, fid, pid, tables):
 
 @needs_db
 def test_erasure_writes_encrypted_placeholder_and_is_repeatable(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
-    from dpdpcms_py.services.compliance import GrievanceService, erase_cms_copy
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
+    from dpdpcms_py.modules.grievance.service import GrievanceService
     from tests.test_integration_db import _seed_consent
 
     pid = "asha@example.org"
@@ -745,8 +747,8 @@ def test_erasure_writes_encrypted_placeholder_and_is_repeatable(tx):
 
 @needs_db
 def test_processor_sees_plaintext_purge_user_id_operator_sees_mask(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.compliance import ComplianceService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService
     from tests.test_integration_db import _seed_consent, _seed_purge
 
     pid = "asha@example.org"
@@ -777,8 +779,8 @@ def test_processor_sees_plaintext_purge_user_id_operator_sees_mask(tx):
 
 @needs_db
 def test_grievance_search_by_principal_is_exact_match(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -807,8 +809,8 @@ def test_grievance_search_by_principal_is_exact_match(tx):
 
 @needs_db
 def test_principal_grievance_log_entry_names_no_principal_id(tx):
-    from dpdpcms_py.context import RequestContext
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.kernel.context import RequestContext
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     pid = "asha@example.org"
     with tx.cursor() as cur:
@@ -843,10 +845,11 @@ def test_export_job_writes_masked_principal_ids(tx, tmp_path, monkeypatch):
     import csv
     import dataclasses
 
-    from dpdpcms_py import jobs, pii
-    from dpdpcms_py.config import settings
-    from dpdpcms_py.services.compliance import GrievanceService
-    from dpdpcms_py.services.governance import JobService
+    from dpdpcms_py.extensions.exports.service import JobService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.grievance.service import GrievanceService
+    from tests.modmap import jobs
 
     pid = "asha@example.org"
     monkeypatch.setattr(jobs, "settings", dataclasses.replace(settings, export_path=tmp_path))
@@ -874,9 +877,9 @@ def test_export_job_writes_masked_principal_ids(tx, tmp_path, monkeypatch):
 def test_job_input_payload_has_no_raw_principal_id(tx):
     import json
 
-    from dpdpcms_py import pii
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.governance import JobService
+    from dpdpcms_py.extensions.exports.service import JobService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.errors import ApiError
 
     pid = "asha@example.org"
     with tx.cursor() as cur:
@@ -907,8 +910,9 @@ def test_job_input_payload_has_no_raw_principal_id(tx):
 def test_notification_delivery_decrypts_recipient(tx, monkeypatch):
     import dataclasses
 
-    from dpdpcms_py import delivery, pii
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.notifications import delivery
 
     pid = "+919876543210"
     sent = []
@@ -940,8 +944,8 @@ def test_notification_delivery_decrypts_recipient(tx, monkeypatch):
 
 @needs_db
 def test_consent_history_pdf_masks_the_principal_for_operators_only(tx, monkeypatch):
-    from dpdpcms_py import pdfgen, pii
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import pdfgen, pii
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     pid = "asha@example.org"
     with tx.cursor() as cur:
@@ -965,9 +969,9 @@ def test_consent_history_pdf_masks_the_principal_for_operators_only(tx, monkeypa
 
 @needs_db
 def test_alerts_store_encrypted_recipient_and_acknowledger(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.context import RequestContext
-    from dpdpcms_py.services.alerts import AlertService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.context import RequestContext
+    from dpdpcms_py.modules.notifications.alerts import AlertService
 
     pid = "asha@example.org"
     with tx.cursor() as cur:
@@ -1004,7 +1008,7 @@ def test_alerts_store_encrypted_recipient_and_acknowledger(tx):
 def test_hmac_principal_keys_fails_closed_on_nested_values():
     import json
 
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     pid = "asha@example.org"
     nested = {"email": pid, "phone": "+919876543210"}
@@ -1018,7 +1022,7 @@ def test_hmac_principal_keys_fails_closed_on_nested_values():
 def test_mask_principal_keys_masks_scalars_and_nested_values():
     import json
 
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     pid = "asha@example.org"
     value = {"user_id": pid, "purpose_ids": ["care"], "items": [{"principal_id": pid}], "nominee_id": {"e": pid}}
@@ -1033,7 +1037,7 @@ def test_record_alert_failure_logs_no_row_detail(monkeypatch, caplog):
     import logging
 
     import psycopg
-    from dpdpcms_py.services import lifecycle
+    from tests.modmap import lifecycle
 
     pid = "asha@example.org"
 
@@ -1052,8 +1056,8 @@ def test_record_alert_failure_logs_no_row_detail(monkeypatch, caplog):
 def test_operator_alert_payloads_mask_principal_ids(tx):
     import json
 
-    from dpdpcms_py.services.alerts import AlertService
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
+    from dpdpcms_py.modules.notifications.alerts import AlertService
 
     pid = "asha@example.org"
     with tx.cursor() as cur:
@@ -1070,9 +1074,9 @@ def test_operator_alert_payloads_mask_principal_ids(tx):
 
 @needs_db
 def test_certificate_signs_the_principal_hmac_and_survives_erasure(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.services import governance
-    from dpdpcms_py.services.compliance import erase_cms_copy
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
+    from tests.modmap import governance
     from tests.test_integration_db import _log
 
     pid = "asha@example.org"
@@ -1107,9 +1111,9 @@ def test_certificate_signs_the_principal_hmac_and_survives_erasure(tx):
 
 @needs_db
 def test_erased_subject_certificate_still_fails_when_tampered(tx):
-    from dpdpcms_py import audit
-    from dpdpcms_py.services import governance
-    from dpdpcms_py.services.compliance import erase_cms_copy
+    from dpdpcms_py.modules.audit_logging import ledger as audit
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
+    from tests.modmap import governance
     from tests.test_integration_db import _log, real_db
 
     pid = "asha@example.org"
@@ -1147,8 +1151,8 @@ def test_erased_subject_certificate_still_fails_when_tampered(tx):
 
 
 def _decrypt(cur, value):
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
 
     cur.execute(f"SELECT {pii.dec_sql('%s::text')} AS v", (value, settings.db_encryption_key))
     return cur.fetchone()["v"]
@@ -1159,7 +1163,7 @@ def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
     import dataclasses
     import json
 
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     ip, ref, claimed = "203.0.113.77", "DL-REF-998877", "192.0.2.55"
     with tx.cursor() as cur:
@@ -1221,7 +1225,7 @@ def test_consent_ip_and_guardian_evidence_stored_encrypted(tx):
 def _record(fid, pol, user, ip, claimed=None):
     import dataclasses
 
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     payload = {"user_id": user, "policy_id": pol, "data_point_consents": [{"id": "care", "consent_granted": True}]}
     if claimed:
@@ -1235,7 +1239,7 @@ def test_consent_reads_never_return_ip_ciphertext(tx):
     session and claimed IPs, a console operator gets null for both."""
     import dataclasses
 
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     ip, claimed = "203.0.113.78", "192.0.2.56"
     with tx.cursor() as cur:
@@ -1266,8 +1270,9 @@ def test_consent_reads_never_return_ip_ciphertext(tx):
 def test_audit_details_pseudonymise_principal_keys(tx):
     import json
 
-    from dpdpcms_py import audit, pii
-    from dpdpcms_py.security import pseudonym
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.security import pseudonym
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     assert pii.PRINCIPAL_KEYS <= audit.PRINCIPAL_DETAIL_KEYS
     details = {
@@ -1304,7 +1309,7 @@ def test_audit_details_pseudonymise_principal_keys(tx):
 
 @needs_db
 def test_audit_user_pseudonym_ignores_surrounding_spaces(tx):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     audit.log_event(" a ", None, "SYSTEM", None, "T8_PAD", {})
     audit.log_event("a", None, "SYSTEM", None, "T8_PAD", {})
@@ -1320,8 +1325,8 @@ def test_audit_user_pseudonym_ignores_surrounding_spaces(tx):
 def test_audit_source_ip_encrypted_and_chain_verifies(tx, monkeypatch):
     from datetime import UTC, datetime
 
-    from dpdpcms_py import audit
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     ip = "198.51.100.23"
     with tx.cursor() as cur:
@@ -1364,7 +1369,7 @@ def test_audit_source_ip_encrypted_and_chain_verifies(tx, monkeypatch):
 @needs_db
 def test_audit_source_ip_reader_keeps_legacy_plaintext_and_raises_on_wrong_key(tx):
     import psycopg
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel.config import settings
 
     key = settings.db_encryption_key
     with tx.cursor() as cur:
@@ -1383,9 +1388,9 @@ def test_audit_source_ip_reader_keeps_legacy_plaintext_and_raises_on_wrong_key(t
 
 @needs_db
 def test_erasure_scrubs_encrypted_ip(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
-    from dpdpcms_py.services.compliance import erase_cms_copy
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
     from tests.test_integration_db import _seed_consent
 
     with tx.cursor() as cur:
@@ -1429,7 +1434,7 @@ def test_erasure_scrubs_encrypted_ip(tx):
 
 def _reveal_operator(cur, fid, role, name):
     """An ACTIVE operator whose email_hmac matches what authenticate() looks up."""
-    from dpdpcms_py import db
+    from dpdpcms_py.kernel import db
 
     email = f"{name}-{uuid.uuid4().hex[:8]}@example.org"
     cur.execute(
@@ -1441,7 +1446,7 @@ def _reveal_operator(cur, fid, role, name):
 
 
 def _bearer(email, role):
-    from dpdpcms_py import security
+    from dpdpcms_py.kernel import security
 
     return {"Authorization": f"Bearer {security.token(email, 'n', role)}"}
 
@@ -1469,7 +1474,7 @@ def _reveal_rows(cur, initiator=None):
 
 def _seed_revealable(cur, fid, pol):
     """One row of every revealable source for principal 'asha' in tenant `fid`."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     _record(fid, pol, "asha", "203.0.113.90")
     cur.execute("SELECT id FROM consent_records WHERE fiduciary_id = %s", (fid,))
@@ -1522,8 +1527,9 @@ def _source_payload(fid, source, ref):
 def test_dpo_reveals_own_tenant_and_audit_row_precedes_response(tx, monkeypatch):
     import json
 
-    from dpdpcms_py import main, security
-    from dpdpcms_py.services import pii as pii_service
+    from dpdpcms_py import main
+    from dpdpcms_py.kernel import security
+    from dpdpcms_py.modules.administration import pii_reveal as pii_service
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1617,7 +1623,7 @@ def test_admin_reveals_any_tenant(tx):
 
 @needs_db
 def test_operator_auditor_api_key_principal_get_403_and_no_audit_row(tx):
-    from dpdpcms_py import security
+    from dpdpcms_py.kernel import security
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1676,7 +1682,7 @@ def test_dpo_other_tenant_403(tx):
 def test_21st_reveal_in_a_minute_is_429(tx, monkeypatch):
     from datetime import timedelta
 
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1702,8 +1708,8 @@ def test_21st_reveal_in_a_minute_is_429(tx, monkeypatch):
 
 @needs_db
 def test_unknown_source_400(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.pii import PiiService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.administration.pii_reveal import PiiService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1729,7 +1735,7 @@ def test_unknown_source_400(tx):
 
 
 def _ctx_as_operator(fid, role, payload):
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     return RequestContext(
         path="/api/v1/admin/pii",
@@ -1778,7 +1784,7 @@ def _console(headers, func, payload, category="admin", method="post"):
 
 def _seed_minor_consent(cur, fid, pol, child="kid-77"):
     """A minor's consent backed by a VERIFIED guardian log carrying evidence."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     enc, hmac = _pid(cur, GUARDIAN)
     cur.execute(
@@ -1818,7 +1824,7 @@ def _seed_minor_consent(cur, fid, pol, child="kid-77"):
 
 @needs_db
 def test_parental_verification_is_masked_and_minor_only(tx):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1861,7 +1867,7 @@ def test_parental_verification_is_masked_and_minor_only(tx):
 
 
 def _trail_policy(cur, fid, pol):
-    from dpdpcms_py import db
+    from dpdpcms_py.kernel import db
 
     cur.execute(
         "UPDATE consent_policies SET policy_content = %s WHERE id = %s AND fiduciary_id = %s",
@@ -1878,8 +1884,8 @@ def _trail(headers, record, fid):
 
 @needs_db
 def test_consent_audit_trail_groups_by_purpose_and_carries_service_id(tx, monkeypatch):
-    from dpdpcms_py import audit
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.audit_logging import ledger as audit
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -1982,9 +1988,9 @@ def test_consent_audit_trail_groups_by_purpose_and_carries_service_id(tx, monkey
 def test_audit_trail_rejects_api_key_and_principal(tx):
     import dataclasses
 
-    from dpdpcms_py import security
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import security
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -2037,7 +2043,7 @@ def test_audit_trail_read_is_logged_with_the_consent_record_id(tx):
 
 @needs_db
 def test_erased_principal_record_has_an_empty_trail(tx):
-    from dpdpcms_py.services.compliance import erase_cms_copy
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -2051,14 +2057,14 @@ def test_erased_principal_record_has_an_empty_trail(tx):
 
 @needs_db
 def test_audit_trail_without_a_decryptable_principal_is_empty(tx, monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
         _, email = _reveal_operator(cur, fid, "DPO", "dee")
     record = _grant(fid, pol, "asha")["data"]["consent_record_id"]
     # A NULL decrypt never derives a pseudonym (pseudonym("") is a real hash).
-    from dpdpcms_py.services import consent as consent_mod
+    from tests.modmap import consent as consent_mod
 
     monkeypatch.setattr(
         consent_mod.pii, "dec_sql", lambda column: "CASE WHEN %s::text IS NULL THEN NULL ELSE NULL::text END"
@@ -2127,7 +2133,7 @@ def test_grievance_console_sends_the_filter_keys_list_grievances_reads():
 
 @needs_db
 def test_list_principals_gives_the_console_a_user_ref_it_can_reveal(tx):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -2147,7 +2153,7 @@ def test_list_principals_gives_the_console_a_user_ref_it_can_reveal(tx):
 
 @needs_db
 def test_operator_reads_consent_history_by_user_ref_with_masked_ids(tx):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -2170,7 +2176,7 @@ def test_operator_reads_consent_history_by_user_ref_with_masked_ids(tx):
 
 @needs_db
 def test_user_ref_history_lookup_stays_in_the_callers_tenant(tx):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -2188,9 +2194,9 @@ def test_user_ref_history_lookup_stays_in_the_callers_tenant(tx):
 
 @needs_db
 def test_api_key_caller_cannot_look_up_history_by_user_ref(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -2204,7 +2210,7 @@ def test_api_key_caller_cannot_look_up_history_by_user_ref(tx):
 
 
 def test_otp_subject_trims_spaces_but_keeps_case():
-    from dpdpcms_py import principal_otp
+    from dpdpcms_py.kernel import principal_otp
 
     assert principal_otp.subject_key(FID, " abc123 ") == principal_otp.subject_key(FID, "abc123")
     assert principal_otp.subject_key(FID, "abc123") != principal_otp.subject_key(FID, "ABC123")
@@ -2212,9 +2218,10 @@ def test_otp_subject_trims_spaces_but_keeps_case():
 
 @needs_db
 def test_otp_issued_for_one_principal_does_not_log_in_a_case_variant(tx, monkeypatch):
-    from dpdpcms_py import principal_otp, webhooks
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import PrincipalService
+    from dpdpcms_py.kernel import principal_otp
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.notifications import webhooks
+    from dpdpcms_py.modules.user_dashboard.session import PrincipalService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -2245,7 +2252,7 @@ def _log_archived_and_live(monkeypatch, cur, fid, action):
     """One `action` row in the oldest live year (then archived) and one in a live year."""
     from datetime import datetime
 
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     year = _live_partition_years(cur)[0]
     _log_at(monkeypatch, datetime(year, 3, 1), action=action, fid=fid)
@@ -2261,8 +2268,8 @@ def test_audit_export_includes_archived_years(tx, tmp_path, monkeypatch):
     import dataclasses
     import json
 
-    from dpdpcms_py import jobs
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel.config import settings
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -2286,7 +2293,7 @@ def test_audit_export_includes_archived_years(tx, tmp_path, monkeypatch):
 
 @needs_db
 def test_access_report_includes_archived_years(tx, monkeypatch):
-    from dpdpcms_py.services.governance import AuditService
+    from dpdpcms_py.modules.audit_logging.service import AuditService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -2300,8 +2307,8 @@ def test_access_report_includes_archived_years(tx, monkeypatch):
 
 @needs_db
 def test_pending_grievance_queue_carries_no_ciphertext_and_masks_the_principal(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.admin import AdminDashService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.administration.metrics import AdminDashService
     from tests.test_integration_db import _ASHA_ENC, _ASHA_HMAC
 
     with tx.cursor() as cur:
@@ -2320,8 +2327,8 @@ def test_pending_grievance_queue_carries_no_ciphertext_and_masks_the_principal(t
 def test_dashboard_access_logs_decrypt_the_ip_and_read_archived_years(tx, monkeypatch):
     from datetime import UTC, datetime
 
-    from dpdpcms_py import audit
-    from dpdpcms_py.services.admin import AdminDashService
+    from dpdpcms_py.modules.administration.metrics import AdminDashService
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)

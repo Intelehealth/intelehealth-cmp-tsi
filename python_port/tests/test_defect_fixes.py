@@ -9,12 +9,15 @@ import threading
 from contextlib import contextmanager
 
 import pytest
-from dpdpcms_py import delivery, main, netutil, principal_otp, totp, worker
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.security import principal_token, token
-from dpdpcms_py.services import admin, compliance, consent, roles
-from dpdpcms_py.services.base import tenant_filter
+from dpdpcms_py import main, worker
+from dpdpcms_py.kernel import netutil, principal_otp
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.kernel.security import principal_token, token
+from dpdpcms_py.kernel.service import tenant_filter
+from dpdpcms_py.modules.administration import roles, totp
+from dpdpcms_py.modules.notifications import delivery
+from tests.modmap import admin, compliance, consent
 
 FID = "11111111-1111-1111-1111-111111111111"
 OTHER_FID = "22222222-2222-2222-2222-222222222222"
@@ -117,7 +120,9 @@ def otp_store(monkeypatch):
     monkeypatch.setattr(consent.db, "execute", store.execute)
     monkeypatch.setattr(consent.db, "connection", store.connection)
     monkeypatch.setattr(consent, "log_event", lambda *a, **k: None)
-    monkeypatch.setattr("dpdpcms_py.webhooks.queue_webhook", lambda *a, **k: store.webhooks.append((a, k)))
+    monkeypatch.setattr(
+        "dpdpcms_py.modules.notifications.webhooks.queue_webhook", lambda *a, **k: store.webhooks.append((a, k))
+    )
     # P17-08: the OTP endpoints consult the login throttle; its auth_throttles
     # table is covered by the integration tier, so it is a no-op here.
     monkeypatch.setattr(consent.throttle, "require_allowed", lambda scope, key: None)
@@ -292,36 +297,14 @@ def test_run_cycle_isolates_failing_sweep(monkeypatch):
     def boom():
         raise RuntimeError("smtp exploded")
 
-    monkeypatch.setattr(worker.delivery, "process_pending_notifications", boom)
-    monkeypatch.setattr(worker.webhooks, "process_pending_webhooks", lambda: {"dispatched": 1})
-    # P6: every sweep the worker now runs is stubbed so the test asserts isolation
-    # without touching the database (the sweeps added on p5/p6 — expired keys,
-    # SSO nonces, webhook retention, throttle pruning — used to fall through to
-    # the real implementation and hang on a dead DB connection).
-    for name in (
-        "close_due_time_bound_purposes",
-        "escalate_stale_alerts",
-        "escalate_overdue_grievances",
-        "run_retention_sweep",
-        "execute_queued_jobs",
-        "flag_overdue_purges",
-        "release_expired_legal_holds",
-        "prune_revoked_tokens",
-        "expire_lapsed_api_keys",
-        "prune_sso_nonces",
-        "expire_nominations",
-        "prune_old_webhook_deliveries",
-        "flag_security_anomalies",
-        "prune_old_notification_deliveries",
-        "flag_breach_board_deadlines",
-        "archive_audit_partitions",
-        "seal_queued_payloads",
-    ):
-        monkeypatch.setattr(worker.jobs, name, lambda name=name: {"ran": name})
-    monkeypatch.setattr(worker.throttle, "prune_expired", lambda: {"pruned": 0})
-    monkeypatch.setattr(worker.audit, "record_chain_verification", lambda: {"ran": "audit_chain"})
-    monkeypatch.setattr(worker.audit, "verify_legacy_ledger", lambda: {"ran": "legacy_ledger"})
-    monkeypatch.setattr(worker, "retire_all_superseded_versions", lambda: {"archived": 0})
+    from dpdpcms_py.kernel.registry import Sweep
+
+    # Every sweep a module manifest declares is replaced, so the cycle touches no database.
+    for name, sweep in list(worker.SWEEPS.items()):
+        fake = (lambda ran: lambda: {"ran": ran})(sweep.func.__name__)
+        monkeypatch.setitem(worker.SWEEPS, name, Sweep(fake, sweep.note))
+    monkeypatch.setitem(worker.SWEEPS, "delivery", Sweep(boom, ""))
+    monkeypatch.setitem(worker.SWEEPS, "webhooks", Sweep(lambda: {"dispatched": 1}, ""))
     heartbeats = []
     monkeypatch.setattr(worker, "record_heartbeat", heartbeats.append)
     summary = worker.run_cycle()

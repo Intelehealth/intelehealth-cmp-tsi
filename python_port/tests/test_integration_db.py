@@ -30,8 +30,8 @@ import pytest
 from psycopg.rows import dict_row
 
 try:
-    from dpdpcms_py import db as real_db
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import db as real_db
+    from dpdpcms_py.kernel.config import settings
 
     _DB_READY = False
     try:
@@ -83,7 +83,7 @@ def tx(monkeypatch):
 
 
 def _ctx(fid, payload, **extra):
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     return RequestContext(
         path="/api/v1/admin/test",
@@ -126,7 +126,7 @@ _ASHA_HMAC = "encode(hmac('asha', tsi_lookup_key(), 'sha256'), 'hex')"
 
 def _pid(cur, value):
     """(enc, hmac) of a principal id, exactly as the services store it (db/34)."""
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     cur.execute(
         f"SELECT {pii.ENC_SQL} AS enc, {pii.HMAC_SQL} AS hmac", (*pii.enc_params(value), *pii.hmac_params(value))
@@ -157,7 +157,7 @@ def _seed_consent(cur, fid, pol, user, purposes=("care",), ip="1.2.3.4", user_ag
 
 
 def _consents(cur, fid):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     cur.execute(
         f"SELECT {pii.dec_sql('user_id_enc')} AS user_id, data_point_consents FROM consent_records"
@@ -171,7 +171,7 @@ def _consents(cur, fid):
 def test_erasure_deidentify_scopes_to_the_principal(tx):
     """P7-01 regression: de-identifying a purpose for ONE principal must not
     touch another principal's consent records in the same tenant."""
-    from dpdpcms_py.services.compliance import deidentify_purpose_cms_copy
+    from dpdpcms_py.modules.consent_lifecycle.erasure import deidentify_purpose_cms_copy
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -192,7 +192,7 @@ def test_deidentify_branch_runs_and_scopes_to_the_principal(tx):
     pseudonym marker went untyped into jsonb_build_object). It must run, blank
     the entry for the one principal, keep the other purposes, and leave every
     other principal untouched."""
-    from dpdpcms_py.services.compliance import deidentify_purpose_cms_copy
+    from dpdpcms_py.modules.consent_lifecycle.erasure import deidentify_purpose_cms_copy
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -216,7 +216,7 @@ def test_deidentify_branch_runs_and_scopes_to_the_principal(tx):
 def test_deidentification_and_erasure_never_cross_tenants(tx):
     """CF-03: a second tenant holding the SAME user id and purpose is untouched
     by a purpose de-identification or a whole-account erasure in the first."""
-    from dpdpcms_py.services.compliance import deidentify_purpose_cms_copy, erase_cms_copy
+    from dpdpcms_py.modules.consent_lifecycle.erasure import deidentify_purpose_cms_copy, erase_cms_copy
 
     with tx.cursor() as cur:
         fid_a, pol_a = _seed_tenant(cur)
@@ -243,8 +243,8 @@ def test_deidentification_and_erasure_never_cross_tenants(tx):
 def test_erasure_metadata_scrub_runs_on_the_original_user_id(tx):
     """P6-06 regression against a real DB: the consent-record metadata scrub
     must actually clear ip/user_agent rather than match nothing after re-keying."""
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.compliance import erase_cms_copy
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -278,8 +278,8 @@ def test_purpose_purge_under_legal_hold_is_refused_before_anything_is_written(tx
     a held request was recorded PURGE_COMPLETED with nothing de-identified and
     no audit event. Now nothing is written; once the hold is gone, the same
     confirmation completes, de-identifies, and is audited."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import ComplianceService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -319,7 +319,7 @@ def test_purpose_purge_under_legal_hold_is_refused_before_anything_is_written(tx
 def test_expired_hold_on_the_request_itself_does_not_block_completion(tx):
     """P8-02 edge: evaluating the hold BEFORE the UPDATE must not let a request
     whose own expired hold passed the CW-11 check block itself."""
-    from dpdpcms_py.services.compliance import ComplianceService
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -334,7 +334,7 @@ def test_expired_hold_on_the_request_itself_does_not_block_completion(tx):
 
 # ── audit ledger: verifier, certificates, index ──────────────────────────────
 def _log(fid, user, action):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     audit.log_event(user, fid, "APP", None, action, {"a": action}, purpose_id="care", source_ip="9.9.9.9")
 
@@ -348,7 +348,7 @@ def test_chain_verifies_intact_and_detects_tampering_on_real_rows(tx):
     """P6-01 / SEC-10: the hash-chain verifier must pass on an intact ledger and
     flag a tampered row when both are real rows. The tamper is rolled back
     with the test's transaction (P8-06), so the shared ledger stays intact."""
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, _pol = _seed_tenant(cur)
@@ -376,7 +376,7 @@ def test_chain_verifies_intact_and_detects_tampering_on_real_rows(tx):
 def test_another_tenants_break_fails_a_scoped_verification(tx):
     """SEC-10: the chain is global. A break in tenant B's rows must make tenant
     A's scoped verification fail too — reported as a count, without B's ids."""
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid_a, _ = _seed_tenant(cur)
@@ -403,9 +403,9 @@ def test_partial_window_is_reported_incomplete_and_certificates_anchor_on_their_
     """P7-02 / P8-04: a window holding only part of a tenant's rows used to
     certify. It now reports coverage_complete False with the real counts, and
     certificate generation anchors the walk on its own oldest trail entry."""
-    from dpdpcms_py import audit
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services import governance
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.audit_logging import ledger as audit
+    from tests.modmap import governance
 
     with tx.cursor() as cur:
         fid_a, _ = _seed_tenant(cur)
@@ -455,7 +455,7 @@ def test_chain_order_is_index_backed_and_full_walk_runs_in_the_worker(tx):
     """P6-12: the verifier's ORDER BY timestamp DESC, id DESC has a supporting
     index, and the full-ledger walk is a once-a-day worker sweep whose verdict
     the on-demand endpoint reports."""
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         cur.execute("SET LOCAL enable_seqscan = off")
@@ -581,8 +581,8 @@ def test_console_assignment_matches_auto_route_and_notifies_the_assignee(tx):
     """P7-05: assign_grievance used to notify only the principal and force
     IN_PROGRESS. It now leaves the status as the auto-route does and sends the
     assignee a DPO-facing notice carrying the grievance reference."""
-    from dpdpcms_py.delivery import render_message
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.modules.grievance.service import GrievanceService
+    from dpdpcms_py.modules.notifications.delivery import render_message
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -622,7 +622,7 @@ def test_console_assignment_matches_auto_route_and_notifies_the_assignee(tx):
 
 # ── P8-07 batched retention lookup ───────────────────────────────────────────
 def test_batched_retention_lookup_matches_the_single_purpose_lookup(tx):
-    from dpdpcms_py.services.retention import retention_for, retention_for_purposes
+    from dpdpcms_py.modules.administration.retention import retention_for, retention_for_purposes
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -643,7 +643,7 @@ def test_batched_retention_lookup_matches_the_single_purpose_lookup(tx):
 
 # ── P7-03 nomination status precedence ───────────────────────────────────────
 def test_nomination_is_reported_with_the_status_it_was_selected_by(tx):
-    from dpdpcms_py.services.rights import RightsService
+    from dpdpcms_py.modules.user_dashboard.rights import RightsService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -664,9 +664,9 @@ def test_closure_with_retention_defers_then_sweep_raises_and_completes_the_purge
     at closure; once the period has run from closure, the sweep raises one per
     principal carrying the closure's DE_IDENTIFY action, and confirming it
     de-identifies that principal's entry (the P8-01 path, end to end)."""
-    from dpdpcms_py import jobs
-    from dpdpcms_py.services.compliance import ComplianceService
-    from dpdpcms_py.services.lifecycle import close_purpose_exec
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService
+    from dpdpcms_py.modules.consent_lifecycle.purpose_lifecycle import close_purpose_exec
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -704,7 +704,7 @@ def test_closure_with_retention_defers_then_sweep_raises_and_completes_the_purge
 
 # ── SA-13 notification_deliveries retention ──────────────────────────────────
 def test_notification_delivery_retention_prunes_only_terminal_rows_past_the_floor(tx):
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -743,8 +743,8 @@ def _seed_operator(cur, fid, role, name):
 
 
 def test_grievance_category_routes_to_its_department_else_the_dpo(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     service = GrievanceService()
     with tx.cursor() as cur:
@@ -785,7 +785,7 @@ def test_grievance_category_routes_to_its_department_else_the_dpo(tx):
 
 # ── NT-03 delivery in the principal's language ───────────────────────────────
 def test_principal_notification_renders_in_the_language_they_chose(tx):
-    from dpdpcms_py.delivery import principal_language, render_message
+    from dpdpcms_py.modules.notifications.delivery import principal_language, render_message
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -805,7 +805,7 @@ def test_principal_notification_renders_in_the_language_they_chose(tx):
 # ── review follow-ups ─────────────────────────────────────────────────────────
 def test_backfill_never_redispatches_a_notification_whose_deliveries_were_pruned(tx):
     """SA-13: pruning old delivery rows must not make the backfill re-send them."""
-    from dpdpcms_py import delivery
+    from dpdpcms_py.modules.notifications import delivery
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -822,7 +822,7 @@ def test_backfill_never_redispatches_a_notification_whose_deliveries_were_pruned
 
 
 def test_erase_keeps_consent_entries_that_carry_no_purpose_id(tx):
-    from dpdpcms_py.services.compliance import deidentify_purpose_cms_copy
+    from dpdpcms_py.modules.consent_lifecycle.erasure import deidentify_purpose_cms_copy
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -838,9 +838,9 @@ def test_erase_keeps_consent_entries_that_carry_no_purpose_id(tx):
 
 
 def test_routing_rejects_an_officer_who_cannot_act_on_grievances(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services import roles
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.administration import roles
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     assert roles.required_permission("grievance", "set_grievance_routing") == "operator:write"
     with tx.cursor() as cur:
@@ -856,8 +856,8 @@ def test_routing_rejects_an_officer_who_cannot_act_on_grievances(tx):
 def test_certificate_omitting_earlier_events_is_rejected(tx):
     """A trail that does not declare truncation claims the whole history; an
     earlier event of the principal it leaves out invalidates it."""
-    from dpdpcms_py import audit
-    from dpdpcms_py.services import governance
+    from dpdpcms_py.modules.audit_logging import ledger as audit
+    from tests.modmap import governance
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -887,8 +887,8 @@ def test_hold_written_concurrently_is_honoured_not_raced():
     import threading
     import time
 
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import ComplianceService, lock_principal_purges
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService, lock_principal_purges
 
     with psycopg.connect(settings.db_dsn, row_factory=dict_row) as setup:
         with setup.cursor() as cur:
@@ -946,8 +946,8 @@ def test_hold_written_concurrently_is_honoured_not_raced():
 
 
 def test_assign_grievance_rejects_an_officer_who_cannot_act(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -975,7 +975,7 @@ def _close(cur, fid, purpose):
 
 def test_closed_purpose_does_not_validate_under_another_case(tx):
     """P9-01: 'marketing' must not validate while 'MARKETING' is closed."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("marketing",))
@@ -989,8 +989,8 @@ def test_closed_purpose_does_not_validate_under_another_case(tx):
 @pytest.mark.parametrize("status", ["DRAFT", "ARCHIVED"])
 def test_consent_refused_against_an_unpublished_policy(tx, status):
     """P9-02: consent rests only on the ACTIVE, in-effect notice."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import check_consent_alignment
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.collection import check_consent_alignment
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1001,7 +1001,7 @@ def test_consent_refused_against_an_unpublished_policy(tx, status):
 
 
 def test_consent_accepted_against_the_active_policy(tx):
-    from dpdpcms_py.services.consent import check_consent_alignment
+    from dpdpcms_py.modules.consent_lifecycle.collection import check_consent_alignment
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1010,7 +1010,7 @@ def test_consent_accepted_against_the_active_policy(tx):
 
 def test_marking_read_by_id_is_audited(tx):
     """P9-03: the schema's own 'id' field must not 500 or skip the audit row."""
-    from dpdpcms_py.services.governance import NotificationService
+    from dpdpcms_py.modules.notifications.service import NotificationService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1034,7 +1034,7 @@ def test_reopening_a_purpose_cancels_its_pending_purges(tx):
     """P9-04: purges raised by the closure are moot once the purpose reopens,
     and the time-bound clock restarts. P10-05: only for principals whose
     consent to the purpose is still active, and only purges this closure raised."""
-    from dpdpcms_py.services.lifecycle import PurposeLifecycleService
+    from dpdpcms_py.modules.consent_lifecycle.purpose_lifecycle import PurposeLifecycleService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1111,7 +1111,7 @@ def test_consent_records_are_append_only_in_the_database(tx):
 def test_principal_self_check_is_not_an_integrator_denial(tx):
     """P9-06: a principal checking their own status writes no validation,
     denial notice or audit row."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -1134,8 +1134,8 @@ def test_principal_self_check_is_not_an_integrator_denial(tx):
 
 def test_withdrawal_with_nothing_active_is_refused(tx):
     """P9-07: no active consent means nothing to withdraw — and no cascade."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1154,7 +1154,7 @@ def _audit_actions(cur, fid):
 
 def test_update_user_applies_role_and_status_and_keeps_the_name(tx):
     """SA-04: role and status are applied; an omitted username is not nulled."""
-    from dpdpcms_py.services.admin import OperatorService
+    from dpdpcms_py.modules.administration.operators import OperatorService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1168,8 +1168,8 @@ def test_update_user_applies_role_and_status_and_keeps_the_name(tx):
 
 
 def test_dpo_cannot_assign_a_role_other_than_operator(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.admin import OperatorService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.administration.operators import OperatorService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1187,7 +1187,7 @@ def test_dpo_cannot_assign_a_role_other_than_operator(tx):
 def test_grievance_queue_rows_carry_grievance_id_and_resolution_carries_summary(tx):
     """GR-08: the console keys rows on grievance_id. GR-11: the resolution
     notice carries the summary itself."""
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1216,7 +1216,7 @@ def test_grievance_queue_rows_carry_grievance_id_and_resolution_carries_summary(
 
 def test_internally_raised_alerts_are_audited(tx):
     """NT-10: record_alert (every consent and closure alert) writes an audit row."""
-    from dpdpcms_py.services.lifecycle import record_alert
+    from dpdpcms_py.modules.notifications.alert_store import record_alert
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1233,7 +1233,7 @@ def test_internally_raised_alerts_are_audited(tx):
 
 def test_retention_policy_delete_is_audited(tx):
     """SA-14: withdrawing a retention schedule leaves an audit trail."""
-    from dpdpcms_py.services.retention import RetentionService
+    from dpdpcms_py.modules.administration.retention import RetentionService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1253,8 +1253,8 @@ def test_audit_export_carries_the_hashes_and_a_chain_verdict(tx, tmp_path, monke
     import dataclasses
     import json
 
-    from dpdpcms_py import jobs
-    from dpdpcms_py.audit import log_event
+    from dpdpcms_py.modules.audit_logging.ledger import log_event
+    from tests.modmap import jobs
 
     monkeypatch.setattr(jobs, "settings", dataclasses.replace(settings, export_path=tmp_path))
     with tx.cursor() as cur:
@@ -1287,7 +1287,7 @@ def _confirm_ctx(fid, request_id):
 
 
 def _ctx_as(fid, role, payload, operator_id=None):
-    from dpdpcms_py.context import RequestContext
+    from dpdpcms_py.kernel.context import RequestContext
 
     return RequestContext(
         path="/api/v1/admin/test",
@@ -1304,8 +1304,8 @@ def _ctx_as(fid, role, payload, operator_id=None):
 def test_a_decision_naming_two_purposes_is_refused_and_aliases_are_canonical(tx):
     """P10-01: {purpose_id: care, id: research} was checked as one purpose and
     authorised the other. It is now refused; a lone alias is stored canonical."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care",))
@@ -1355,7 +1355,7 @@ def test_wording_only_notice_change_activates_and_reconsent_completes(tx):
     """P10-02: publish notified principals while the version was UNDER_REVIEW
     and request_reconsent was then refused. A version needing no new ROPA entry
     now activates at publish, and only then are principals asked."""
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1395,8 +1395,8 @@ def test_wording_only_notice_change_activates_and_reconsent_completes(tx):
 def test_version_with_new_ropa_entry_notifies_only_once_active(tx):
     """P10-02: while the version awaits its ROPA entry nobody is asked to
     re-consent; publishing the entry activates it and sends the notices."""
-    from dpdpcms_py.services.catalog import PolicyService
-    from dpdpcms_py.services.governance import RopaService
+    from dpdpcms_py.extensions.ropa.service import RopaService
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1428,8 +1428,8 @@ def test_version_with_new_ropa_entry_notifies_only_once_active(tx):
 
 def test_role_assignment_is_bounded_by_the_callers_permissions(tx):
     """P10-03: a custom role holding operator:write could assign DPO, to itself."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.admin import OperatorService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.administration.operators import OperatorService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1464,8 +1464,8 @@ def test_role_assignment_is_bounded_by_the_callers_permissions(tx):
 def test_statutory_hold_authored_in_one_case_governs_every_case(tx):
     """P10-04: a 7-year hold for 'marketing' was invisible to 'Marketing', so
     closing 'Marketing' erased immediately instead of deferring."""
-    from dpdpcms_py.services.lifecycle import close_purpose_exec
-    from dpdpcms_py.services.retention import legal_hold_for, retention_for
+    from dpdpcms_py.modules.administration.retention import legal_hold_for, retention_for
+    from dpdpcms_py.modules.consent_lifecycle.purpose_lifecycle import close_purpose_exec
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("marketing",))
@@ -1491,7 +1491,7 @@ def test_statutory_hold_authored_in_one_case_governs_every_case(tx):
 
 def test_closure_raises_purges_for_principals_who_already_withdrew(tx):
     """PL-03: a principal who withdrew still has data held under the purpose."""
-    from dpdpcms_py.services.lifecycle import close_purpose_exec
+    from dpdpcms_py.modules.consent_lifecycle.purpose_lifecycle import close_purpose_exec
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1523,7 +1523,8 @@ def test_audit_verdict_covers_exactly_the_exported_window(tx, tmp_path, monkeypa
     import dataclasses
     import json
 
-    from dpdpcms_py import audit, jobs
+    from dpdpcms_py.modules.audit_logging import ledger as audit
+    from tests.modmap import jobs
 
     monkeypatch.setattr(jobs, "settings", dataclasses.replace(settings, export_path=tmp_path))
     with tx.cursor() as cur:
@@ -1554,7 +1555,7 @@ def test_audit_verdict_covers_exactly_the_exported_window(tx, tmp_path, monkeypa
 
 def test_console_audit_listing_carries_system_metadata(tx):
     """LG-07: without system_metadata the console XLSX cannot be re-verified."""
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1565,7 +1566,7 @@ def test_console_audit_listing_carries_system_metadata(tx):
 
 def test_resolution_summary_stays_in_the_app(tx):
     """P10-07: the clinical resolution summary is never handed to SMS / push."""
-    from dpdpcms_py.delivery import render_message
+    from dpdpcms_py.modules.notifications.delivery import render_message
 
     context = {"reference_number": "GRV-1", "status_word": "resolved", "resolution_details": "Your HIV test record"}
     with tx.cursor() as cur:
@@ -1580,7 +1581,7 @@ def test_principal_self_check_is_audited_as_a_self_check(tx):
     """P10-08: the self-check left no trace; it is now logged as what it is."""
     import json
 
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1600,8 +1601,8 @@ def test_principal_self_check_is_audited_as_a_self_check(tx):
 def test_every_server_notice_has_words_and_no_unfilled_placeholders(tx):
     """P10-10: three types delivered their enum name; a resolution notice
     without context delivered literal {placeholders}."""
-    from dpdpcms_py.delivery import render_message
-    from dpdpcms_py.services.governance import NotificationService
+    from dpdpcms_py.modules.notifications.delivery import render_message
+    from dpdpcms_py.modules.notifications.service import NotificationService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1630,8 +1631,8 @@ def test_every_server_notice_has_words_and_no_unfilled_placeholders(tx):
 
 def test_console_template_names_are_the_ones_the_engine_reads(tx):
     """NT-02 / NT-03: unknown types and unsupported language codes are refused."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.governance import NotificationService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.notifications.service import NotificationService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1653,7 +1654,7 @@ def test_console_template_names_are_the_ones_the_engine_reads(tx):
 
 def test_consent_under_two_policies_of_one_fiduciary(tx):
     """P10-11: the second policy's consent raised UniqueViolation (HTTP 500)."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol_a = _seed_tenant(cur)
@@ -1681,7 +1682,7 @@ def test_consent_under_two_policies_of_one_fiduciary(tx):
 
 def test_login_returns_the_session_the_portal_reads(tx):
     """UD-05: principal_login returned none of the keys saveSession reads."""
-    from dpdpcms_py.services.consent import PrincipalService
+    from dpdpcms_py.modules.user_dashboard.session import PrincipalService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1700,9 +1701,9 @@ def test_login_returns_the_session_the_portal_reads(tx):
 
 def test_withdrawal_fans_out_to_each_processor(tx, monkeypatch):
     """CW-08: one endpoint per category stood in for every processor."""
-    from dpdpcms_py import webhooks
-    from dpdpcms_py.services.alerts import AlertService
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
+    from dpdpcms_py.modules.notifications import webhooks
+    from dpdpcms_py.modules.notifications.alerts import AlertService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1743,7 +1744,7 @@ def test_withdrawal_fans_out_to_each_processor(tx, monkeypatch):
     webhooks.process_pending_webhooks(limit=500)
     assert "https://lab.example.org/hook" in sent
     # One processor's key cannot acknowledge another processor's alert.
-    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.kernel.errors import ApiError
 
     with pytest.raises(ApiError):
         AlertService().acknowledge_alert(_ctx(fid, {"alert_id": alerts[apps[1]]}, app_id=apps[0]))
@@ -1754,7 +1755,7 @@ def test_multi_purpose_grant_logs_every_purpose_id(tx):
     """CU-09: the audit row names the purposes a multi-purpose grant decided."""
     import json
 
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -1780,7 +1781,7 @@ def test_multi_purpose_grant_logs_every_purpose_id(tx):
 
 def test_grievance_notices_carry_the_language_it_was_filed_in(tx):
     """GR-03: a principal who files in Tamil is answered in Tamil."""
-    from dpdpcms_py.services.compliance import GrievanceService
+    from dpdpcms_py.modules.grievance.service import GrievanceService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1829,8 +1830,8 @@ def test_maintenance_opt_in_cannot_forge_consent(tx):
 
 def test_erasure_token_cannot_be_recomputed_from_the_identifier(tx):
     """SA-13: the replacement is random, not a keyed hash of the identifier."""
-    from dpdpcms_py.security import pseudonym
-    from dpdpcms_py.services.compliance import erase_cms_copy
+    from dpdpcms_py.kernel.security import pseudonym
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1846,8 +1847,8 @@ def test_erasure_token_cannot_be_recomputed_from_the_identifier(tx):
 
 def test_no_processor_key_without_a_dpa(tx):
     """Rule 6(1)(f): a key for an app needs the app's recorded DPA."""
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.governance import ApiKeyService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.administration.api_keys import ApiKeyService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1863,7 +1864,7 @@ def test_no_processor_key_without_a_dpa(tx):
 
 def test_pending_grievance_queue_carries_grievance_id(tx):
     """GR-08: the fourth reader, the dashboard's pending queue."""
-    from dpdpcms_py.services.admin import AdminDashService
+    from dpdpcms_py.modules.administration.metrics import AdminDashService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1879,8 +1880,8 @@ def test_pending_grievance_queue_carries_grievance_id(tx):
 
 def test_failed_signin_burst_raises_one_alert_per_window(tx):
     """Rule 6(1)(c): the ledger is watched - a burst of failed sign-ins alerts the DPO once."""
-    from dpdpcms_py import jobs
-    from dpdpcms_py.audit import log_event
+    from dpdpcms_py.modules.audit_logging.ledger import log_event
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -1904,7 +1905,7 @@ def test_failed_signin_burst_raises_one_alert_per_window(tx):
 
 def test_consent_history_filters_by_purpose_status_and_date(tx):
     """UD-03: the principal can search and filter their consent history."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -1921,7 +1922,7 @@ def test_consent_history_filters_by_purpose_status_and_date(tx):
 
 def test_padded_purpose_id_cannot_slip_past_the_closed_gate(tx):
     """P10-04: ' care' matched the grant but missed the CLOSED lifecycle row."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -1939,8 +1940,8 @@ def test_padded_purpose_id_cannot_slip_past_the_closed_gate(tx):
 
 def test_processor_key_lists_only_its_own_processor_alerts(tx):
     """CW-08: processor alerts carry user ids; one processor never lists another's."""
-    from dpdpcms_py.services.alerts import AlertService
-    from dpdpcms_py.services.lifecycle import record_alert
+    from dpdpcms_py.modules.notifications.alert_store import record_alert
+    from dpdpcms_py.modules.notifications.alerts import AlertService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)

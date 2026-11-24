@@ -20,8 +20,8 @@ import logging
 
 from psycopg import sql
 
-from . import db, pii
-from .config import settings
+from dpdpcms_py.kernel import db, pii
+from dpdpcms_py.kernel.config import settings
 
 log = logging.getLogger("dpdpcms.rekey_lookup")
 

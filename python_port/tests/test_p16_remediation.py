@@ -111,7 +111,7 @@ def test_console_withdrawal_links_a_grievance_of_its_own_tenant(tx):
 
 @needs_db
 def test_integrator_and_principal_withdrawals_keep_their_attribution(tx):
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -128,7 +128,7 @@ def test_integrator_and_principal_withdrawals_keep_their_attribution(tx):
 
 def _legacy_ledger(cur, rows=3):
     """A stand-in for audit_logs_legacy_pre32: chained rows, triggers and a seal as db/37 leaves them."""
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     # A fresh install's db/32 already set aside the (empty) db/01 table and
     # db/37 sealed it; replace both inside the test's transaction.
@@ -178,7 +178,7 @@ def _legacy_ledger(cur, rows=3):
 
 @needs_db
 def test_legacy_ledger_verifies_against_its_seal(tx):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         _legacy_ledger(cur)
@@ -192,7 +192,7 @@ def test_legacy_ledger_verifies_against_its_seal(tx):
 @needs_db
 def test_legacy_ledger_rows_cannot_be_edited_and_a_bypass_is_detected(tx):
     import psycopg
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         _legacy_ledger(cur)
@@ -232,7 +232,7 @@ PSQL = shutil.which("psql")
 def test_upgrade_from_db31_keeps_the_legacy_ledger_append_only_and_sealed():
     """The workbook's executed upgrade, db/01..31 then db/32..37 over a seeded row, as a test."""
     import psycopg
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel.config import settings
 
     name = f"p16_upgrade_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(settings.db_dsn, autocommit=True) as admin:
@@ -284,9 +284,9 @@ def _payloads(cur, table, fid):
 
 @needs_db
 def test_withdrawal_payloads_hold_no_plaintext_principal_id(tx, monkeypatch):
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.alerts import AlertService
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
+    from dpdpcms_py.modules.notifications.alerts import AlertService
 
     pid = "ramesh.kumar@example.org"
     with tx.cursor() as cur:
@@ -312,8 +312,8 @@ def test_withdrawal_payloads_hold_no_plaintext_principal_id(tx, monkeypatch):
 
 @needs_db
 def test_dispatcher_opens_the_payload_only_for_the_post(tx, monkeypatch):
-    from dpdpcms_py import webhooks
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
+    from dpdpcms_py.modules.notifications import webhooks
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -333,9 +333,9 @@ def test_dispatcher_opens_the_payload_only_for_the_post(tx, monkeypatch):
 
 @needs_db
 def test_erasure_reseals_payloads_to_the_token(tx):
-    from dpdpcms_py import pii
-    from dpdpcms_py.services.compliance import erase_cms_copy
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.modules.consent_lifecycle.erasure import erase_cms_copy
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -354,7 +354,8 @@ def test_erasure_reseals_payloads_to_the_token(tx):
 @needs_db
 def test_old_plaintext_payloads_are_sealed_in_place_and_the_floor_still_holds(tx):
     import psycopg
-    from dpdpcms_py import db, jobs, pii
+    from dpdpcms_py.kernel import db, pii
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -395,7 +396,7 @@ def test_old_plaintext_payloads_are_sealed_in_place_and_the_floor_still_holds(tx
 
 
 def test_seal_and_open_round_trip_any_shape(monkeypatch):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     fake = {"enc": lambda v: "E:" + v, "dec": lambda v: v[2:]}
 
@@ -421,7 +422,7 @@ def test_seal_and_open_round_trip_any_shape(monkeypatch):
 
 @needs_db
 def test_sql_principal_keys_match_python(tx):
-    from dpdpcms_py import pii
+    from dpdpcms_py.kernel import pii
 
     with tx.cursor() as cur:
         cur.execute("SELECT tsi_principal_keys() AS k")
@@ -432,7 +433,7 @@ def test_sql_principal_keys_match_python(tx):
 
 
 def test_production_needs_a_distinct_lookup_key(monkeypatch):
-    from dpdpcms_py import config
+    from dpdpcms_py.kernel import config
 
     monkeypatch.setenv("DB_ENCRYPTION_KEY", "e" * 40)
     monkeypatch.delenv("PII_LOOKUP_KEY", raising=False)
@@ -450,8 +451,8 @@ def test_lookup_hmac_is_not_keyed_by_the_encryption_key(monkeypatch):
     import hashlib
     import hmac
 
-    from dpdpcms_py import pii
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel import pii
+    from dpdpcms_py.kernel.config import settings
 
     monkeypatch.setattr(pii, "settings", dataclasses.replace(settings, pii_lookup_key="l" * 40))
     assert pii.hmac_params("asha") == ("asha", "l" * 40)
@@ -461,9 +462,10 @@ def test_lookup_hmac_is_not_keyed_by_the_encryption_key(monkeypatch):
 
 @needs_db
 def test_rekey_moves_every_lookup_to_a_new_key(tx, monkeypatch):
-    from dpdpcms_py import db, pii, rekey_lookup
-    from dpdpcms_py.config import settings
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py import rekey_lookup
+    from dpdpcms_py.kernel import db, pii
+    from dpdpcms_py.kernel.config import settings
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -495,8 +497,8 @@ def test_rekey_moves_every_lookup_to_a_new_key(tx, monkeypatch):
 
 @needs_db
 def test_daily_reveal_ceiling(tx, monkeypatch):
-    from dpdpcms_py import audit
-    from dpdpcms_py.services import pii as reveal
+    from dpdpcms_py.modules.administration import pii_reveal as reveal
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -521,9 +523,9 @@ def test_daily_reveal_ceiling(tx, monkeypatch):
 
 @needs_db
 def test_reveal_volume_raises_one_alert_per_operator_per_window(tx):
-    from dpdpcms_py import jobs
-    from dpdpcms_py.audit import log_event
-    from dpdpcms_py.services import pii as reveal
+    from dpdpcms_py.modules.administration import pii_reveal as reveal
+    from dpdpcms_py.modules.audit_logging.ledger import log_event
+    from tests.modmap import jobs
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)

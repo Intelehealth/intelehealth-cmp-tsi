@@ -5,11 +5,11 @@ statutory floor (SA-08/SA-12), and the role-permission gate (SA-01/SA-02/LG-06).
 """
 
 import pytest
-from dpdpcms_py import totp
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services.retention import STATUTORY_FLOOR_DAYS, retention_duration_days
-from dpdpcms_py.services.roles import require_audit_access, require_permission
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.modules.administration import totp
+from dpdpcms_py.modules.administration.retention import STATUTORY_FLOOR_DAYS, retention_duration_days
+from dpdpcms_py.modules.administration.roles import require_audit_access, require_permission
 
 
 def _ctx(role: str | None = "ADMIN", mfa: bool | None = None) -> RequestContext:
@@ -85,7 +85,7 @@ def test_statutory_floor_is_seven_years():
 
 
 def test_retention_service_rejects_below_floor_without_db():
-    from dpdpcms_py.services.retention import RetentionService
+    from dpdpcms_py.modules.administration.retention import RetentionService
 
     svc = RetentionService()
     # 6 years is below the 7-year floor -> rejected before any SQL runs.
@@ -108,7 +108,9 @@ def test_admin_has_full_access():
 def test_unknown_role_is_denied(monkeypatch):
     ctx = _ctx("OPERATOR")
     # No AUDIT-READ for OPERATOR in the seeded role table.
-    monkeypatch.setattr("dpdpcms_py.services.roles.db.one", lambda *a, **k: {"permissions": ["consent:read"]})
+    monkeypatch.setattr(
+        "dpdpcms_py.modules.administration.roles.db.one", lambda *a, **k: {"permissions": ["consent:read"]}
+    )
     with pytest.raises(ApiError) as exc:
         require_permission(ctx, "audit:read")
     assert exc.value.status == 403
@@ -117,12 +119,16 @@ def test_unknown_role_is_denied(monkeypatch):
 def test_audit_gate_requires_verified_mfa(monkeypatch):
     # AUDITOR has audit:read in the seeded role table, but the token is not
     # MFA-verified, so reading audit logs is refused (LG-06).
-    monkeypatch.setattr("dpdpcms_py.services.roles.db.one", lambda *a, **k: {"permissions": ["audit:read"]})
+    monkeypatch.setattr(
+        "dpdpcms_py.modules.administration.roles.db.one", lambda *a, **k: {"permissions": ["audit:read"]}
+    )
     with pytest.raises(ApiError) as exc:
         require_audit_access(_ctx("AUDITOR", mfa=False))
     assert exc.value.status == 403
 
 
 def test_audit_gate_passes_when_mfa_verified(monkeypatch):
-    monkeypatch.setattr("dpdpcms_py.services.roles.db.one", lambda *a, **k: {"permissions": ["audit:read"]})
+    monkeypatch.setattr(
+        "dpdpcms_py.modules.administration.roles.db.one", lambda *a, **k: {"permissions": ["audit:read"]}
+    )
     require_audit_access(_ctx("AUDITOR", mfa=True))  # must not raise

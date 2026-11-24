@@ -42,7 +42,7 @@ fi
 # the application's own verifier recomputes every row hash against the copy.
 verdict="$(compose exec -T -e POSTGRES_DB="$scratch" python_app python -c "
 import json
-from dpdpcms_py.audit import verify_chain
+from dpdpcms_py.modules.audit_logging.ledger import verify_chain
 r = verify_chain(limit=10_000_000)
 print(json.dumps({'intact': r['intact'], 'rows_checked': r['rows_checked'], 'broken_count': r['broken_count']}))
 " | tail -1)"

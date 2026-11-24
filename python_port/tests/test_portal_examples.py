@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from dpdpcms_py import main
-from dpdpcms_py.validators import validate_payload
+from dpdpcms_py.kernel.validators import validate_payload
 
 GUIDES = Path(__file__).resolve().parents[2] / "portal" / "docs"
 CURL = re.compile(

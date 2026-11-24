@@ -10,11 +10,12 @@ import uuid
 
 import jwt
 import pytest
-from dpdpcms_py import config, main, principal_otp, security
-from dpdpcms_py.config import settings
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services import consent
+from dpdpcms_py import main
+from dpdpcms_py.kernel import config, principal_otp, security
+from dpdpcms_py.kernel.config import settings
+from dpdpcms_py.kernel.errors import ApiError
 from fastapi.testclient import TestClient
+from tests.modmap import consent
 from tests.test_defect_fixes import FID, _ctx, otp_store  # noqa: F401 (fixture)
 
 # ---- P17-02: the admin API accepts operator tokens only ------------------------------------

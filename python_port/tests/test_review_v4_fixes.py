@@ -12,15 +12,19 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from dpdpcms_py import main, netutil, pii
-from dpdpcms_py.config import settings
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services import compliance, consent, roles
+from dpdpcms_py import main
+from dpdpcms_py.kernel import netutil, pii
+from dpdpcms_py.kernel.config import settings
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.modules.administration import roles
+from tests.modmap import compliance, consent
 
 FID = "11111111-1111-1111-1111-111111111111"
 REPO = Path(__file__).resolve().parents[2]
-SERVICES = Path(__file__).resolve().parents[1] / "dpdpcms_py" / "services"
+PACKAGE = Path(__file__).resolve().parents[1] / "dpdpcms_py"
+# Every file that can hold a service class: one package per BRD module, plus extensions.
+SERVICE_FILES = sorted((PACKAGE / "modules").rglob("*.py")) + sorted((PACKAGE / "extensions").rglob("*.py"))
 
 
 def _ctx(category="client", service="consent", func="list_consents", payload=None, **kwargs):
@@ -84,7 +88,7 @@ _WRITE_SQL = re.compile(r"\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b",
 def test_no_read_classified_function_writes():
     """Every service method the gate treats as a read must contain no SQL write."""
     offenders = []
-    for path in SERVICES.glob("*.py"):
+    for path in SERVICE_FILES:
         source = path.read_text(encoding="utf-8")
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.ClassDef):

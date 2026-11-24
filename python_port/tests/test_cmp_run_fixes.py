@@ -6,7 +6,7 @@ tests.
 """
 
 import pytest
-from dpdpcms_py import totp
+from dpdpcms_py.modules.administration import totp
 from tests.test_defect_fixes import SECRET, _verify, operator_row  # noqa: F401 - fixture
 from tests.test_integration_db import _DB_READY, _seed_consent, _seed_tenant
 from tests.test_pii_port import _bearer, _console, _reveal_operator
@@ -35,7 +35,7 @@ def _policy_payload(func, legal_basis):
     ],
 )
 def test_policy_schema_refuses_unknown_legal_basis(func, legal_basis, ok):
-    from dpdpcms_py.validators import validate_payload
+    from dpdpcms_py.kernel.validators import validate_payload
 
     errors = [e for e in validate_payload(_policy_payload(func, legal_basis)) if "is not one of" in e]
     assert (errors == []) is ok
@@ -45,7 +45,7 @@ def test_policy_schema_refuses_unknown_legal_basis(func, legal_basis, ok):
 
 
 def test_verify_mfa_revokes_sessions_issued_before_enrolment(operator_row, monkeypatch):  # noqa: F811
-    from dpdpcms_py.services import admin
+    from tests.modmap import admin
 
     seen = []
     real_execute = admin.db.execute

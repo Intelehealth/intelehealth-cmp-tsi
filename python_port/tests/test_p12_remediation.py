@@ -31,8 +31,8 @@ needs_db = pytest.mark.skipif(not _DB_READY, reason="no live Postgres configured
 
 @pytest.mark.parametrize("expiry", ["2027-01-01", "2027-01-01T00:00:00+05:30"])
 def test_caller_supplied_consent_expiry_is_refused(expiry):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.base import canonical_consent_points
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.kernel.service import canonical_consent_points
 
     with pytest.raises(ApiError) as exc:
         canonical_consent_points([{"data_point_id": "care", "consent_granted": True, "consent_expiry": expiry}])
@@ -40,7 +40,7 @@ def test_caller_supplied_consent_expiry_is_refused(expiry):
 
 
 def test_record_consent_schema_closes_the_decision_items():
-    from dpdpcms_py.validators import validate_payload
+    from dpdpcms_py.kernel.validators import validate_payload
 
     decision = {
         "data_point_id": "care",
@@ -65,7 +65,7 @@ def test_record_consent_schema_closes_the_decision_items():
     ],
 )
 def test_point_granted_never_raises_on_a_stored_expiry(expiry, granted):
-    from dpdpcms_py.services.consent import _point_granted
+    from dpdpcms_py.modules.consent_lifecycle.common import _point_granted
 
     assert _point_granted({"data_point_id": "care", "consent_granted": True, "consent_expiry": expiry}) is granted
 
@@ -73,7 +73,7 @@ def test_point_granted_never_raises_on_a_stored_expiry(expiry, granted):
 @needs_db
 def test_principal_with_a_naive_stored_expiry_can_still_withdraw(tx):
     """P12-01: one naive consent_expiry made withdrawal of EVERY purpose 500."""
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("care", "research"))
@@ -106,7 +106,8 @@ def test_principal_with_a_naive_stored_expiry_can_still_withdraw(tx):
 
 @needs_db
 def test_version_drafted_earlier_but_activated_later_is_the_one_served(tx):
-    from dpdpcms_py.services.catalog import PolicyService, served_policy_version
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.policy_store import served_policy_version
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -136,7 +137,8 @@ def test_version_drafted_earlier_but_activated_later_is_the_one_served(tx):
 
 @needs_db
 def test_create_policy_honours_a_future_effective_date(tx):
-    from dpdpcms_py.services.catalog import PolicyService, served_policy_version
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
+    from dpdpcms_py.modules.consent_lifecycle.policy_store import served_policy_version
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -169,7 +171,7 @@ def test_create_policy_honours_a_future_effective_date(tx):
 
 
 def _report(fid, **extra):
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
 
     return BreachService().report_breach(
         _ctx(
@@ -186,8 +188,8 @@ def _report(fid, **extra):
 
 @needs_db
 def test_board_intimation_cannot_be_backdated_or_future_dated(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
+    from dpdpcms_py.kernel.errors import ApiError
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -216,7 +218,7 @@ def test_board_intimation_cannot_be_backdated_or_future_dated(tx):
 
 @needs_db
 def test_board_intimation_without_an_asserted_time_is_late_by_server_clock(tx):
-    from dpdpcms_py.services.compliance import BreachService
+    from dpdpcms_py.extensions.breach.service import BreachService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -227,7 +229,7 @@ def test_board_intimation_without_an_asserted_time_is_late_by_server_clock(tx):
 
 @needs_db
 def test_future_detection_is_refused(tx):
-    from dpdpcms_py.errors import ApiError
+    from dpdpcms_py.kernel.errors import ApiError
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -241,8 +243,8 @@ def test_future_detection_is_refused(tx):
 
 @needs_db
 def test_breach_report_is_a_real_pdf_with_the_rule7_contents(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import BreachService, breach_report_lines
+    from dpdpcms_py.extensions.breach.service import BreachService, breach_report_lines
+    from dpdpcms_py.kernel.errors import ApiError
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -322,8 +324,8 @@ def test_tenant_reader_cannot_read_or_write_its_mapping(tx):
 
 @needs_db
 def test_two_tenants_may_use_the_same_policy_id(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.catalog import PolicyService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.notice import PolicyService
 
     with tx.cursor() as cur:
         fid_a, pol = _seed_tenant(cur)
@@ -389,7 +391,7 @@ def test_db29_removes_languages_db27_filled_from_legacy_text(tx):
 
 @needs_db
 def test_archived_legacy_text_is_shown_beside_its_live_type(tx):
-    from dpdpcms_py.services.governance import NotificationService
+    from dpdpcms_py.modules.notifications.service import NotificationService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -450,7 +452,7 @@ def test_healthz_never_returns_exception_text(monkeypatch):
 
 @needs_db
 def test_history_purpose_filter_skips_an_empty_data_point_id(tx):
-    from dpdpcms_py.services.consent import ConsentService
+    from dpdpcms_py.modules.consent_lifecycle.service import ConsentService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur, purposes=("research",))
@@ -470,7 +472,7 @@ def test_history_purpose_filter_skips_an_empty_data_point_id(tx):
 
 
 def test_empty_allowlist_refuses_to_start_outside_local(monkeypatch):
-    from dpdpcms_py import config
+    from dpdpcms_py.kernel import config
 
     monkeypatch.setenv("OUTBOUND_ALLOWED_HOSTS", "")
     assert config._outbound_allowed_hosts("local") == ()
@@ -481,7 +483,7 @@ def test_empty_allowlist_refuses_to_start_outside_local(monkeypatch):
 
 
 def test_wildcard_allowlist_is_explicitly_unrestricted():
-    from dpdpcms_py.netutil import outbound_host_allowed
+    from dpdpcms_py.kernel.netutil import outbound_host_allowed
 
     assert outbound_host_allowed("anything.example.com", ("*",))
     assert not outbound_host_allowed("anything.example.com", ("hooks.example.in",))
@@ -499,8 +501,8 @@ def test_preflight_checks_every_recent_migration():
 @needs_db
 @pytest.mark.parametrize("status", ["PURGE_COMPLETED", "COMPLETED"])
 def test_update_purge_status_cannot_complete_a_purge(tx, status):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import ComplianceService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -516,8 +518,8 @@ def test_update_purge_status_cannot_complete_a_purge(tx, status):
 
 @needs_db
 def test_a_completed_purge_is_not_completed_again(tx):
-    from dpdpcms_py.errors import ApiError
-    from dpdpcms_py.services.compliance import ComplianceService
+    from dpdpcms_py.kernel.errors import ApiError
+    from dpdpcms_py.modules.consent_lifecycle.erasure import ComplianceService
 
     with tx.cursor() as cur:
         fid, pol = _seed_tenant(cur)
@@ -541,9 +543,9 @@ def test_a_completed_purge_is_not_completed_again(tx):
 @needs_db
 @pytest.mark.parametrize("deactivate", ["app", "fiduciary"])
 def test_deactivation_revokes_api_keys(tx, deactivate):
-    from dpdpcms_py.security import api_key_valid
-    from dpdpcms_py.services.catalog import AppService, FiduciaryService
-    from dpdpcms_py.services.governance import ApiKeyService
+    from dpdpcms_py.kernel.security import api_key_valid
+    from dpdpcms_py.modules.administration.api_keys import ApiKeyService
+    from dpdpcms_py.modules.administration.tenancy import AppService, FiduciaryService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -566,8 +568,8 @@ def test_deactivation_revokes_api_keys(tx, deactivate):
 @needs_db
 def test_key_of_an_inactive_app_fails_even_if_not_revoked(tx):
     """INV-08 defence in depth: an app set INACTIVE by any other path."""
-    from dpdpcms_py.security import api_key_valid
-    from dpdpcms_py.services.governance import ApiKeyService
+    from dpdpcms_py.kernel.security import api_key_valid
+    from dpdpcms_py.modules.administration.api_keys import ApiKeyService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -598,7 +600,7 @@ def test_csp_allows_only_same_origin_script():
 def test_web_pages_carry_no_inline_script_or_handler():
     import re
 
-    from dpdpcms_py.config import WEB_ROOT
+    from dpdpcms_py.kernel.config import WEB_ROOT
 
     handler = re.compile(r"<[^>]*\son[a-z]+\s*=", re.IGNORECASE | re.DOTALL)
     for page in WEB_ROOT.rglob("*.html"):
@@ -620,7 +622,7 @@ def test_web_pages_carry_no_inline_script_or_handler():
 
 @needs_db
 def test_contact_details_are_stored_encrypted_only(tx):
-    from dpdpcms_py.services.catalog import AppService
+    from dpdpcms_py.modules.administration.tenancy import AppService
 
     with tx.cursor() as cur:
         fid, _ = _seed_tenant(cur)
@@ -638,8 +640,8 @@ def test_contact_details_are_stored_encrypted_only(tx):
 
 @needs_db
 def test_reading_the_audit_ledger_is_itself_audited_and_capped(tx):
-    from dpdpcms_py.audit import AUDIT_READ_MAX
-    from dpdpcms_py.services.governance import ACCESS_REPORT_ACTIONS, AuditService
+    from dpdpcms_py.modules.audit_logging.ledger import AUDIT_READ_MAX
+    from dpdpcms_py.modules.audit_logging.service import ACCESS_REPORT_ACTIONS, AuditService
 
     assert {"PRINCIPAL_LOGIN_SUCCESS", "PRINCIPAL_LOGIN_FAILURE", "AUDIT_LOG_READ"} <= ACCESS_REPORT_ACTIONS
     with tx.cursor() as cur:

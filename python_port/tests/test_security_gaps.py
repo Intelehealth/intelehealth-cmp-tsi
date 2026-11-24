@@ -12,10 +12,11 @@ from pathlib import Path
 
 import jwt as pyjwt
 import pytest
-from dpdpcms_py import pii, throttle
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services import admin, compliance, consent, governance, rights, roles
+from dpdpcms_py.kernel import pii, throttle
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.modules.administration import roles
+from tests.modmap import admin, compliance, consent, governance, rights
 
 REPO = Path(__file__).resolve().parents[2]
 FID = "11111111-1111-1111-1111-111111111111"
@@ -62,10 +63,10 @@ def _ctx(category="admin", service="operator", func="list_users", payload=None, 
 def test_recovery_verify_throttled_and_audited(monkeypatch):
     called = {"throttle": [], "log": []}
     monkeypatch.setattr(
-        "dpdpcms_py.throttle.require_allowed", lambda scope, key: called["throttle"].append((scope, key))
+        "dpdpcms_py.kernel.throttle.require_allowed", lambda scope, key: called["throttle"].append((scope, key))
     )
-    monkeypatch.setattr("dpdpcms_py.throttle.record_failure", lambda *a, **k: None)
-    monkeypatch.setattr("dpdpcms_py.throttle.record_success", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.record_failure", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.record_success", lambda *a, **k: None)
     monkeypatch.setattr(admin.db, "one", lambda *a, **k: {"recovery_key_hash": "badhash"})
     monkeypatch.setattr(admin, "verify_password", lambda *a, **k: False)
     monkeypatch.setattr(admin, "log_event", lambda *a, **k: called["log"].append(a))
@@ -89,7 +90,7 @@ def test_recovery_lockout_raises_429(monkeypatch):
     def locked(scope, key):
         raise ApiError(429, "Too Many Requests", "Too many failed attempts. Try again later.")
 
-    monkeypatch.setattr("dpdpcms_py.throttle.require_allowed", locked)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.require_allowed", locked)
     ctx = _ctx(service="operator", func="verify_recovery_key", payload={"email": "x@y.z", "passphrase": "ok"})
     with pytest.raises(ApiError) as exc:
         admin.OperatorService().verify_recovery_key(ctx)
@@ -97,8 +98,8 @@ def test_recovery_lockout_raises_429(monkeypatch):
 
 
 def test_reset_password_enforces_12_char_floor(monkeypatch):
-    monkeypatch.setattr("dpdpcms_py.throttle.require_allowed", lambda *a, **k: None)
-    monkeypatch.setattr("dpdpcms_py.throttle.record_success", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.require_allowed", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.record_success", lambda *a, **k: None)
     monkeypatch.setattr(admin.db, "one", lambda *a, **k: {"recovery_key_hash": "present"})
     monkeypatch.setattr(admin, "verify_password", lambda *a, **k: True)
     monkeypatch.setattr(admin, "log_event", lambda *a, **k: None)
@@ -116,8 +117,8 @@ def test_reset_password_enforces_12_char_floor(monkeypatch):
 def test_reset_password_success_logged_and_hashes(monkeypatch):
     logged = []
     capture = _CapturedDb()
-    monkeypatch.setattr("dpdpcms_py.throttle.require_allowed", lambda *a, **k: None)
-    monkeypatch.setattr("dpdpcms_py.throttle.record_success", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.require_allowed", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.record_success", lambda *a, **k: None)
     monkeypatch.setattr(admin.db, "one", lambda *a, **k: {"recovery_key_hash": "present"})
     monkeypatch.setattr(admin, "verify_password", lambda *a, **k: True)
     monkeypatch.setattr(admin.db, "execute", capture.execute)
@@ -136,8 +137,8 @@ def test_reset_password_success_logged_and_hashes(monkeypatch):
 # ── SEC-03 login is throttled and writes last_login_at ──────────────────────
 def test_login_throttled_before_credential_check(monkeypatch):
     checks = []
-    monkeypatch.setattr("dpdpcms_py.throttle.require_allowed", lambda scope, key: checks.append((scope, key)))
-    monkeypatch.setattr("dpdpcms_py.throttle.record_failure", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.require_allowed", lambda scope, key: checks.append((scope, key)))
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.record_failure", lambda *a, **k: None)
     monkeypatch.setattr(admin.db, "one", lambda *a, **k: None)
     monkeypatch.setattr(admin, "log_event", lambda *a, **k: None)
     ctx = _ctx(service="operator", func="login", payload={"identifier": "u1", "password": "x"})
@@ -149,8 +150,8 @@ def test_login_throttled_before_credential_check(monkeypatch):
 
 
 def test_login_success_writes_last_login_at(monkeypatch):
-    monkeypatch.setattr("dpdpcms_py.throttle.require_allowed", lambda *a, **k: None)
-    monkeypatch.setattr("dpdpcms_py.throttle.record_success", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.require_allowed", lambda *a, **k: None)
+    monkeypatch.setattr("dpdpcms_py.kernel.throttle.record_success", lambda *a, **k: None)
     op = {
         "id": "op-1",
         "name": "U1",
@@ -174,7 +175,7 @@ def test_login_success_writes_last_login_at(monkeypatch):
     monkeypatch.setattr(admin.db, "execute", lambda sql, params=(): executed.append(sql) or 1)
     monkeypatch.setattr(admin, "log_event", lambda *a, **k: None)
     monkeypatch.setattr(admin, "verify_password", lambda *a, **k: True)
-    from dpdpcms_py.security import token as make_token
+    from dpdpcms_py.kernel.security import token as make_token
 
     monkeypatch.setattr(admin, "token", make_token)
     ctx = _ctx(service="operator", func="login", payload={"identifier": "u1", "password": "x"})
@@ -380,7 +381,7 @@ def test_get_admin_metrics_global_admin_keeps_platform_wide(monkeypatch):
 
 # ── SEC-07 expired API keys are rejected and lapsed keys swept ───────────────
 def test_api_key_valid_rejects_expired(monkeypatch):
-    from dpdpcms_py import security
+    from dpdpcms_py.kernel import security
 
     seen = []
     monkeypatch.setattr(security.db, "one", lambda sql, params=(): seen.append(sql) or None)
@@ -391,7 +392,7 @@ def test_api_key_valid_rejects_expired(monkeypatch):
 
 
 def test_expire_lapsed_api_keys_sweep(monkeypatch):
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     capture = _CapturedDb()
     monkeypatch.setattr(jobs.db, "execute", capture.execute)
@@ -407,7 +408,7 @@ def test_role_permissions_check_applies_to_global_actor(monkeypatch):
             return {"permissions": ["role:manage"]}
         return None  # duplicate-code check finds nothing
 
-    monkeypatch.setattr("dpdpcms_py.services.roles.db.one", fake_one)
+    monkeypatch.setattr("dpdpcms_py.modules.administration.roles.db.one", fake_one)
     ctx = _ctx(
         service="role",
         func="create_role",
@@ -426,10 +427,12 @@ def test_role_permissions_check_allows_held_permissions_globally(monkeypatch):
             return {"permissions": ["role:manage", "consent:read"]}
         return None
 
-    monkeypatch.setattr("dpdpcms_py.services.roles.db.one", fake_one)
+    monkeypatch.setattr("dpdpcms_py.modules.administration.roles.db.one", fake_one)
     executed = []
-    monkeypatch.setattr("dpdpcms_py.services.roles.db.execute", lambda sql, params=(): executed.append(sql) or 1)
-    monkeypatch.setattr("dpdpcms_py.services.roles.log_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "dpdpcms_py.modules.administration.roles.db.execute", lambda sql, params=(): executed.append(sql) or 1
+    )
+    monkeypatch.setattr("dpdpcms_py.modules.administration.roles.log_event", lambda *a, **k: None)
     ctx = _ctx(
         service="role",
         func="create_role",
@@ -459,7 +462,7 @@ def test_deactivate_user_404_when_no_row(monkeypatch):
     ],
 )
 def test_catalog_deletes_404_when_no_row(monkeypatch, func, payload, service):
-    from dpdpcms_py.services import catalog
+    from tests.modmap import catalog
 
     monkeypatch.setattr(catalog.db, "execute", lambda *a, **k: 0)
     monkeypatch.setattr(catalog, "tenant_filter", lambda ctx, col="fiduciary_id": ("", []))
@@ -525,7 +528,7 @@ def test_unconfigured_rights_app_defaults_to_email(monkeypatch):
 
 
 def test_set_rights_app_rejects_dummy_outside_allow(monkeypatch):
-    from dpdpcms_py.config import settings
+    from dpdpcms_py.kernel.config import settings
 
     if settings.allow_dummy_otp:  # local env permits the evaluation mode
         pytest.skip("ALLOW_DUMMY_OTP is enabled in this environment")
@@ -552,7 +555,7 @@ def test_queue_otp_payload_contains_only_ciphertext_and_template(monkeypatch):
         queued["payload"] = payload
         queued["category"] = category
 
-    import dpdpcms_py.webhooks as wh
+    from dpdpcms_py.modules.notifications import webhooks as wh
 
     monkeypatch.setattr(wh, "queue_webhook", queue)
 
@@ -600,9 +603,9 @@ def test_queue_otp_payload_contains_only_ciphertext_and_template(monkeypatch):
 
 
 def test_render_otp_materialises_code_only_now(monkeypatch):
-    from dpdpcms_py import webhooks
+    from dpdpcms_py.modules.notifications import webhooks
 
-    monkeypatch.setattr("dpdpcms_py.principal_otp.decrypt_code", lambda cipher: "123456")
+    monkeypatch.setattr("dpdpcms_py.kernel.principal_otp.decrypt_code", lambda cipher: "123456")
     payload = {
         "channel": "EMAIL",
         "otp_enc": "cipher:123456",
@@ -618,10 +621,10 @@ def test_render_otp_materialises_code_only_now(monkeypatch):
 
 # ── SEC-14 SSO requires a single-use nonce and caches the JWKS client ───────
 def test_sso_nonce_mismatch_rejected(monkeypatch):
-    import dpdpcms_py.config as config
-    import dpdpcms_py.services.admin as admin_mod
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
+    from dpdpcms_py.kernel import config
+    from tests.modmap import admin as admin_mod
 
     fake_settings = types.SimpleNamespace(
         sso_issuer="https://issuer.example",
@@ -752,7 +755,7 @@ def test_generate_certificate_refuses_to_sign_a_tampered_chain(monkeypatch):
 
 
 def test_verify_certificate_detects_signature_tampering(monkeypatch):
-    from dpdpcms_py.audit import certificate_signature
+    from dpdpcms_py.modules.audit_logging.ledger import certificate_signature
 
     data = {"principal_id": "u", "fiduciary_id": FID, "timestamp": "2026-01-01T00:00:00+00:00"}
     data["signature"] = certificate_signature(data)
@@ -862,7 +865,7 @@ def test_p6_03_download_file_returns_base64_bytes(monkeypatch):
     import base64
     from pathlib import Path
 
-    from dpdpcms_py.services import governance as gov_mod
+    from tests.modmap import governance as gov_mod
 
     tmp = Path(".") / "exports"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -883,7 +886,7 @@ def test_p6_03_download_file_returns_base64_bytes(monkeypatch):
 
 def test_p6_08_tour_page_keys_lookup_off_a_map_not_escaped_id():
     """parent-consent.html must not build getElementById ids from escaped markup."""
-    from dpdpcms_py.config import WEB_ROOT
+    from dpdpcms_py.kernel.config import WEB_ROOT
 
     # P12-08: the page's script now lives in its own file.
     page = (WEB_ROOT / "tour" / "parent-consent.js").read_text(encoding="utf-8")
@@ -893,7 +896,7 @@ def test_p6_08_tour_page_keys_lookup_off_a_map_not_escaped_id():
 
 
 def test_generate_certificate_requires_subject_principal_id():
-    from dpdpcms_py import validators
+    from dpdpcms_py.kernel import validators
 
     errors = validators.validate_payload({"_func": "generate_certificate", "user_id": "u", "fiduciary_id": FID})
     assert any("subject_principal_id" in e for e in errors)
@@ -910,7 +913,7 @@ def _page_and_script(page):
 
 # ── SEC-11 is a front-end esc() fix: assert the console pages carry it ──────
 def test_console_pages_escape_interpolations():
-    from dpdpcms_py.config import WEB_ROOT
+    from dpdpcms_py.kernel.config import WEB_ROOT
 
     bad = []
     for page in (WEB_ROOT / "console").rglob("*.html"):
@@ -924,7 +927,7 @@ def test_console_pages_escape_interpolations():
 
 # ── SEC-11 residual: every tour page that renders API data escapes it ──────
 def test_tour_pages_escape_api_interpolations():
-    from dpdpcms_py.config import WEB_ROOT
+    from dpdpcms_py.kernel.config import WEB_ROOT
 
     bad = []
     for page in (WEB_ROOT / "tour").glob("*.html"):
@@ -1084,7 +1087,7 @@ def test_create_user_refuses_non_admin_without_fiduciary(monkeypatch):
 
 # ── SEC-05 the s.9 gate reads the stored age_category ───────────────────────
 def test_record_consent_stored_minor_without_guardian_is_rejected(monkeypatch):
-    from dpdpcms_py.services import consent as consent_mod
+    from tests.modmap import consent as consent_mod
 
     payload = {
         "user_id": "asha",
@@ -1124,7 +1127,7 @@ def test_record_consent_stored_minor_without_guardian_is_rejected(monkeypatch):
 
 
 def test_record_consent_cannot_flip_stored_minor_to_adult(monkeypatch):
-    from dpdpcms_py.services import consent as consent_mod
+    from tests.modmap import consent as consent_mod
 
     payload = {
         "user_id": "asha",
@@ -1256,8 +1259,8 @@ def test_auth_query_parameter_no_longer_authenticates():
 
 def test_get_read_dispatch_validates_and_reaches_the_handler(monkeypatch):
     from dpdpcms_py import main as main_mod
-    from dpdpcms_py.services import consent as consent_mod
     from fastapi.testclient import TestClient
+    from tests.modmap import consent as consent_mod
 
     called = []
 
@@ -1287,7 +1290,7 @@ def _make_chain_rows():
     the previous row's current_log_hash) and returned NEWEST-first, exactly as
     verify_chain reads them.
     """
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     owners = ["A", "B", None, "A", "B"]  # oldest -> newest
     rows = []
@@ -1316,7 +1319,7 @@ def _make_chain_rows():
 
 
 def test_p6_01_scoped_verify_reports_intact_on_an_untampered_global_chain(monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     rows = _make_chain_rows()
     monkeypatch.setattr(audit.db, "all", lambda *a, **k: rows)
@@ -1330,7 +1333,7 @@ def test_p6_01_scoped_verify_reports_intact_on_an_untampered_global_chain(monkey
 
 
 def test_p6_01_scoped_verify_detects_own_content_tampering(monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     rows = _make_chain_rows()
     edited = [dict(r) for r in rows]
@@ -1345,7 +1348,7 @@ def test_p6_01_scoped_verify_detects_own_content_tampering(monkeypatch):
 
 
 def test_p6_01_scoped_verify_hides_another_tenants_break(monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     rows = _make_chain_rows()
     edited = [dict(r) for r in rows]
@@ -1360,7 +1363,7 @@ def test_p6_01_scoped_verify_hides_another_tenants_break(monkeypatch):
 
 # ── P6-02 policy_id branch of get_consent_record_details must name a principal
 def test_p6_02_policy_id_branch_requires_user_id_for_key_callers(monkeypatch):
-    from dpdpcms_py.services import consent as consent_mod
+    from tests.modmap import consent as consent_mod
 
     def fake_one(sql, params=()):
         if "FROM consent_records" in sql:
@@ -1391,7 +1394,7 @@ def test_p6_02_policy_id_branch_requires_user_id_for_key_callers(monkeypatch):
 
 
 def test_p6_02_policy_id_branch_binds_user_id(monkeypatch):
-    from dpdpcms_py.services import consent as consent_mod
+    from tests.modmap import consent as consent_mod
 
     captured = {}
 
@@ -1433,7 +1436,7 @@ def test_p6_02_policy_id_branch_binds_user_id(monkeypatch):
 
 # ── P6-04 the throttle counter increments server-side (no lost updates) ──────
 def test_p6_04_record_failure_upserts_instead_of_read_modify_write(monkeypatch):
-    from dpdpcms_py import throttle as throttle_mod
+    from dpdpcms_py.kernel import throttle as throttle_mod
 
     seen = []
 
@@ -1530,7 +1533,7 @@ def test_p6_06_erasure_metadata_statements_run_before_the_loop(monkeypatch, tmp_
 
 # ── P6-07 create_nomination binds COALESCE(valid_from, NOW()) ────────────────
 def test_p6_07_nomination_binds_valid_from(monkeypatch):
-    from dpdpcms_py.services import rights as rights_mod
+    from tests.modmap import rights as rights_mod
 
     executed = []
 
@@ -1564,7 +1567,7 @@ def test_p6_09_otp_cleanup_skips_pending_rows():
 
 # ── SEC-18 update_user refuses to silently null a tenant ─────────────────────
 def test_p6_sec18_update_user_requires_fiduciary_when_present(monkeypatch):
-    from dpdpcms_py.services import admin as admin_mod
+    from tests.modmap import admin as admin_mod
 
     monkeypatch.setattr(admin_mod, "verified_role", lambda ctx: "ADMIN")
 
@@ -1627,7 +1630,7 @@ def test_pl_03_erase_deletes_the_profile(monkeypatch):
 
 # ── GR-07 the escalation sweep notifies the DPO, not only the principal ──────
 def test_gr_07_escalation_notifies_dpo(monkeypatch):
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     executed = []
 
@@ -1659,7 +1662,7 @@ def test_gr_07_escalation_notifies_dpo(monkeypatch):
 
 # ── SEC-18 migration / P5-07 floor wiring are catalogued in db/22 and jobs ───
 def test_p5_07_retention_floor_is_enforced(monkeypatch):
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     captured = {}
     monkeypatch.setattr(jobs, "settings", types.SimpleNamespace(webhook_delivery_retention_days=1))
@@ -1746,17 +1749,19 @@ def test_p6_11_ci_triggers_all_branches():
 
 # ── v6 workbook — P6-12 certificate path is windowed, not a 2M-row pull ──────
 def test_p6_12_certificate_window_is_bounded():
-    from dpdpcms_py.services import governance
+    from tests.modmap import governance
 
     assert governance.WINDOWED_CHAIN_CHECK_ROWS < 2_000_000
-    assert "2_000_000" not in (REPO / "python_port" / "dpdpcms_py" / "services" / "governance.py").read_text(
-        encoding="utf-8"
-    ), "the 2M-row pull from certificate verification is gone"
+    package = REPO / "python_port" / "dpdpcms_py"
+    for successor in ("extensions/certificates/service.py", "modules/audit_logging/service.py"):
+        assert "2_000_000" not in (package / successor).read_text(encoding="utf-8"), (
+            "the 2M-row pull from certificate verification is gone"
+        )
 
 
 # ── v6 workbook — P6-13 rows_checked is consistently the in-scope total ──────
 def test_p6_13_rows_checked_means_in_scope_total(monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     rows = _make_chain_rows()
     # Rows owned A, B, NULL, A, B (newest-first) — scoped to A should report
@@ -1778,7 +1783,7 @@ def test_p5_07_notification_delivery_floor_trigger():
 
 # ── v6 workbook — P6-07 nominations honour valid_from/valid_until ────────────
 def test_p6_07_list_nominations_reports_effective_status(monkeypatch):
-    from dpdpcms_py.services import rights as rights_mod
+    from tests.modmap import rights as rights_mod
 
     rows = [
         {
@@ -1828,7 +1833,7 @@ def test_p7_03_revoked_nomination_stays_revoked(monkeypatch):
     """P7-03: a REVOKED nomination with a future valid_from must remain REVOKED
     (and be filterable as such) — the date derivation must not flip it back to
     PENDING."""
-    from dpdpcms_py.services import rights as rights_mod
+    from tests.modmap import rights as rights_mod
 
     rows = [
         {
@@ -1857,7 +1862,7 @@ def test_p7_03_revoked_nomination_stays_revoked(monkeypatch):
 
 
 def test_p6_07_expire_nominations_sweep(monkeypatch):
-    from dpdpcms_py import jobs
+    from tests.modmap import jobs
 
     captured = []
     monkeypatch.setattr(jobs.db, "execute", lambda sql, params=(): captured.append(sql) or 1)
@@ -1868,7 +1873,7 @@ def test_p6_07_expire_nominations_sweep(monkeypatch):
 
 # ── v6 workbook — GR-07 category routing auto-assigns to the fiduciary DPO ───
 def test_gr_07_submit_grievance_routes_to_dpo(monkeypatch):
-    from dpdpcms_py.services import compliance as compliance_mod
+    from tests.modmap import compliance as compliance_mod
 
     dpo_row = {"id": "dpo-1"}
     executed = []
@@ -1967,7 +1972,7 @@ def test_pl_03_deidentify_is_scoped_by_user_id(monkeypatch):
 
 # ── v7 workbook — P7-02 an unexamined tenant must NOT read "intact" ───────────
 def test_p7_02_unexamined_tenant_reports_not_intact(monkeypatch):
-    from dpdpcms_py import audit
+    from dpdpcms_py.modules.audit_logging import ledger as audit
 
     # The window is the newest rows across ALL tenants; scamper to a tenant whose
     # rows fall outside it: in-scope total 0 must read unexamined, not intact.
@@ -1980,10 +1985,10 @@ def test_p7_02_unexamined_tenant_reports_not_intact(monkeypatch):
 
 
 def test_p7_02_certificate_refuses_unexamined_tenant(monkeypatch):
-    from dpdpcms_py.services import governance as gov_mod
+    from tests.modmap import governance as gov_mod
 
     data = {"principal_id": "u", "fiduciary_id": FID, "timestamp": "2026-01-01T00:00:00+00:00"}
-    from dpdpcms_py.audit import certificate_signature
+    from dpdpcms_py.modules.audit_logging.ledger import certificate_signature
 
     data["signature"] = certificate_signature(data)
     monkeypatch.setattr(gov_mod.db, "one", lambda sql, params=(): {"certificate_data": data, "fiduciary_id": FID})
@@ -2006,7 +2011,7 @@ def test_p7_02_certificate_refuses_unexamined_tenant(monkeypatch):
 
 
 def test_p7_02_generate_certificate_refuses_unexamined_tenant(monkeypatch):
-    from dpdpcms_py.services import governance as gov_mod
+    from tests.modmap import governance as gov_mod
 
     monkeypatch.setattr(gov_mod.db, "all", lambda sql, params=(): [])  # no credit trail
     monkeypatch.setattr(
@@ -2042,7 +2047,7 @@ def test_p7_04_floor_covers_truncate_and_webhooks():
 
 # ── v7 workbook — P7-05 routing notifies the DPO and keeps NEW observable ─────
 def test_p7_05_submit_grievance_notifies_dpo_and_stays_new(monkeypatch):
-    from dpdpcms_py.services import compliance as compliance_mod
+    from tests.modmap import compliance as compliance_mod
 
     dpo_row = {"id": "dpo-1"}
     executed = []
@@ -2078,7 +2083,7 @@ def test_p7_05_submit_grievance_notifies_dpo_and_stays_new(monkeypatch):
 
 # ── v7 workbook — P7-06 purpose_states carries a real day count + OPEN/CLOSED ─
 def test_p7_06_purpose_states_retention_days_from_policy(monkeypatch):
-    from dpdpcms_py.services import consent as consent_mod
+    from tests.modmap import consent as consent_mod
 
     def fake_one(sql, params=()):
         if "FROM consent_records" in sql:
@@ -2108,7 +2113,7 @@ def test_p7_06_purpose_states_retention_days_from_policy(monkeypatch):
     # P7-06: the retention day count comes from the governing policy/ROPA.
     # P8-07: resolved in one batch through services.retention, not per purpose
     # via the jobs module.
-    from dpdpcms_py.services import retention as retention_mod
+    from dpdpcms_py.modules.administration import retention as retention_mod
 
     monkeypatch.setattr(
         retention_mod, "retention_for_purposes", lambda fid, purposes: {p: (365, None) for p in purposes}
@@ -2187,7 +2192,7 @@ def test_routing_remove_needs_a_real_boolean(monkeypatch):
 def test_legacy_certificate_without_truncation_marker_still_verifies(monkeypatch):
     """Certificates issued before `trail_truncated` existed must not fail the
     below-anchor completeness check."""
-    from dpdpcms_py.audit import certificate_signature
+    from dpdpcms_py.modules.audit_logging.ledger import certificate_signature
 
     data = {
         "principal_id": "u",

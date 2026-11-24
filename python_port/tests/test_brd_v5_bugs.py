@@ -13,10 +13,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from dpdpcms_py import audit, webhooks
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services import consent, governance, retention, roles
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.modules.administration import retention, roles
+from dpdpcms_py.modules.audit_logging import ledger as audit
+from dpdpcms_py.modules.notifications import webhooks
+from tests.modmap import consent, governance
 
 FID = "11111111-1111-1111-1111-111111111111"
 REPO = Path(__file__).resolve().parents[2]
@@ -266,7 +268,7 @@ def test_chain_verification_scopes_to_the_callers_tenant(monkeypatch):
     reads other tenants' row ids."""
     assert roles.required_permission("audit", "verify_audit_chain") == "audit:read"
     seen = {}
-    from dpdpcms_py.services import governance as gov_mod
+    from tests.modmap import governance as gov_mod
 
     def fake_verify(limit, fiduciary_id=None):
         seen["limit"] = limit
@@ -314,7 +316,7 @@ def test_mark_notification_read_accepts_id(monkeypatch, field):
 
 
 def test_mark_notification_read_schema_accepts_either_field():
-    from dpdpcms_py import validators
+    from dpdpcms_py.kernel import validators
 
     assert validators.validate_payload({"_func": "mark_notification_read", "id": "n-1"}) == []
     assert validators.validate_payload({"_func": "mark_notification_read", "notification_id": "n-1"}) == []

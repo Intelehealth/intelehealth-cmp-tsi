@@ -21,12 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import main as app_main
-from .config import VALIDATOR_ROOT
-from .services import SERVICE_REGISTRY
-from .services.base import Service
-from .services.consent import WALLET_ACTIONS
-from .services.roles import MFA_EXEMPT_FUNCS, required_permission
+from dpdpcms_py import main as app_main
+from dpdpcms_py.kernel.config import VALIDATOR_ROOT
+from dpdpcms_py.kernel.service import Service
+from dpdpcms_py.modules.administration.roles import MFA_EXEMPT_FUNCS, required_permission
+from dpdpcms_py.modules.consent_lifecycle.wallet import WALLET_ACTIONS
+from dpdpcms_py.registry import SERVICE_REGISTRY
 
 CREATED_PREFIXES = ("create_", "generate_", "record_", "report_", "submit_")
 

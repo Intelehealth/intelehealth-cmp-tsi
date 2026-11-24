@@ -7,10 +7,12 @@ credential checks are monkeypatched, so no database is needed.
 """
 
 import pytest
-from dpdpcms_py import main, validators
-from dpdpcms_py.security import principal_token
-from dpdpcms_py.services import consent, roles
+from dpdpcms_py import main
+from dpdpcms_py.kernel import validators
+from dpdpcms_py.kernel.security import principal_token
+from dpdpcms_py.modules.administration import roles
 from fastapi.testclient import TestClient
+from tests.modmap import consent
 
 FID = "11111111-1111-1111-1111-111111111111"
 USER = "principal-42"
@@ -24,7 +26,7 @@ def client():
 @pytest.fixture
 def ran(monkeypatch):
     """Record which ConsentService / PolicyService function a request reached."""
-    from dpdpcms_py.services import catalog
+    from tests.modmap import catalog
 
     calls = []
 
@@ -105,7 +107,7 @@ def test_unknown_function_fails_closed(func):
 def test_every_api_function_has_a_schema():
     import inspect
 
-    from dpdpcms_py.services import SERVICE_REGISTRY
+    from dpdpcms_py.registry import SERVICE_REGISTRY
 
     missing = sorted(
         name

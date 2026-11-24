@@ -6,10 +6,11 @@ Pure logic only; database paths are covered by the end-to-end run against Postgr
 import re
 
 import pytest
-from dpdpcms_py import pdfgen
-from dpdpcms_py.context import RequestContext
-from dpdpcms_py.errors import ApiError
-from dpdpcms_py.services import compliance, consent, roles
+from dpdpcms_py.kernel import pdfgen
+from dpdpcms_py.kernel.context import RequestContext
+from dpdpcms_py.kernel.errors import ApiError
+from dpdpcms_py.modules.administration import roles
+from tests.modmap import compliance, consent
 
 FID = "11111111-1111-1111-1111-111111111111"
 
