@@ -298,6 +298,44 @@ def test_build_is_deterministic():
     assert first == json.dumps(gen.build_spec("internal"), sort_keys=True)
 
 
+# ── BRD modules ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("audience", ["public", "internal"])
+def test_every_operation_names_the_module_that_owns_its_service(audience):
+    from dpdpcms_py.registry import SERVICE_MODULE
+
+    for path, item in gen.build_spec(audience)["paths"].items():
+        service = path.split("/")[4]
+        for method, op in item.items():
+            if method in HTTP:
+                assert op["x-module"] == SERVICE_MODULE[service], path
+
+
+def test_internal_spec_lists_modules_in_brd_order_then_extensions():
+    from dpdpcms_py.registry import BRD_MODULES, EXTENSIONS
+
+    listed = gen.build_spec("internal")["x-modules"]
+    built = [m for m in BRD_MODULES if m.services]
+    assert [m["name"] for m in listed] == [m.name for m in built] + [m.name for m in EXTENSIONS]
+    assert [m["kind"] for m in listed] == ["module"] * len(built) + ["extension"] * len(EXTENSIONS)
+    assert [m["title"] for m in listed] == [m.title for m in built] + [m.title for m in EXTENSIONS]
+
+
+@pytest.mark.parametrize("audience", ["public", "internal"])
+def test_listed_modules_cover_each_documented_service_once(audience):
+    spec = gen.build_spec(audience)
+    services = [service for module in spec["x-modules"] for service in module["services"]]
+    assert sorted(services) == [tag["name"] for tag in spec["tags"]]
+    assert all(module["services"] for module in spec["x-modules"])
+
+
+def test_a_module_with_no_functions_is_not_listed():
+    # Cookie Consent is a manifest only (DPO decision DD-04): nothing to call.
+    for audience in ("public", "internal"):
+        assert "cookie_consent" not in [m["name"] for m in gen.build_spec(audience)["x-modules"]]
+
+
 # ── committed files ─────────────────────────────────────────────────────────
 
 

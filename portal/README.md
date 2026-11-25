@@ -52,7 +52,9 @@ The site's address comes from two environment variables read by `docusaurus.conf
 
 ## Notes
 
-- `scripts/prepare-specs.mjs` makes portal copies of the specs (in `.specs/`) with presentation-only changes: a placeholder server URL, tags grouped by API category, and "(GET)" on the GET variant of a read. The files in `docs/api/` are not modified.
+- `scripts/prepare-specs.mjs` makes portal copies of the specs (in `.specs/`) with presentation-only changes: a placeholder server URL, and tags grouped by BRD module. The files in `docs/api/` are not modified.
+- Both API references are arranged by BRD module, in the BRD's order: the module, then each of its services split by API category (`consent / admin`, `consent / client`). What the BRD does not name (breach, ROPA, certificates, reports) is under "Extensions (not in the BRD)". The modules and their titles come from `x-modules` in the spec files, which the generator reads from each package's `manifest.py`; `scripts/group-by-module.mjs` does the grouping and `npm test` checks it. A module with no functions (Cookie Consent) has no entry.
+- The use-case guides sit under the same module titles. `sidebars.ts` maps each guide to its module; add a new guide there.
 - `future.faster` in `docusaurus.config.ts` is required: the OpenAPI plugin and theme (5.x) do not bundle correctly under the default webpack/Babel toolchain.
 - The request console on each API page targets the placeholder host. It can only reach a real CMS whose CORS allow-list includes the portal's origin.
 - The portal is a static site, separate from the CMS application. It does not change what a CMS deployment serves.

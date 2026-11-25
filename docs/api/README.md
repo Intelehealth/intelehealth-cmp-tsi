@@ -27,6 +27,7 @@ Regenerate after adding, removing or renaming a service function, changing a val
 - One operation per function: `POST /api/v1/{category}/{service}/{func}`, plus `GET` where the function is a read.
 - Request bodies are the validator schemas the server enforces at runtime, converted to the OpenAPI 3.0 subset. A conditional rule (`if`/`then`) cannot be expressed in OpenAPI 3.0; it is kept as text under `x-conditional-rule` and is still enforced by the server.
 - The credential each operation accepts, and under `x-required-scope` / `x-required-permission` the API key scope or role permission it needs.
+- The BRD module each operation belongs to, under `x-module`. `x-modules` at the top lists the modules that have operations in the document (name, BRD title, the services each owns), BRD modules first and in the BRD's order, then the extensions. Both come from the packages' `manifest.py`. Tags are still the service names.
 - One shared error body for every error status.
 - Descriptions come from the code's docstrings. A function without one has no description.
 

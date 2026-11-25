@@ -26,7 +26,7 @@ from dpdpcms_py.kernel.config import VALIDATOR_ROOT
 from dpdpcms_py.kernel.service import Service
 from dpdpcms_py.modules.administration.roles import MFA_EXEMPT_FUNCS, required_permission
 from dpdpcms_py.modules.consent_lifecycle.wallet import WALLET_ACTIONS
-from dpdpcms_py.registry import SERVICE_REGISTRY
+from dpdpcms_py.registry import BRD_MODULES, MODULES, SERVICE_MODULE, SERVICE_REGISTRY
 
 CREATED_PREFIXES = ("create_", "generate_", "record_", "report_", "submit_")
 
@@ -378,6 +378,7 @@ def _path_item(op: Operation, audience: str) -> dict:
         operation: dict[str, Any] = {
             "operationId": f"{op.category}_{op.service}_{op.func}" + ("_get" if method == "get" else ""),
             "tags": [op.service],
+            "x-module": SERVICE_MODULE[op.service],
             "summary": op.func,
             "security": _security(op),
             "responses": responses,
@@ -441,6 +442,24 @@ _INTRO_INTERNAL = (
 )
 
 
+def _modules(services: set[str]) -> list[dict]:
+    """The modules that own `services`, BRD modules first and in the BRD's order.
+
+    A reader of the reference looks a function up by the BRD module it belongs
+    to. A module with nothing to call (Cookie Consent) is not listed.
+    """
+    return [
+        {
+            "name": module.name,
+            "title": module.title,
+            "kind": "module" if module in BRD_MODULES else "extension",
+            "services": sorted(services & set(module.services)),
+        }
+        for module in MODULES
+        if services & set(module.services)
+    ]
+
+
 def build_spec(audience: str) -> dict:
     """The OpenAPI 3.0.3 document for `audience` ("public" or "internal")."""
     categories = AUDIENCE_CATEGORIES[audience]
@@ -456,6 +475,7 @@ def build_spec(audience: str) -> dict:
             "description": _INTRO_COMMON + (_INTRO_INTERNAL if audience == "internal" else ""),
         },
         "tags": [{"name": service} for service in sorted({op.service for op in ops})],
+        "x-modules": _modules({op.service for op in ops}),
         "paths": {f"/api/v1/{op.category}/{op.service}/{op.func}": _path_item(op, audience) for op in ops},
         "components": {
             "securitySchemes": {name: SECURITY_SCHEMES[name] for name in sorted(used)},

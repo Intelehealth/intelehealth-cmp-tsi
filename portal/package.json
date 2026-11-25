@@ -4,6 +4,7 @@
   "private": true,
   "description": "Developer portal for the TSI DPDP CMS API (Docusaurus). API pages are generated from ../docs/api/*.json.",
   "scripts": {
+    "test": "node --test scripts/group-by-module.test.mjs",
     "gen": "node scripts/prepare-specs.mjs && docusaurus clean-api-docs all && docusaurus gen-api-docs all",
     "start": "npm run gen && docusaurus start",
     "build": "npm run gen && docusaurus build",
